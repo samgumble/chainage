@@ -140,3 +140,79 @@ describe('buildRoadMesh', () => {
     }
   })
 })
+
+describe('buildRoadMesh extent', () => {
+  it('builds the whole alignment when no extent is given', () => {
+    const withOut = buildRoadMesh(road(200), level(200, 50), rural, undefined, { spacing: 50 })
+    const whole = buildRoadMesh(road(200), level(200, 50), rural, undefined, { spacing: 50 },
+      { from: 0, to: 200 })
+    expect(whole.layers[0]!.mesh.vertexCount).toBe(withOut.layers[0]!.mesh.vertexCount)
+  })
+
+  it('starts the road at the extent start, not the alignment start', () => {
+    const m = buildRoadMesh(road(200), level(200, 50), rural, undefined, { spacing: 100 },
+      { from: 40, to: 200 })
+    // First crown vertex x is the extent start, not 0.
+    const wearing = m.layers.find((l) => l.name === 'wearing')!.mesh
+    let smallestX = Infinity
+    for (let i = 0; i < wearing.vertexCount; i++) {
+      smallestX = Math.min(smallestX, wearing.positions[i * 3]!)
+    }
+    expect(smallestX).toBeCloseTo(40, 4)
+  })
+
+  it('ends the road at the extent end', () => {
+    const m = buildRoadMesh(road(200), level(200, 50), rural, undefined, { spacing: 100 },
+      { from: 0, to: 160 })
+    const wearing = m.layers.find((l) => l.name === 'wearing')!.mesh
+    let largestX = -Infinity
+    for (let i = 0; i < wearing.vertexCount; i++) {
+      largestX = Math.max(largestX, wearing.positions[i * 3]!)
+    }
+    expect(largestX).toBeCloseTo(160, 4)
+  })
+
+  it('clamps a construction station into the extent', () => {
+    // Station 500 is past the extent end; the layer must stop at 160, not 500.
+    const m = buildRoadMesh(road(200), level(200, 50), rural,
+      { subgrade: 500, base: 500, wearing: 500 }, { spacing: 100 }, { from: 0, to: 160 })
+    const wearing = m.layers.find((l) => l.name === 'wearing')!.mesh
+    let largestX = -Infinity
+    for (let i = 0; i < wearing.vertexCount; i++) {
+      largestX = Math.max(largestX, wearing.positions[i * 3]!)
+    }
+    expect(largestX).toBeCloseTo(160, 4)
+  })
+
+  it('treats a construction station before the extent start as nothing built', () => {
+    const m = buildRoadMesh(road(200), level(200, 50), rural,
+      { subgrade: 20 }, { spacing: 50 }, { from: 40, to: 200 })
+    expect(m.layers.find((l) => l.name === 'subgrade')!.mesh.vertexCount).toBe(0)
+  })
+
+  it('trims both ends at once', () => {
+    const m = buildRoadMesh(road(200), level(200, 50), rural, undefined, { spacing: 20 },
+      { from: 30, to: 170 })
+    const wearing = m.layers.find((l) => l.name === 'wearing')!.mesh
+    let smallestX = Infinity
+    let largestX = -Infinity
+    for (let i = 0; i < wearing.vertexCount; i++) {
+      const x = wearing.positions[i * 3]!
+      smallestX = Math.min(smallestX, x)
+      largestX = Math.max(largestX, x)
+    }
+    expect(smallestX).toBeCloseTo(30, 4)
+    expect(largestX).toBeCloseTo(170, 4)
+  })
+
+  it('rejects an inverted extent', () => {
+    expect(() => buildRoadMesh(road(200), level(200, 50), rural, undefined, {},
+      { from: 150, to: 50 })).toThrow(RangeError)
+  })
+
+  it('returns an empty mesh for a zero-length extent', () => {
+    const m = buildRoadMesh(road(200), level(200, 50), rural, undefined, {},
+      { from: 80, to: 80 })
+    for (const layer of m.layers) expect(layer.mesh.vertexCount).toBe(0)
+  })
+})
