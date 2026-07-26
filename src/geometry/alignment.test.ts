@@ -70,3 +70,65 @@ describe('Alignment', () => {
     expect(() => a.sample(-1)).toThrow(RangeError)
   })
 })
+
+describe('Alignment station reporting', () => {
+  it('reports the alignment-wide station, not the primitive-local one', () => {
+    const a = new Alignment([
+      new Line(vec2(0, 0), 0, 50),
+      new Line(vec2(50, 0), 0, 50),
+    ])
+    // 70 is 20m into the second primitive; the alignment must still say 70.
+    expect(a.poseAt(70).s).toBeCloseTo(70, 9)
+    expect(a.poseAt(0).s).toBeCloseTo(0, 9)
+    expect(a.poseAt(100).s).toBeCloseTo(100, 9)
+  })
+
+  it('reports the clamped station', () => {
+    const a = new Alignment([new Line(vec2(0, 0), 0, 50)])
+    expect(a.poseAt(999).s).toBeCloseTo(50, 9)
+    expect(a.poseAt(-10).s).toBeCloseTo(0, 9)
+  })
+
+  it('carries the station through sample()', () => {
+    const a = new Alignment([new Line(vec2(0, 0), 0, 100)])
+    const poses = a.sample(25)
+    expect(poses.map((p) => p.s)).toEqual([0, 25, 50, 75, 100])
+  })
+})
+
+describe('Alignment.primitiveAt', () => {
+  const twoLines = () => new Alignment([
+    new Line(vec2(0, 0), 0, 50),
+    new Line(vec2(50, 0), 0, 30),
+  ])
+
+  it('identifies the owning primitive and the local station', () => {
+    const a = twoLines()
+    expect(a.primitiveAt(20)).toEqual({ index: 0, localS: 20 })
+    expect(a.primitiveAt(60)).toEqual({ index: 1, localS: 10 })
+  })
+
+  it('assigns a boundary station to the later primitive', () => {
+    const a = twoLines()
+    expect(a.primitiveAt(50)).toEqual({ index: 1, localS: 0 })
+  })
+
+  it('clamps beyond either end', () => {
+    const a = twoLines()
+    expect(a.primitiveAt(-5)).toEqual({ index: 0, localS: 0 })
+    expect(a.primitiveAt(999)).toEqual({ index: 1, localS: 30 })
+  })
+
+  it('agrees with poseAt', () => {
+    const a = twoLines()
+    const { index, localS } = a.primitiveAt(65)
+    const direct = a.poseAt(65)
+    const viaPrimitive = a.primitives[index]!.poseAt(localS)
+    expect(viaPrimitive.position.x).toBeCloseTo(direct.position.x, 9)
+    expect(viaPrimitive.position.y).toBeCloseTo(direct.position.y, 9)
+  })
+
+  it('throws on an empty alignment', () => {
+    expect(() => new Alignment([]).primitiveAt(0)).toThrow(RangeError)
+  })
+})

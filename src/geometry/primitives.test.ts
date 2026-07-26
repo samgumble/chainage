@@ -76,3 +76,23 @@ describe('Arc', () => {
     expect(after.position.y).toBeCloseTo(end.position.y, 9)
   })
 })
+
+describe('Pose station', () => {
+  it('reports the local station on a Line', () => {
+    const line = new Line(vec2(10, 20), 0, 100)
+    expect(line.poseAt(0).s).toBeCloseTo(0, 9)
+    expect(line.poseAt(42).s).toBeCloseTo(42, 9)
+    expect(line.poseAt(100).s).toBeCloseTo(100, 9)
+  })
+
+  it('reports the clamped station, not the requested one', () => {
+    const line = new Line(vec2(0, 0), 0, 10)
+    expect(line.poseAt(999).s).toBeCloseTo(10, 9)
+    expect(line.poseAt(-5).s).toBeCloseTo(0, 9)
+  })
+
+  it('reports the local station on an Arc', () => {
+    const arc = new Arc(vec2(0, 0), 0, 100, 1 / 200)
+    expect(arc.poseAt(30).s).toBeCloseTo(30, 9)
+  })
+})

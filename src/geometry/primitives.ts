@@ -1,6 +1,17 @@
 import { type Vec2, normalizeAngle } from './vec2'
 
 export type Pose = {
+  /**
+   * Distance along whoever produced this pose.
+   *
+   * A `Primitive` reports its own local station, so `line.poseAt(10).s` is 10.
+   * An `Alignment` reports the alignment-wide station, so a pose 20m into the
+   * third primitive reports its total distance from the alignment start, not
+   * 20. Use `Alignment.primitiveAt` when you need both.
+   *
+   * Always the CLAMPED station, never the requested one.
+   */
+  readonly s: number
   readonly position: Vec2
   readonly heading: number
   readonly curvature: number
@@ -26,6 +37,7 @@ export class Line implements Primitive {
   poseAt(s: number): Pose {
     const t = clamp(s, this.length)
     return {
+      s: t,
       position: {
         x: this.start.x + t * Math.cos(this.heading),
         y: this.start.y + t * Math.sin(this.heading),
@@ -62,6 +74,7 @@ export class Arc implements Primitive {
     const h0 = this.heading
     const h = h0 + k * t
     return {
+      s: t,
       position: {
         x: this.start.x + (Math.sin(h) - Math.sin(h0)) / k,
         y: this.start.y - (Math.cos(h) - Math.cos(h0)) / k,

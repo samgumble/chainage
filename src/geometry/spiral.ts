@@ -77,6 +77,7 @@ export class Spiral implements Primitive {
 
     const factor = h / 3
     return {
+      s: t,
       position: {
         x: this.start.x + factor * sumX,
         y: this.start.y + factor * sumY,

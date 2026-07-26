@@ -26,13 +26,15 @@ export class Alignment {
     return this.primitives.length === 0
   }
 
-  poseAt(s: number): Pose {
+  /** Which primitive owns a station, and how far into it. */
+  primitiveAt(s: number): { readonly index: number; readonly localS: number } {
     if (this.isEmpty) {
-      throw new RangeError('Cannot evaluate an empty alignment')
+      throw new RangeError('cannot locate a station on an empty alignment')
     }
     const t = clamp(s, this.length)
 
-    // Find the last primitive whose start is <= t.
+    // Last primitive whose start is at or below t. Ties go to the later one,
+    // matching poseAt's existing convention.
     let index = 0
     for (let i = this.primitives.length - 1; i >= 0; i--) {
       if (t >= this.starts[i]!) {
@@ -40,9 +42,14 @@ export class Alignment {
         break
       }
     }
+    return { index, localS: t - this.starts[index]! }
+  }
 
-    const primitive = this.primitives[index]!
-    return primitive.poseAt(t - this.starts[index]!)
+  poseAt(s: number): Pose {
+    const { index, localS } = this.primitiveAt(s)
+    const pose = this.primitives[index]!.poseAt(localS)
+    // The primitive reported its local station; the alignment reports its own.
+    return { ...pose, s: this.starts[index]! + pose.s }
   }
 
   /** Poses every `spacing` metres, always including s=0 and s=length. */
