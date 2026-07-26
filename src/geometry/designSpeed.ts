@@ -83,6 +83,9 @@ export const designSpeedForRadius = (
   if (radiusMetres <= 0) {
     throw new RangeError('radius must be positive')
   }
+  if (!Number.isFinite(superelevation) || superelevation < 0) {
+    throw new RangeError('superelevation must be a non-negative finite number')
+  }
 
   let speed = 60 // seed
   for (let i = 0; i < SOLVE_ITERATIONS; i++) {
@@ -108,6 +111,9 @@ export const minimumRadiusForSpeed = (
 ): number => {
   if (speedKph <= 0) {
     throw new RangeError('speed must be positive')
+  }
+  if (!Number.isFinite(superelevation) || superelevation < 0) {
+    throw new RangeError('superelevation must be a non-negative finite number')
   }
   const f = sideFrictionFactor(speedKph)
   return (speedKph * speedKph) / (127 * (superelevation + f))

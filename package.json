@@ -1,8 +1,6 @@
 {
   "name": "carpet-game",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
   "directories": {
     "doc": "docs"
   },
@@ -15,7 +13,6 @@
     "test": "vitest run",
     "test:watch": "vitest"
   },
-  "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {

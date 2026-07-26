@@ -84,6 +84,24 @@ describe('Spiral curvature transition', () => {
     expect(spiral.poseAt(999).position.x).toBeCloseTo(spiral.poseAt(50).position.x, 9)
     expect(spiral.poseAt(-5).position.x).toBeCloseTo(0, 9)
   })
+
+  it('clamps s identically across poseAt, curvatureAt, and headingAt', () => {
+    const spiral = new Spiral(vec2(1, 2), 0.3, 50, -1 / 80, 1 / 100)
+
+    // Beyond the end.
+    const pastEnd = spiral.poseAt(999)
+    expect(spiral.curvatureAt(999)).toBeCloseTo(pastEnd.curvature, 9)
+    expect(spiral.headingAt(999)).toBeCloseTo(pastEnd.heading, 9)
+    expect(spiral.curvatureAt(50)).toBeCloseTo(spiral.curvatureAt(999), 9)
+    expect(spiral.headingAt(50)).toBeCloseTo(spiral.headingAt(999), 9)
+
+    // Before the start.
+    const beforeStart = spiral.poseAt(-5)
+    expect(spiral.curvatureAt(-5)).toBeCloseTo(beforeStart.curvature, 9)
+    expect(spiral.headingAt(-5)).toBeCloseTo(beforeStart.heading, 9)
+    expect(spiral.curvatureAt(0)).toBeCloseTo(spiral.curvatureAt(-5), 9)
+    expect(spiral.headingAt(0)).toBeCloseTo(spiral.headingAt(-5), 9)
+  })
 })
 
 describe('Spiral with non-zero curvature rate', () => {

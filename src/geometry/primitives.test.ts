@@ -63,4 +63,16 @@ describe('Arc', () => {
   it('rejects zero curvature', () => {
     expect(() => new Arc(vec2(0, 0), 0, 10, 0)).toThrow(RangeError)
   })
+
+  it('clamps s to its length', () => {
+    const arc = new Arc(vec2(0, 0), 0, 100, 1 / 100)
+    const start = arc.poseAt(0)
+    const end = arc.poseAt(arc.length)
+    const before = arc.poseAt(-5)
+    const after = arc.poseAt(arc.length + 999)
+    expect(before.position.x).toBeCloseTo(start.position.x, 9)
+    expect(before.position.y).toBeCloseTo(start.position.y, 9)
+    expect(after.position.x).toBeCloseTo(end.position.x, 9)
+    expect(after.position.y).toBeCloseTo(end.position.y, 9)
+  })
 })

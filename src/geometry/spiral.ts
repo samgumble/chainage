@@ -1,5 +1,5 @@
 import { type Vec2, normalizeAngle } from './vec2'
-import type { Pose, Primitive } from './primitives'
+import { clamp, type Pose, type Primitive } from './primitives'
 
 /** Integration steps per metre. 0.5 gives sub-millimetre error at road scale. */
 const STEPS_PER_METRE = 0.5
@@ -41,16 +41,18 @@ export class Spiral implements Primitive {
   }
 
   curvatureAt(s: number): number {
-    return this.startCurvature + this.curvatureRate * s
+    const t = clamp(s, this.length)
+    return this.startCurvature + this.curvatureRate * t
   }
 
   /** Closed form: the integral of curvature from 0 to s. */
   headingAt(s: number): number {
-    return this.heading + this.startCurvature * s + 0.5 * this.curvatureRate * s * s
+    const t = clamp(s, this.length)
+    return this.heading + this.startCurvature * t + 0.5 * this.curvatureRate * t * t
   }
 
   poseAt(s: number): Pose {
-    const t = s < 0 ? 0 : s > this.length ? this.length : s
+    const t = clamp(s, this.length)
 
     // Bound the total heading swept over [0, t]: for a rate that changes
     // sign this isn't the net turn, but (|k0| + |k(t)|)/2 * t safely bounds

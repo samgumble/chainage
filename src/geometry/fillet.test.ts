@@ -67,6 +67,11 @@ describe('filletCorner', () => {
     expect(() => filletCorner(vec2(0, 0), vec2(1, 0), vec2(0, 1), -5)).toThrow(RangeError)
   })
 
+  it('rejects a non-positive maxTangentDistance', () => {
+    expect(() => filletCorner(vec2(0, 0), vec2(1, 0), vec2(0, 1), 50, 0)).toThrow(RangeError)
+    expect(() => filletCorner(vec2(0, 0), vec2(1, 0), vec2(0, 1), 50, -1)).toThrow(RangeError)
+  })
+
   it('produces the same result for non-unit input vectors as their unit equivalents', () => {
     const unit = filletCorner(vec2(100, 0), vec2(1, 0), vec2(0, 1), 50)!
     const scaled = filletCorner(vec2(100, 0), vec2(5, 0), vec2(0, 3), 50)!
@@ -80,13 +85,15 @@ describe('filletCorner', () => {
   })
 
   it('is fully geometrically consistent at a 60 degree deflection', () => {
+    const dIn = vec2(1, 0)
     const dOut = vec2(Math.cos(Math.PI / 3), Math.sin(Math.PI / 3))
-    const f = filletCorner(vec2(0, 0), vec2(1, 0), dOut, 100)!
+    const f = filletCorner(vec2(0, 0), dIn, dOut, 100)!
     expect(f).not.toBeNull()
 
     const start = f.arc.poseAt(0)
     expect(start.position.x).toBeCloseTo(f.tangentIn.x, 9)
     expect(start.position.y).toBeCloseTo(f.tangentIn.y, 9)
+    expect(start.heading).toBeCloseTo(angleOf(dIn), 9)
 
     const end = f.arc.poseAt(f.arc.length)
     expect(end.position.x).toBeCloseTo(f.tangentOut.x, 9)

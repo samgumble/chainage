@@ -11,7 +11,8 @@ export interface Primitive {
   poseAt(s: number): Pose
 }
 
-const clamp = (s: number, length: number): number =>
+/** Clamp an arc-length parameter into the valid [0, length] range. */
+export const clamp = (s: number, length: number): number =>
   s < 0 ? 0 : s > length ? length : s
 
 /** A straight segment of constant heading and zero curvature. */

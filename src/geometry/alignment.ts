@@ -1,4 +1,4 @@
-import type { Pose, Primitive } from './primitives'
+import { clamp, type Pose, type Primitive } from './primitives'
 
 /**
  * An ordered chain of primitives forming one road centerline.
@@ -30,7 +30,7 @@ export class Alignment {
     if (this.isEmpty) {
       throw new RangeError('Cannot evaluate an empty alignment')
     }
-    const t = s < 0 ? 0 : s > this.length ? this.length : s
+    const t = clamp(s, this.length)
 
     // Find the last primitive whose start is <= t.
     let index = 0
@@ -53,8 +53,8 @@ export class Alignment {
     if (this.isEmpty) return []
 
     const poses: Pose[] = []
-    for (let s = 0; s < this.length; s += spacing) {
-      poses.push(this.poseAt(s))
+    for (let i = 0; i * spacing < this.length; i++) {
+      poses.push(this.poseAt(i * spacing))
     }
     poses.push(this.poseAt(this.length))
     return poses

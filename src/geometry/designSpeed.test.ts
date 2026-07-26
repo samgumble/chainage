@@ -68,6 +68,12 @@ describe('designSpeedForRadius', () => {
     // factor on design speed, so the result saturates at the table's cap.
     expect(designSpeedForRadius(5000)).toBe(MAX_TABULATED_SPEED_KPH)
   })
+
+  it('rejects a negative or non-finite superelevation', () => {
+    expect(() => designSpeedForRadius(200, -0.01)).toThrow(RangeError)
+    expect(() => designSpeedForRadius(200, NaN)).toThrow(RangeError)
+    expect(() => designSpeedForRadius(200, Infinity)).toThrow(RangeError)
+  })
 })
 
 describe('minimumRadiusForSpeed', () => {
@@ -99,5 +105,11 @@ describe('minimumRadiusForSpeed', () => {
 
   it('rejects a non-positive speed', () => {
     expect(() => minimumRadiusForSpeed(0)).toThrow(RangeError)
+  })
+
+  it('rejects a negative or non-finite superelevation', () => {
+    expect(() => minimumRadiusForSpeed(80, -0.01)).toThrow(RangeError)
+    expect(() => minimumRadiusForSpeed(80, NaN)).toThrow(RangeError)
+    expect(() => minimumRadiusForSpeed(80, Infinity)).toThrow(RangeError)
   })
 })
