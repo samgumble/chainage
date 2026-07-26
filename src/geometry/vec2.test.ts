@@ -38,6 +38,21 @@ describe('vec2 angles', () => {
     }
   })
 
+  it('pins fromAngle to absolute references', () => {
+    // Heading is counter-clockwise from +x
+    expect(fromAngle(0)).toEqual({ x: 1, y: 0 })
+    expect(fromAngle(Math.PI / 2).x).toBeCloseTo(0, 9)
+    expect(fromAngle(Math.PI / 2).y).toBeCloseTo(1, 9)
+    expect(fromAngle(Math.PI).x).toBeCloseTo(-1, 9)
+    expect(fromAngle(Math.PI).y).toBeCloseTo(0, 9)
+  })
+
+  it('pins angleOf to absolute references', () => {
+    expect(angleOf({ x: 1, y: 0 })).toBeCloseTo(0, 9)
+    expect(angleOf({ x: 0, y: 1 })).toBeCloseTo(Math.PI / 2, 9)
+    expect(angleOf({ x: -1, y: 0 })).toBeCloseTo(Math.PI, 9)
+  })
+
   it('normalizes angles into (-PI, PI]', () => {
     expect(normalizeAngle(0)).toBeCloseTo(0, 9)
     expect(normalizeAngle(Math.PI)).toBeCloseTo(Math.PI, 9)
@@ -52,5 +67,14 @@ describe('vec2 angles', () => {
     expect(signedAngleBetween(vec2(0, 1), vec2(1, 0))).toBeCloseTo(-Math.PI / 2, 9)
     expect(signedAngleBetween(vec2(1, 0), vec2(1, 0))).toBeCloseTo(0, 9)
     expect(Math.abs(signedAngleBetween(vec2(1, 0), vec2(-1, 0)))).toBeCloseTo(Math.PI, 9)
+  })
+
+  it('measures signed angle for off-axis vectors', () => {
+    // From 45° to 135° should give +π/2
+    const v45 = fromAngle(Math.PI / 4)
+    const v135 = fromAngle(3 * Math.PI / 4)
+    expect(signedAngleBetween(v45, v135)).toBeCloseTo(Math.PI / 2, 9)
+    // Reverse should give −π/2
+    expect(signedAngleBetween(v135, v45)).toBeCloseTo(-Math.PI / 2, 9)
   })
 })
