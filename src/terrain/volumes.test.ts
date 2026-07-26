@@ -19,6 +19,33 @@ const flatGround = (z: number) => Heightmap.flat(-500, -500, 50, 41, 41, z)
 /** A straight road along +x through the origin. */
 const road = (length: number) => new Alignment([new Line(vec2(0, 0), 0, length)])
 
+/**
+ * Ground that is flat at `base` on the downhill side (offset < 0, i.e. y < 0
+ * for a road running along +x) and climbs at `slopePerMetre` on the uphill
+ * side (offset >= 0). Grid is coarse but the surface is linear in y and
+ * constant in x, so bilinear sampling reproduces it exactly regardless of
+ * cell size.
+ *
+ * Extends to +-520m so it also covers sections that march all the way to
+ * MAX_SECTION_HALF_WIDTH (500m).
+ */
+const crossSlopedGround = (base: number, slopePerMetre: number): Heightmap => {
+  const originX = -520
+  const originY = -520
+  const cellSize = 10
+  const cols = 105 // (520 * 2) / 10 + 1
+  const rows = 105
+  const e = new Float32Array(cols * rows)
+  for (let row = 0; row < rows; row++) {
+    const y = originY + row * cellSize
+    const z = y >= 0 ? base + slopePerMetre * y : base
+    for (let col = 0; col < cols; col++) {
+      e[row * cols + col] = z
+    }
+  }
+  return new Heightmap(originX, originY, cellSize, cols, rows, e)
+}
+
 describe('crossSectionAreas', () => {
   it('is zero in both directions when the design sits on the ground', () => {
     const a = crossSectionAreas(road(100), flatGround(100), { s: 50, z: 100 }, template)
@@ -126,5 +153,59 @@ describe('computeEarthworks', () => {
     const q = computeEarthworks(road(100), flatGround(100), [{ s: 0, z: 98 }], template)
     expect(q.stations).toHaveLength(1)
     expect(q.cutVolume).toBe(0)
+  })
+})
+
+describe('daylighting on cross-sloped ground', () => {
+  it('reports more cut area than the same design over flat ground', () => {
+    // The old bound guessed a daylight distance from the centreline depth
+    // alone. Here the ground rises steadily away from the centreline
+    // (uphill on the +offset side), so the true daylight point lies well
+    // beyond that guess, and the flat comparison is exactly the case the old
+    // bound got right — proving the new number is bigger for the right
+    // reason, not by construction error.
+    const flat = crossSectionAreas(road(100), flatGround(100), { s: 50, z: 98 }, template)
+    const sloped = crossSectionAreas(road(100), crossSlopedGround(100, 0.3), { s: 50, z: 98 }, template)
+    expect(sloped.cutArea).toBeGreaterThan(flat.cutArea)
+  })
+
+  it('is not truncated for a moderate cross-slope that daylights within the cap', () => {
+    // Ground rises at 0.3 m per metre, batter climbs at 1/cutSlope = 0.5 m
+    // per metre, so the batter is still gaining on the ground and daylights
+    // at a finite, well-inside-the-cap distance (~22.5m from the offset
+    // formula: (formationHalfWidth + slope*depth) reasoning).
+    const a = crossSectionAreas(road(100), crossSlopedGround(100, 0.3), { s: 50, z: 98 }, template)
+    expect(a.truncated).toBe(false)
+  })
+
+  it('reports truncation when the cross-slope out-climbs the batter', () => {
+    // Ground rises at 0.6 m per metre; the cutSlope=2 batter only climbs at
+    // 1/2 = 0.5 m per metre, so it never catches natural ground — the
+    // degenerate case where daylighting never occurs. The section must be
+    // truncated at the safety cap, and computeEarthworks must surface that.
+    const steep = crossSlopedGround(100, 0.6)
+    const a = crossSectionAreas(road(100), steep, { s: 50, z: 98 }, template)
+    expect(a.truncated).toBe(true)
+
+    const design: ProfilePoint[] = [{ s: 0, z: 98 }, { s: 100, z: 98 }]
+    const q = computeEarthworks(road(100), steep, design, template)
+    expect(q.truncatedStations).toBeGreaterThan(0)
+  })
+
+  it('still matches the analytic trapezoid on flat ground after marching', () => {
+    // Same 28 m^2 figure as the original analytic test, re-asserted here to
+    // prove the outward-marching algorithm did not change the numerics for
+    // the case every other test fixture uses.
+    const a = crossSectionAreas(road(100), flatGround(100), { s: 50, z: 98 }, template)
+    expect(Math.abs(a.cutArea - 28) / 28).toBeLessThan(0.01)
+  })
+
+  it('throws RangeError for a non-positive transverseStep', () => {
+    expect(() =>
+      crossSectionAreas(road(100), flatGround(100), { s: 50, z: 98 }, template, 0),
+    ).toThrow(RangeError)
+    expect(() =>
+      crossSectionAreas(road(100), flatGround(100), { s: 50, z: 98 }, template, -0.5),
+    ).toThrow(RangeError)
   })
 })
