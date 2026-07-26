@@ -93,8 +93,9 @@ Keep the `dependencies` and `devDependencies` blocks npm generated. Ensure `"pri
 - [ ] **Step 5: Write `vite.config.ts`**
 
 ```ts
-/// <reference types="vitest" />
-import { defineConfig } from 'vite'
+// Import from 'vitest/config', not 'vite' — vitest 4's `test` key is not on
+// vite's own UserConfigExport type, so `tsc --noEmit` fails otherwise.
+import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
   base: '/chainage/',
