@@ -52,14 +52,20 @@ describe('generateValley', () => {
   })
 
   it('stays within the floor-to-ridge band plus roughness', () => {
-    const h = generateValley(opts())
+    const options = opts()
+    const h = generateValley(options)
+    // Roughness allowance: combined amplitude of noise octaves (14 + 5) with headroom
+    const roughnessAllowance = 30
+    const floor = options.floorElevation - roughnessAllowance
+    const ceiling = options.floorElevation + options.ridgeHeight + roughnessAllowance
     for (const z of h.elevations) {
-      expect(z).toBeGreaterThan(100 - 30)
-      expect(z).toBeLessThan(100 + 60 + 30)
+      expect(z).toBeGreaterThan(floor)
+      expect(z).toBeLessThan(ceiling)
     }
   })
 
   it('rejects a non-positive valley width', () => {
     expect(() => generateValley(opts({ valleyHalfWidth: 0 }))).toThrow(RangeError)
+    expect(() => generateValley(opts({ valleyHalfWidth: -100 }))).toThrow(RangeError)
   })
 })

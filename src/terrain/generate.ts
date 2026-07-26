@@ -71,6 +71,8 @@ const smoothstep = (edge0: number, edge1: number, x: number): number => {
 /** Deterministic hash to [-1, 1]. No Math.random anywhere. */
 const hash2 = (ix: number, iy: number, seed: number): number => {
   let h = ix * 374761393 + iy * 668265263 + seed * 1274126177
+  // Signed shift (>>) is intentional: empirically measures better chi-square
+  // distribution and fewer collisions than unsigned (>>>).
   h = (h ^ (h >> 13)) * 1274126177
   h = h ^ (h >> 16)
   return ((h & 0x7fffffff) / 0x7fffffff) * 2 - 1
