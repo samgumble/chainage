@@ -57,4 +57,30 @@ describe('sampleGroundProfile', () => {
     expect(() => sampleGroundProfile(straightAlongX(100), rampX(), 0)).toThrow(RangeError)
     expect(() => sampleGroundProfile(straightAlongX(100), rampX(), -5)).toThrow(RangeError)
   })
+
+  it('computes stations as exact multiples of spacing, not accumulated sums', () => {
+    // 0.1 is not exactly representable in binary floating point, so an
+    // accumulating (`s += spacing`) implementation would drift measurably
+    // over 1000 steps, while `i * spacing` stays exact to the ULP.
+    const steps = 1000
+    const spacing = 0.1
+    const length = steps * spacing
+    const p = sampleGroundProfile(straightAlongX(length), rampX(), spacing)
+
+    for (let i = 0; i <= steps; i++) {
+      expect(p[i]!.s).toBeCloseTo(i * spacing, 12)
+    }
+  })
+
+  it('does not produce a near-duplicate final station under floating-point drift', () => {
+    // alignment.length lands one ULP above an exact multiple of spacing (25),
+    // reproducing the drift that caused a ~1e-14 metre station gap.
+    const length = 100 + Number.EPSILON * 100
+    const p = sampleGroundProfile(straightAlongX(length), rampX(), 25)
+
+    for (let i = 1; i < p.length; i++) {
+      expect(p[i]!.s - p[i - 1]!.s).toBeGreaterThan(1e-6)
+    }
+    expect(p[p.length - 1]!.s).toBe(length)
+  })
 })

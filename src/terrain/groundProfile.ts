@@ -10,12 +10,26 @@ export type ProfilePoint = {
 }
 
 /**
+ * Minimum allowed gap between consecutive stations, in metres.
+ *
+ * `alignment.length` is a sum of primitive lengths and can land one ULP
+ * above an exact multiple of `spacing`. Without a guard, the stepped loop
+ * would then reach that multiple and the final-point check would append a
+ * second point a hair past it, producing a station gap of ~1e-14 metres
+ * that blows up the downstream grade calculation (which divides by the gap
+ * between stations). One micron is far below any meaningful road station
+ * and comfortably above floating-point noise at road-scale magnitudes.
+ */
+const MIN_STATION_GAP = 1e-6
+
+/**
  * Walk an alignment and record the ground beneath it.
  *
  * Stations are computed as `i * spacing` rather than accumulated, so they are
  * exact and cannot drift over a long alignment. The final station is always
- * the alignment's full length; if that coincides with the last stepped
- * station it is not duplicated.
+ * the alignment's full length; if that would land within `MIN_STATION_GAP`
+ * of the last stepped station, the last stepped point is replaced by it
+ * rather than appended as a near-duplicate.
  */
 export const sampleGroundProfile = (
   alignment: Alignment,
@@ -37,9 +51,17 @@ export const sampleGroundProfile = (
   }
 
   const last = points[points.length - 1]
-  if (!last || last.s < alignment.length) {
+  const finalPoint = (): ProfilePoint => {
     const p = alignment.poseAt(alignment.length).position
-    points.push({ s: alignment.length, z: terrain.sample(p.x, p.y) })
+    return { s: alignment.length, z: terrain.sample(p.x, p.y) }
+  }
+
+  if (!last) {
+    points.push(finalPoint())
+  } else if (alignment.length - last.s > MIN_STATION_GAP) {
+    points.push(finalPoint())
+  } else if (last.s !== alignment.length) {
+    points[points.length - 1] = finalPoint()
   }
 
   return points
