@@ -2280,7 +2280,8 @@ What the reviewer will check:
 - The design line stays visibly gentler than the ground wherever the ground is steep — that is the grade solver working.
 - Reported max grade is at or just under 7%, never above.
 - Cut bands appear where the design line runs *below* ground, fill bands where it runs *above*. Reversed colouring means the sign convention is inverted somewhere in the chain.
-- Cut and fill volumes are plausible for a road of this length — thousands to tens of thousands of cubic metres, not tens or millions.
+- Cut and fill volumes are plausible **per metre of road**, which is the figure that actually means something. Expect roughly 50–100 m³/m on this terrain: a 7% limit over rolling ground forces real earthworks. On the 2,214m route that is around 150,000 m³ of each. An absolute total tells you nothing without the length beside it.
+- Cut and fill come out close to balanced. That is not luck — it is what the grade solver's hug-the-ground selection produces, and it is what a designer aims for, since hauling surplus off site or importing material both cost money.
 - The design line does not float implausibly far from the ground; the cut and fill allowances should keep it within about 15m.
 
 ---
