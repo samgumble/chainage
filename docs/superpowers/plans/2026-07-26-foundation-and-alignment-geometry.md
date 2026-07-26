@@ -388,10 +388,21 @@ npm test -- src/geometry/vec2.test.ts
 
 Expected: PASS, 6 tests.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Delete the scaffold smoke test**
+
+It existed only to prove the test runner worked before any real code existed. Real tests now cover that, and a test asserting `1 + 1 === 2` is noise.
 
 ```bash
-git add src/geometry/vec2.ts src/geometry/vec2.test.ts
+rm src/smoke.test.ts
+npm test
+```
+
+Expected: PASS, 7 tests in 1 file.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add -A
 git commit -m "feat: add 2D vector and angle math"
 ```
 
@@ -1377,6 +1388,8 @@ git commit -m "feat: add AASHTO design speed and minimum radius"
 Proves the geometry library end to end by drawing a real alignment — straight, fillet, straight — on the live page, annotated with radius and design speed. This is the first thing that is actually *looked at*, and it will catch sign and handedness errors that unit tests pass right over.
 
 It draws to a 2D canvas, not three.js. The 3D renderer is a later plan; this exists to validate geometry, and a plan view is the honest way to read plan geometry.
+
+> **This file is deliberately untested, and that is an approved decision — not an oversight.** The geometry it exercises is already covered by 49 unit tests. What this file adds is precisely what unit tests cannot catch: sign errors, handedness errors, and a fillet that bulges the wrong side of a corner. Mocking a 2D canvas context and asserting on draw calls would verify that the code calls the functions it calls, which is coverage without value. Reviewers should not flag the absence of tests here.
 
 **Files:**
 - Create: `src/debug/alignmentPreview.ts`
