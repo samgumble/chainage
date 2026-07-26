@@ -21,16 +21,30 @@ const crossroads = () => {
 }
 
 describe('buildJunctionMesh', () => {
-  it('emits a centre vertex plus three per leg', () => {
+  it('collapses a square crossroads to its four corners', () => {
+    // Every leg's trimmed edge point coincides with the corner that set its
+    // trim, so the polygon is genuinely just the four corners plus the centre.
     const { legs, geometry } = crossroads()
     const m = buildJunctionMesh(vec2(0, 0), 50, legs, geometry)
-    expect(m.vertexCount).toBe(1 + 4 * 3)
+    expect(m.vertexCount).toBe(1 + 4)
   })
 
   it('emits one triangle per boundary edge', () => {
     const { legs, geometry } = crossroads()
     const m = buildJunctionMesh(vec2(0, 0), 50, legs, geometry)
-    expect(m.triangleCount).toBe(4 * 3)
+    expect(m.triangleCount).toBe(m.vertexCount - 1)
+  })
+
+  it('leaves no degenerate triangle in the fan', () => {
+    const { legs, geometry } = crossroads()
+    const m = buildJunctionMesh(vec2(0, 0), 50, legs, geometry)
+    for (let t = 0; t < m.indices.length; t += 3) {
+      const a = m.indices[t]!, b = m.indices[t + 1]!, c = m.indices[t + 2]!
+      const twiceArea =
+        (m.positions[b * 3]! - m.positions[a * 3]!) * (m.positions[c * 3 + 1]! - m.positions[a * 3 + 1]!) -
+        (m.positions[b * 3 + 1]! - m.positions[a * 3 + 1]!) * (m.positions[c * 3]! - m.positions[a * 3]!)
+      expect(Math.abs(twiceArea)).toBeGreaterThan(1e-6)
+    }
   })
 
   it('places the centre vertex at the node', () => {
@@ -105,18 +119,26 @@ describe('buildJunctionMesh', () => {
     expect(m.indices).toHaveLength(0)
   })
 
-  it('handles a three-leg junction', () => {
+  it('collapses a T junction to five boundary points', () => {
+    // Two arm ends plus the through road's straight outer side.
     const legs = legsAt([180, 90, -90])
     const geometry = solveJunction(legs)
     const m = buildJunctionMesh(vec2(0, 0), 50, legs, geometry)
-    expect(m.vertexCount).toBe(1 + 3 * 3)
-    expect(m.triangleCount).toBe(3 * 3)
+    expect(m.vertexCount).toBe(1 + 5)
+    expect(m.triangleCount).toBe(5)
   })
 
-  it('handles a five-leg junction', () => {
+  it('handles a five-leg junction without degenerate triangles', () => {
     const legs = legsAt([0, 72, 144, -144, -72])
     const geometry = solveJunction(legs)
     const m = buildJunctionMesh(vec2(0, 0), 50, legs, geometry)
-    expect(m.vertexCount).toBe(1 + 5 * 3)
+    expect(m.vertexCount).toBeGreaterThanOrEqual(1 + 5)
+    for (let t = 0; t < m.indices.length; t += 3) {
+      const a = m.indices[t]!, b = m.indices[t + 1]!, c = m.indices[t + 2]!
+      const twiceArea =
+        (m.positions[b * 3]! - m.positions[a * 3]!) * (m.positions[c * 3 + 1]! - m.positions[a * 3 + 1]!) -
+        (m.positions[b * 3 + 1]! - m.positions[a * 3 + 1]!) * (m.positions[c * 3]! - m.positions[a * 3]!)
+      expect(Math.abs(twiceArea)).toBeGreaterThan(1e-6)
+    }
   })
 })

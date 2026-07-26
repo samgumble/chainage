@@ -12,6 +12,28 @@ const EMPTY: MeshData = {
   triangleCount: 0,
 }
 
+/** Two boundary points closer than this are the same point. */
+const BOUNDARY_TOLERANCE = 1e-6
+
+/** Drop consecutive duplicates, including the wrap from last back to first. */
+const dedupeConsecutive = (points: readonly Vec2[]): Vec2[] => {
+  const kept: Vec2[] = []
+  for (const point of points) {
+    const previous = kept[kept.length - 1]
+    if (previous && Math.hypot(point.x - previous.x, point.y - previous.y) <= BOUNDARY_TOLERANCE) {
+      continue
+    }
+    kept.push(point)
+  }
+  const first = kept[0]
+  const last = kept[kept.length - 1]
+  if (kept.length > 1 && first && last &&
+      Math.hypot(last.x - first.x, last.y - first.y) <= BOUNDARY_TOLERANCE) {
+    kept.pop()
+  }
+  return kept
+}
+
 /**
  * The surface filling the gap that trimmed ribbons leave at a junction.
  *
@@ -33,7 +55,7 @@ export const buildJunctionMesh = (
   if (!geometry.feasible) return EMPTY
 
   const n = legs.length
-  const boundary: Vec2[] = []
+  const raw: Vec2[] = []
 
   for (let i = 0; i < n; i++) {
     const leg = legs[i]!
@@ -42,10 +64,18 @@ export const buildJunctionMesh = (
     const along = scale(leg.direction, trim)
 
     // Right edge first, then left, so the boundary runs counter-clockwise.
-    boundary.push(add(along, scale(left, -leg.halfWidth)))
-    boundary.push(add(along, scale(left, leg.halfWidth)))
-    boundary.push(geometry.corners[i]!.position)
+    raw.push(add(along, scale(left, -leg.halfWidth)))
+    raw.push(add(along, scale(left, leg.halfWidth)))
+    raw.push(geometry.corners[i]!.position)
   }
+
+  // A leg's trim is derived from its corners, so whenever a corner is the one
+  // that set the trim, that corner and the leg's trimmed edge point are the
+  // same point. On a square crossroads every one of them collapses and the
+  // polygon is genuinely just its four corners. Leaving the duplicates in
+  // produces zero-area triangles.
+  const boundary = dedupeConsecutive(raw)
+  if (boundary.length < 3) return EMPTY
 
   const vertexCount = 1 + boundary.length
   const triangleCount = boundary.length
