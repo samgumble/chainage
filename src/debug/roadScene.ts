@@ -5,11 +5,11 @@ import { filletCorner } from '../geometry/fillet'
 import { vec2, angleOf, sub, distance, fromAngle, type Vec2 } from '../geometry/vec2'
 import { generateValley } from '../terrain/generate'
 import type { Heightmap } from '../terrain/heightmap'
-import { sampleGroundProfile, type ProfilePoint } from '../terrain/groundProfile'
+import { sampleGroundProfile, designElevationAtStation, type ProfilePoint } from '../terrain/groundProfile'
 import { solveGradeProfile } from '../terrain/gradeSolver'
 import { TerrainEditLayer } from '../terrain/editLayer'
-import { designElevationAt, type CorridorTemplate } from '../terrain/corridor'
-import { ROAD_CLASSES } from '../mesh/roadClass'
+import { designSurfaceAtOffset, type CorridorTemplate } from '../terrain/corridor'
+import { ROAD_CLASSES, formationHalfWidth, totalPavementThickness } from '../mesh/roadClass'
 import { buildRoadMesh } from '../mesh/roadMesh'
 import { toBufferGeometry } from '../render/meshAdapter'
 import { terrainGeometry } from '../render/terrainMesh'
@@ -22,7 +22,7 @@ const MAX_FILL_HEIGHT = 10
 /** Earthworks cross-section used to carve the corridor into the terrain,
  * consistent with the road actually being drawn (see ROAD_CLASSES.rural). */
 const CORRIDOR_TEMPLATE: CorridorTemplate = {
-  formationHalfWidth: 5,
+  formationHalfWidth: formationHalfWidth(ROAD_CLASSES.rural),
   cutSlope: 2,
   fillSlope: 3,
 }
@@ -33,21 +33,18 @@ const EXCAVATION_STATION_SPACING = 5
  * never clipped by an undersized excavation footprint. */
 const EXCAVATION_MARGIN = 5
 /**
- * Extra depth carved below the corridor template's surface everywhere along
- * the corridor, metres.
+ * Extra depth carved below the subgrade's underside everywhere along the
+ * corridor, metres.
  *
- * The template's own surface is the design profile itself (top of the
- * finished road), but a "nearest grid node" excavation on a terrain grid
- * whose cell size is comparable to the formation width cannot land exactly
- * on that surface — bilinearly-sampled terrain a station or two away from an
- * excavated node still carries some of the untouched raw ground. Without
- * this margin that residual few tenths of a metre is enough for the (thin)
- * pavement layers to clip in and out of natural ground over and over along
- * the corridor. A couple of metres of headroom, invisible against terrain
- * relief that runs to tens of metres, is what actually makes the road read
- * as continuously above the dirt rather than flickering through it.
+ * Just enough to cover z-fighting and grid-resolution error at the pavement's
+ * bottom face — a "nearest grid node" excavation on a terrain grid whose cell
+ * size is comparable to the formation width cannot land exactly on that
+ * surface, so bilinearly-sampled terrain a station or two away from an
+ * excavated node still carries some of the untouched raw ground. This is not
+ * an earthworks allowance the way `EXCAVATION_MARGIN` is; it exists only so
+ * the terrain never pokes back through the bottom of the pavement stack.
  */
-const EXCAVATION_CLEARANCE = 2.5
+const EXCAVATION_ZFIGHT_MARGIN = 0.05
 
 /** Layer colours: warm earth, pale aggregate, dark asphalt — tuned for
  * contrast against each other and against the terrain so the three
@@ -81,30 +78,6 @@ const buildAlignment = (a: Vec2, corner: Vec2, b: Vec2): Alignment | null => {
 }
 
 /**
- * Design elevation at an arbitrary station, linearly interpolated between the
- * profile points bracketing it. `profile` is assumed sorted by station, which
- * both `sampleGroundProfile` and `solveGradeProfile` guarantee.
- */
-const designElevationAtStation = (s: number, profile: readonly ProfilePoint[]): number => {
-  const first = profile[0]
-  if (!first) return 0
-  if (s <= first.s) return first.z
-
-  const last = profile[profile.length - 1]!
-  if (s >= last.s) return last.z
-
-  for (let i = 1; i < profile.length; i++) {
-    const point = profile[i]!
-    if (s <= point.s) {
-      const previous = profile[i - 1]!
-      const t = (s - previous.s) / (point.s - previous.s)
-      return previous.z + (point.z - previous.z) * t
-    }
-  }
-  return last.z
-}
-
-/**
  * Cut and fill the terrain down to the design surface along the corridor.
  *
  * This is the piece that was missing: without it, the solved design line
@@ -128,6 +101,13 @@ const designElevationAtStation = (s: number, profile: readonly ProfilePoint[]): 
  * Grid nodes get written from multiple nearby stations/offsets; last write
  * wins, which is fine here since neighbouring stations along a gently curving
  * alignment agree closely on the design surface at a shared node.
+ *
+ * This excavation routine is a visual stand-in for the real earthworks
+ * pipeline and must not be promoted into `src/terrain/`. Nearest-node
+ * snapping with last-write-wins is fine for a debug view where "looks
+ * continuous from an orbiting camera" is the bar, but it is not fine for
+ * computing quantities — that needs the exact transverse integration in
+ * `src/terrain/volumes.ts`, not this grid-snapped approximation.
  */
 const excavateCorridor = (
   terrain: Heightmap,
@@ -142,13 +122,18 @@ const excavateCorridor = (
   const maxSlope = Math.max(template.cutSlope, template.fillSlope)
   const steps = Math.max(1, Math.ceil(alignment.length / EXCAVATION_STATION_SPACING))
 
+  // The design profile is the top of the finished road (top of the wearing
+  // course), not the terrain elevation the road should rest on. The terrain
+  // under the road is the subgrade's underside — the design elevation less
+  // the full pavement stack — plus a small margin against z-fighting. Using
+  // an arbitrary clearance instead of this would either bury the pavement in
+  // cut sections or leave it floating above the embankment in fill sections.
+  const pavementDepth = totalPavementThickness(ROAD_CLASSES.rural)
+
   for (let i = 0; i <= steps; i++) {
     const s = Math.min(i * EXCAVATION_STATION_SPACING, alignment.length)
     const pose = alignment.poseAt(s)
-    // Carve to just below the design surface (see EXCAVATION_CLEARANCE) so
-    // grid-resolution error can't leave the terrain poking back through the
-    // pavement it's meant to sit under.
-    const designZ = designElevationAtStation(s, profile) - EXCAVATION_CLEARANCE
+    const designZ = designElevationAtStation(profile, s) - pavementDepth - EXCAVATION_ZFIGHT_MARGIN
 
     const centreGroundZ = terrain.sample(pose.position.x, pose.position.y)
     const depth = Math.abs(centreGroundZ - designZ)
@@ -167,7 +152,7 @@ const excavateCorridor = (
       if (col < 0 || col >= terrain.cols || row < 0 || row >= terrain.rows) continue
 
       const groundZ = terrain.elevationAtIndex(col, row)
-      const targetZ = designElevationAt(offset, designZ, groundZ, template)
+      const targetZ = designSurfaceAtOffset(offset, designZ, groundZ, template)
       layer.setDelta(col, row, targetZ - groundZ)
     }
   }

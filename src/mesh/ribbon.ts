@@ -1,6 +1,6 @@
 import type { Alignment } from '../geometry/alignment'
 import { fromAngle, add, scale } from '../geometry/vec2'
-import type { ProfilePoint } from '../terrain/groundProfile'
+import { designElevationAtStation, type ProfilePoint } from '../terrain/groundProfile'
 import type { SectionPoint } from './crossSection'
 
 /**
@@ -53,26 +53,6 @@ const EMPTY: MeshData = {
   indices: new Uint32Array(0),
   vertexCount: 0,
   triangleCount: 0,
-}
-
-/** Linear interpolation of a design profile at an arbitrary station. */
-const designElevationAt = (design: readonly ProfilePoint[], s: number): number => {
-  if (design.length === 0) return 0
-  const first = design[0]!
-  const last = design[design.length - 1]!
-  if (s <= first.s) return first.z
-  if (s >= last.s) return last.z
-
-  for (let i = 1; i < design.length; i++) {
-    const a = design[i - 1]!
-    const b = design[i]!
-    if (s <= b.s) {
-      const span = b.s - a.s
-      const t = span === 0 ? 0 : (s - a.s) / span
-      return a.z + (b.z - a.z) * t
-    }
-  }
-  return last.z
 }
 
 /**
@@ -150,7 +130,7 @@ export const sweepRibbon = (
     const pose = alignment.poseAt(s)
     // Left of the direction of travel.
     const normal = fromAngle(pose.heading + Math.PI / 2)
-    const designZ = designElevationAt(design, s)
+    const designZ = designElevationAtStation(design, s)
 
     for (let j = 0; j < across; j++) {
       const point = section[j]!

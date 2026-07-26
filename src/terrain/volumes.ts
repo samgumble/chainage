@@ -3,7 +3,7 @@ import type { Vec2 } from '../geometry/vec2'
 import { fromAngle, add, scale } from '../geometry/vec2'
 import type { TerrainSampler } from './heightmap'
 import type { ProfilePoint } from './groundProfile'
-import { designElevationAt, isDaylighted, type CorridorTemplate } from './corridor'
+import { designSurfaceAtOffset, isDaylighted, type CorridorTemplate } from './corridor'
 
 export type StationAreas = {
   readonly s: number
@@ -98,7 +98,7 @@ const marchSide = (
 
     const p = add(position, scale(normal, offset))
     const groundZ = terrain.sample(p.x, p.y)
-    const surfaceZ = designElevationAt(offset, station.z, groundZ, template)
+    const surfaceZ = designSurfaceAtOffset(offset, station.z, groundZ, template)
 
     // Midpoint rule, not left-Riemann. The batters are linear ramps, and the
     // midpoint rule integrates a linear function exactly while a left sum
@@ -136,7 +136,7 @@ const marchSide = (
       Math.max(template.cutSlope * maxCutDepthSeen, template.fillSlope * maxFillDepthSeen) +
       transverseStep
 
-    // Past a retaining wall, `designElevationAt` returns natural ground and
+    // Past a retaining wall, `designSurfaceAtOffset` returns natural ground and
     // the march contributes exactly zero area from there outward — there is
     // nothing left to integrate. Without this clamp, a cross-slope steeper
     // than the batter (about 1/(2*cutSlope) or 1/(2*fillSlope) for the
