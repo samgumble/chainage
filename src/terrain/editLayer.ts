@@ -29,7 +29,12 @@ export class TerrainEditLayer {
   }
 
   setDelta(col: number, row: number, delta: number): void {
-    this.deltas.set(this.indexOf(col, row), delta)
+    const index = this.indexOf(col, row)
+    if (delta === 0) {
+      this.deltas.delete(index)
+    } else {
+      this.deltas.set(index, delta)
+    }
   }
 
   deltaAt(col: number, row: number): number {
@@ -47,6 +52,7 @@ export class TerrainEditLayer {
    * terrain behaves identically to an unedited one everywhere.
    */
   sample(x: number, y: number): number {
+
     const baseZ = this.base.sample(x, y)
     if (this.deltas.size === 0) return baseZ
 
@@ -71,7 +77,13 @@ export class TerrainEditLayer {
     return baseZ + bottom + (top - bottom) * ty
   }
 
-  /** A new heightmap with the edits baked in. This layer is left untouched. */
+  /**
+   * A new heightmap with the edits baked in. This layer is left untouched.
+   *
+   * Values are narrowed to float32 precision and the operation cannot be
+   * reversed to recover the exact original deltas — unlike `clear()`, this is
+   * a lossy one-way bake.
+   */
   flatten(): Heightmap {
     const { originX, originY, cellSize, cols, rows } = this.base
     const elevations = new Float32Array(cols * rows)

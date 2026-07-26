@@ -94,4 +94,36 @@ describe('TerrainEditLayer', () => {
     layer.setDelta(0, 0, -10)
     expect(layer.sample(-999, -999)).toBeCloseTo(90, 9)
   })
+
+  it('a zero delta does not count as an edit', () => {
+    const layer = new TerrainEditLayer(base())
+    layer.setDelta(1, 1, -5)
+    layer.setDelta(1, 1, 0)
+    expect(layer.editCount).toBe(0)
+    expect(layer.sample(10, 10)).toBeCloseTo(100, 9)
+  })
+
+  it('a zero delta on an untouched point stays untouched', () => {
+    const layer = new TerrainEditLayer(base())
+    layer.setDelta(0, 0, 0)
+    expect(layer.editCount).toBe(0)
+  })
+
+  it('a zero delta still validates its index', () => {
+    const layer = new TerrainEditLayer(base())
+    expect(() => layer.setDelta(-1, 0, 0)).toThrow(RangeError)
+  })
+
+  it('clear on an already-empty layer is safe', () => {
+    const layer = new TerrainEditLayer(base())
+    layer.clear()
+    expect(layer.editCount).toBe(0)
+  })
+
+  it('flatten returns a distinct object from the base', () => {
+    const layer = new TerrainEditLayer(base())
+    layer.setDelta(1, 1, -5)
+    const flat = layer.flatten()
+    expect(flat).not.toBe(layer.base)
+  })
 })

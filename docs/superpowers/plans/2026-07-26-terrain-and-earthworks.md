@@ -796,14 +796,27 @@ describe('solveGradeProfile — feasible cases', () => {
   })
 
   it('stays within the permitted cut and fill envelope', () => {
+    // Ground rises 5m per 25m station — a 20% grade against a 7% limit — so
+    // the solver must deviate substantially and the envelope genuinely binds.
+    // A 10m allowance is the smallest that keeps this feasible: the solution
+    // lands exactly on the cut limit at the final station. With 6m the bands
+    // collapse to min 114 > max 113 there and the alignment is infeasible.
     const gp = ground([100, 105, 110, 115, 120])
-    const r = solveGradeProfile(gp, constraints({ maxCutDepth: 6, maxFillHeight: 6 }))
+    const allowance = 10
+    const r = solveGradeProfile(
+      gp,
+      constraints({ maxCutDepth: allowance, maxFillHeight: allowance }),
+    )
     expect(r.feasible).toBe(true)
     if (!r.feasible) return
     r.profile.forEach((p, i) => {
-      expect(p.z).toBeGreaterThanOrEqual(gp[i]!.z - 6 - 1e-9)
-      expect(p.z).toBeLessThanOrEqual(gp[i]!.z + 6 + 1e-9)
+      expect(p.z).toBeGreaterThanOrEqual(gp[i]!.z - allowance - 1e-9)
+      expect(p.z).toBeLessThanOrEqual(gp[i]!.z + allowance + 1e-9)
     })
+    // The last station sits exactly at the cut limit, so this is not a
+    // vacuous pass — a solver that ignored the envelope would overshoot it.
+    const last = r.profile[r.profile.length - 1]!
+    expect(last.z).toBeCloseTo(gp[gp.length - 1]!.z - allowance, 6)
   })
 
   it('honours fixed start and end elevations', () => {
@@ -1410,8 +1423,10 @@ The average end-area method: compute cut and fill *areas* at each station, then 
 **Interfaces:**
 - Consumes: `Alignment` from `../geometry/alignment`; `Heightmap` from `./heightmap`; `ProfilePoint` from `./groundProfile`; `CorridorTemplate`, `designElevationAt` from `./corridor`
 - Produces:
-  - `type StationAreas = { readonly s: number; readonly cutArea: number; readonly fillArea: number }`
-  - `type EarthworkQuantities = { readonly stations: StationAreas[]; readonly cutVolume: number; readonly fillVolume: number; readonly netVolume: number }` — `netVolume` is `cutVolume - fillVolume`; positive means surplus to dispose of, negative means material must be imported
+  - `type StationAreas = { readonly s: number; readonly cutArea: number; readonly fillArea: number; readonly truncated: boolean }` — `truncated` is true when the section reached the safety cap without daylighting, so its areas are an under-estimate
+  - `type EarthworkQuantities = { readonly stations: StationAreas[]; readonly cutVolume: number; readonly fillVolume: number; readonly netVolume: number; readonly truncatedStations: number }` — `netVolume` is `cutVolume - fillVolume`; positive means surplus to dispose of, negative means material must be imported. A non-zero `truncatedStations` means the quantities are an under-estimate.
+
+> **The integration bound must be found by marching, not predicted.** An earlier draft of this task derived a fixed half-width from the depth at the centreline. That silently under-reports on cross-sloped ground: where the ground rises away from the centreline, the uphill batter daylights well beyond a bound computed from the centre, and the loop stops without ever checking whether daylight was reached. Since the game's terrain is a valley, cross-slope is the normal case, not an edge case. March outward on each side independently until the design surface has equalled natural ground for four consecutive samples, cap at `MAX_SECTION_HALF_WIDTH = 500` metres, and report `truncated` when the cap is hit — so an under-estimate is visible rather than silent.
   - `crossSectionAreas(alignment: Alignment, terrain: Heightmap, station: ProfilePoint, template: CorridorTemplate, transverseStep?: number): StationAreas` — `transverseStep` defaults to `0.5` metres
   - `computeEarthworks(alignment: Alignment, terrain: Heightmap, design: readonly ProfilePoint[], template: CorridorTemplate, transverseStep?: number): EarthworkQuantities`
 
