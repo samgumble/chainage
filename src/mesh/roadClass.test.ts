@@ -11,6 +11,70 @@ describe('ROAD_CLASSES', () => {
     for (const name of ALL) expect(ROAD_CLASSES[name].name).toBe(name)
   })
 
+  it('pins exact values for each class (deliberate engineering values)', () => {
+    /**
+     * These are deliberate, real-world engineering values that downstream systems
+     * depend on. Changing any value should be a conscious decision that updates
+     * this test, not a silent drift. Each assertion is to 1e-9 precision.
+     */
+    const fixtures: Array<{
+      name: RoadClassName
+      laneCount: number
+      laneWidth: number
+      shoulderWidth: number
+      crossfall: number
+      designSpeedKph: number
+      totalPavementThickness: number
+    }> = [
+      {
+        name: 'gravel',
+        laneCount: 1,
+        laneWidth: 3.0,
+        shoulderWidth: 0.5,
+        crossfall: 0.03,
+        designSpeedKph: 40,
+        totalPavementThickness: 0.40,
+      },
+      {
+        name: 'rural',
+        laneCount: 2,
+        laneWidth: 3.5,
+        shoulderWidth: 1.5,
+        crossfall: 0.025,
+        designSpeedKph: 80,
+        totalPavementThickness: 0.50,
+      },
+      {
+        name: 'arterial',
+        laneCount: 4,
+        laneWidth: 3.5,
+        shoulderWidth: 2.0,
+        crossfall: 0.025,
+        designSpeedKph: 90,
+        totalPavementThickness: 0.61,
+      },
+      {
+        name: 'highway',
+        laneCount: 6,
+        laneWidth: 3.7,
+        shoulderWidth: 3.0,
+        crossfall: 0.025,
+        designSpeedKph: 110,
+        totalPavementThickness: 0.73,
+      },
+    ]
+
+    for (const fixture of fixtures) {
+      const rc = ROAD_CLASSES[fixture.name]
+      expect(rc.laneCount).toBeCloseTo(fixture.laneCount, 9)
+      expect(rc.laneWidth).toBeCloseTo(fixture.laneWidth, 9)
+      expect(rc.shoulderWidth).toBeCloseTo(fixture.shoulderWidth, 9)
+      expect(rc.crossfall).toBeCloseTo(fixture.crossfall, 9)
+      expect(rc.designSpeedKph).toBeCloseTo(fixture.designSpeedKph, 9)
+      expect(totalPavementThickness(rc)).toBeCloseTo(fixture.totalPavementThickness, 9)
+    }
+  })
+
   it('gets wider and faster up the hierarchy', () => {
     let width = 0
     let speed = 0

@@ -24,7 +24,15 @@ export type RoadClass = {
   readonly laneWidth: number
   /** Width of the shoulder on each side, metres. */
   readonly shoulderWidth: number
-  /** Cross slope from crown to edge, as a fraction. 2.5% is 0.025. */
+  /**
+   * Cross slope from crown to edge for normal drainage on straight road, as a fraction.
+   * 2.5% is 0.025. This is the normal-crown drainage slope, not superelevation.
+   *
+   * Superelevation (curve banking) is handled separately in designSpeedForRadius in
+   * src/geometry/designSpeed.ts and should NOT be passed as crossfall — they are
+   * physically distinct: crossfall drains water on straight road, superelevation
+   * banks curves. Conflating them would understate curve capability by roughly half.
+   */
   readonly crossfall: number
   readonly designSpeedKph: number
   /** Bottom-up: subgrade, base, wearing. */
@@ -41,7 +49,8 @@ export const ROAD_CLASSES: Readonly<Record<RoadClassName, RoadClass>> = {
   gravel: {
     name: 'gravel',
     laneCount: 1,
-    laneWidth: 3.5,
+    /** 3.0 m, not 3.5: single-lane unsealed roads rarely carry two standard vehicles side by side. */
+    laneWidth: 3.0,
     shoulderWidth: 0.5,
     crossfall: 0.03,
     designSpeedKph: 40,
