@@ -3,9 +3,12 @@ import { crossSectionAreas, computeEarthworks } from './volumes'
 import { Heightmap } from './heightmap'
 import { Alignment } from '../geometry/alignment'
 import { Line } from '../geometry/primitives'
-import { vec2 } from '../geometry/vec2'
+import { vec2, angleOf, sub, distance } from '../geometry/vec2'
 import type { CorridorTemplate } from './corridor'
 import type { ProfilePoint } from './groundProfile'
+import { generateValley } from './generate'
+import { sampleGroundProfile } from './groundProfile'
+import { solveGradeProfile } from './gradeSolver'
 
 const template: CorridorTemplate = {
   formationHalfWidth: 5,
@@ -207,5 +210,145 @@ describe('daylighting on cross-sloped ground', () => {
     expect(() =>
       crossSectionAreas(road(100), flatGround(100), { s: 50, z: 98 }, template, -0.5),
     ).toThrow(RangeError)
+  })
+})
+
+/**
+ * Ground on the uphill side (offset >= 0, i.e. y >= 0) that is flat at
+ * `base` out to `notchLowY`, dips down across `[notchLowY, notchHighY]` to
+ * exactly track the cut batter (`designZ + (y - formationHalfWidth) /
+ * cutSlope`) — a notch that briefly, genuinely touches the design surface —
+ * and then follows `afterNotch` beyond `notchHighY`. The downhill side
+ * (y < 0) is flat at `designZ`, so it daylights immediately and contributes
+ * nothing, keeping the fixture focused on the one side under test.
+ *
+ * `cellSize` is 1m and the notch boundaries are whole metres, so bilinear
+ * sampling reproduces every linear segment of this piecewise function
+ * exactly, with no smoothing at the segment boundaries.
+ */
+const benchGround = (
+  base: number,
+  designZ: number,
+  formationHalfWidth: number,
+  cutSlope: number,
+  notchLowY: number,
+  notchHighY: number,
+  afterNotch: (y: number) => number,
+  extentY: number,
+): Heightmap => {
+  const cellSize = 1
+  const originX = -5
+  const originY = -10
+  const cols = 111 // covers x in [-5, 105], enough for a 100m road
+  const rows = extentY - originY + 1
+  const e = new Float32Array(cols * rows)
+  for (let row = 0; row < rows; row++) {
+    const y = originY + row * cellSize
+    let z: number
+    if (y < 0) {
+      z = designZ
+    } else if (y < notchLowY) {
+      z = base
+    } else if (y <= notchHighY) {
+      z = designZ + (y - formationHalfWidth) / cutSlope
+    } else {
+      z = afterNotch(y)
+    }
+    for (let col = 0; col < cols; col++) e[row * cols + col] = z
+  }
+  return new Heightmap(originX, originY, cellSize, cols, rows, e)
+}
+
+describe('adaptive daylight bound vs. non-monotonic ground (benches)', () => {
+  // Ground: flat at 106 (an 8m cut) from the formation edge out to 7m, a
+  // notch from 7-9m that exactly tracks the batter (design + (y-5)/2, i.e.
+  // 99 at y=7 and 100 at y=9) — a genuine, if brief, daylight touch — then
+  // back up to flat at 106 (still an 8m cut, not daylighted) from 9-15m,
+  // then a ridge climbing 3 m/m beyond 15m, forever.
+  //
+  // A rule based on counting consecutive daylighted samples confirms
+  // daylight during the notch (around y=9) and stops there, reporting
+  // ~26.875 m^2 and never seeing the ridge — the exact silent under-report
+  // the reviewer's counterexample describes. The adaptive bound does not,
+  // because maxCutDepthSeen is already 8 (from the flat ground before the
+  // notch) by the time the notch is reached, so the notch's shallower
+  // touch cannot pull the required half-width in to meet it.
+  const base = 106
+  const designZ = 98
+
+  it('is not fooled by a bench into ignoring a ridge beyond it', () => {
+    const terrain = benchGround(
+      base, designZ, template.formationHalfWidth, template.cutSlope, 7, 9,
+      (y) => (y <= 15 ? base : base + 3 * (y - 15)),
+      500,
+    )
+    const a = crossSectionAreas(road(100), terrain, { s: 50, z: designZ }, template)
+
+    // The batter climbs at 1/cutSlope = 0.5 m/m; the ridge climbs at 3 m/m,
+    // six times faster, so the batter can never catch it and the section
+    // must reach the safety cap. Either outcome the reviewer names is
+    // acceptable, but this fixture is built to force truncation specifically.
+    expect(a.truncated || a.cutArea > 26.875 * 1.5).toBe(true)
+  })
+
+  it('terminates well inside the cap when a bench genuinely ends the section', () => {
+    // Same notch, but ground beyond it stays flat at 100 forever — exactly
+    // where the notch left off — so the batter (still climbing past that
+    // point) is capped at natural ground from y=9 onward for good. This is
+    // a real daylight point, not a bench, and the march must find it well
+    // short of the 500m cap.
+    const terrain = benchGround(
+      base, designZ, template.formationHalfWidth, template.cutSlope, 7, 9,
+      () => 100,
+      30,
+    )
+    const a = crossSectionAreas(road(100), terrain, { s: 50, z: designZ }, template)
+
+    expect(a.truncated).toBe(false)
+    expect(a.cutArea).toBeGreaterThan(0)
+    expect(Number.isFinite(a.cutArea)).toBe(true)
+  })
+})
+
+describe('adaptive daylight bound on real generated terrain', () => {
+  it('computes finite, untruncated areas everywhere on a road across generateValley terrain', () => {
+    // Same ValleyOptions as the long-section debug view: a deterministic
+    // river valley with two octaves of value noise layered on top, so
+    // benches and terraces show up as the ordinary shape of the terrain,
+    // not a contrived edge case. This is the case the fix actually exists
+    // for.
+    const terrain = generateValley({
+      cols: 129, rows: 129, cellSize: 20,
+      floorElevation: 100, ridgeHeight: 70, valleyHalfWidth: 400, seed: 7,
+    })
+
+    // A road climbing from the valley floor up over the ridge, so its
+    // cross-sections cut across real transverse slope, not just noise.
+    const start = vec2(200, 1280)
+    const end = vec2(2200, 2200)
+    const alignment = new Alignment([
+      new Line(start, angleOf(sub(end, start)), distance(start, end)),
+    ])
+
+    const ground = sampleGroundProfile(alignment, terrain, 10)
+    const solution = solveGradeProfile(ground, {
+      maxGrade: 0.07, maxCutDepth: 15, maxFillHeight: 12,
+    })
+    expect(solution.feasible).toBe(true)
+    if (!solution.feasible) return
+
+    const q = computeEarthworks(alignment, terrain, solution.profile, template)
+
+    expect(q.truncatedStations).toBe(0)
+    for (const s of q.stations) {
+      expect(s.truncated).toBe(false)
+      expect(Number.isFinite(s.cutArea)).toBe(true)
+      expect(Number.isFinite(s.fillArea)).toBe(true)
+      expect(s.cutArea).toBeGreaterThanOrEqual(0)
+      expect(s.fillArea).toBeGreaterThanOrEqual(0)
+    }
+    // The road genuinely does earthworks somewhere along its length — this
+    // isn't a degenerate all-zero fixture.
+    expect(q.stations.some((s) => s.cutArea > 0 || s.fillArea > 0)).toBe(true)
   })
 })

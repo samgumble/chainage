@@ -39,11 +39,14 @@ const DEFAULT_TRANSVERSE_STEP = 0.5
  */
 const MAX_SECTION_HALF_WIDTH = 500
 
-/**
- * How many consecutive daylighted samples confirm the batter has genuinely
- * met natural ground, rather than merely grazing it at a single point.
- */
-const DAYLIGHT_CONFIRMATION_SAMPLES = 4
+// DAYLIGHT_CONFIRMATION_SAMPLES has been removed. A fixed count of
+// consecutive daylighted samples only proves the batter has grazed natural
+// ground for a short stretch — it cannot distinguish a genuine daylight point
+// from a bench: a stretch where ground happens to sit on the design surface
+// for a few samples before diverging again farther out. Real terrain,
+// especially the layered value noise `generateValley` adds, produces benches
+// routinely. `marchSide` below replaces the fixed count with an adaptive
+// bound driven by the worst depth actually observed.
 
 type SideResult = {
   readonly cutArea: number
@@ -58,9 +61,11 @@ type SideResult = {
  *
  * Ground rises at different rates on either side of a cross-sloped corridor,
  * so the two sides daylight at different distances and must be marched
- * independently. Marching stops once natural ground and the design surface
- * have coincided for `DAYLIGHT_CONFIRMATION_SAMPLES` consecutive samples, or
- * unconditionally at `MAX_SECTION_HALF_WIDTH`, whichever comes first.
+ * independently. Marching stops once the current sample is daylighted *and*
+ * the march has gone far enough that, given every sample seen so far on this
+ * side, the batter must already have daylighted — see the `requiredHalfWidth`
+ * computation below — or unconditionally at `MAX_SECTION_HALF_WIDTH`,
+ * whichever comes first.
  */
 const marchSide = (
   sign: 1 | -1,
@@ -73,12 +78,21 @@ const marchSide = (
 ): SideResult => {
   let cutArea = 0
   let fillArea = 0
-  let consecutiveDaylight = 0
+
+  // The greatest depth (natural ground below the design elevation, i.e. a
+  // fill) and the greatest height (ground above it, i.e. a cut) seen
+  // anywhere on this side so far. A batter climbing or descending at
+  // 1-in-`slope` needs `slope` metres of horizontal run for every metre of
+  // depth it must cover, so these are what bound how much farther the
+  // daylight point *could* possibly be, given only what has been observed.
+  let maxCutDepthSeen = 0
+  let maxFillDepthSeen = 0
   let k = 0
 
   for (;;) {
     const offset = sign * (k + 0.5) * transverseStep
-    if (Math.abs(offset) > MAX_SECTION_HALF_WIDTH) {
+    const absOffset = Math.abs(offset)
+    if (absOffset > MAX_SECTION_HALF_WIDTH) {
       return { cutArea, fillArea, truncated: true }
     }
 
@@ -97,13 +111,33 @@ const marchSide = (
     if (difference > 0) cutArea += difference * transverseStep
     else fillArea += -difference * transverseStep
 
-    if (isDaylighted(offset, station.z, groundZ, template)) {
-      consecutiveDaylight++
-      if (consecutiveDaylight >= DAYLIGHT_CONFIRMATION_SAMPLES) {
-        return { cutArea, fillArea, truncated: false }
-      }
-    } else {
-      consecutiveDaylight = 0
+    // Depth relative to the flat design elevation (not the batter surface,
+    // which already tracks toward ground) — how far above or below the
+    // formation natural ground sits at this sample, regardless of offset.
+    const rawDepth = groundZ - station.z
+    if (rawDepth > maxCutDepthSeen) maxCutDepthSeen = rawDepth
+    if (-rawDepth > maxFillDepthSeen) maxFillDepthSeen = -rawDepth
+
+    // The adaptive bound. A single-point graze — the old bug's original
+    // target — is defeated because one sample barely moves maxDepthSeen, so
+    // the bound barely moves either, and the *next* rule (below) still fires
+    // almost immediately. A bench — flat ground that happens to sit on the
+    // design surface for a stretch before the terrain diverges again — is
+    // defeated too, and by the same mechanism: the bench itself cannot grow
+    // maxDepthSeen (it is, by definition, no deeper than what came before),
+    // so it cannot push this bound outward, and the march does not mistake
+    // a temporary coincidence for daylighting. Only genuine, ever-increasing
+    // divergence between ground and the design elevation keeps expanding the
+    // bound and keeps the march going; ground that truly levels off leaves
+    // the bound fixed, and the march stops there instead of running out to
+    // the safety cap.
+    const requiredHalfWidth =
+      template.formationHalfWidth +
+      Math.max(template.cutSlope * maxCutDepthSeen, template.fillSlope * maxFillDepthSeen) +
+      transverseStep
+
+    if (absOffset >= requiredHalfWidth && isDaylighted(offset, station.z, groundZ, template)) {
+      return { cutArea, fillArea, truncated: false }
     }
 
     k++
