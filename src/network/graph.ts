@@ -30,6 +30,11 @@ export type Road = {
  *
  * Half a metre: far below any meaningful road separation, far above the
  * floating-point noise of two alignments computed independently.
+ *
+ * **Order-dependent behavior:** The first node created within this distance of a
+ * position "wins" — subsequent ends within the radius snap to that node. Snapping
+ * does NOT transitively merge: a chain of ends each within the radius of the last
+ * does not merge into a single node if the first and last are beyond the radius.
  */
 export const NODE_SNAP_DISTANCE = 0.5
 
@@ -46,11 +51,11 @@ export class RoadNetwork {
   private readonly nodeList: { id: NodeId; position: Vec2; ends: RoadEnd[] }[] = []
 
   get roads(): readonly Road[] {
-    return this.roadList
+    return [...this.roadList]
   }
 
   get nodes(): readonly NetworkNode[] {
-    return this.nodeList
+    return this.nodeList.map((n) => ({ ...n, ends: [...n.ends] }))
   }
 
   road(id: RoadId): Road {
@@ -62,13 +67,14 @@ export class RoadNetwork {
   node(id: NodeId): NetworkNode {
     const found = this.nodeList[id]
     if (!found) throw new RangeError(`no node with id ${id}`)
-    return found
+    return { ...found, ends: [...found.ends] }
   }
 
   nodeAt(position: Vec2): NetworkNode | undefined {
-    return this.nodeList.find(
+    const found = this.nodeList.find(
       (n) => distance(n.position, position) <= NODE_SNAP_DISTANCE,
     )
+    return found ? { ...found, ends: [...found.ends] } : undefined
   }
 
   /** Three or more road ends. Fewer is a dead end or a road passing through. */
@@ -95,7 +101,15 @@ export class RoadNetwork {
     return roadId
   }
 
-  /** An existing node within snapping distance, or a new one. */
+  /**
+   * An existing node within snapping distance, or a new one.
+   *
+   * Snapping is order-dependent: the first node created at a location wins.
+   * If multiple road ends are added at positions within NODE_SNAP_DISTANCE,
+   * they snap to whichever node was created first — not necessarily to a
+   * common node, since snapping does not transitively merge a chain of ends
+   * each within the radius of the last.
+   */
   private nodeFor(position: Vec2): NodeId {
     const existing = this.nodeAt(position)
     if (existing) return existing.id
