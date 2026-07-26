@@ -1563,7 +1563,12 @@ export const sweepRibbon = (
 
     for (let j = 0; j < across; j++) {
       const point = section[j]!
-      const p = add(pose.position, scale(normal, point.offset))
+      // `normal` points LEFT of travel, but SectionPoint.offset is negative to
+      // the left (positive-is-right, the CAD convention). So the offset must be
+      // negated to land on the correct side. Getting this wrong mirrors the
+      // section, which is invisible on a symmetric road and silently swaps
+      // lane sides the moment anything is asymmetric.
+      const p = add(pose.position, scale(normal, -point.offset))
 
       positions[v * 3] = p.x
       positions[v * 3 + 1] = p.y
