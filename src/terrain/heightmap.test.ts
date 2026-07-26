@@ -32,6 +32,31 @@ describe('Heightmap construction', () => {
     expect(() => new Heightmap(0, 0, 10, 3, 3, new Float32Array(8))).toThrow(RangeError)
   })
 
+  it('rejects non-integer cols', () => {
+    const e = new Float32Array(9)
+    expect(() => new Heightmap(0, 0, 10, 2.5, 3, e)).toThrow(RangeError)
+  })
+
+  it('rejects non-integer rows', () => {
+    const e = new Float32Array(9)
+    expect(() => new Heightmap(0, 0, 10, 3, 2.5, e)).toThrow(RangeError)
+  })
+
+  it('rejects NaN cellSize', () => {
+    const e = new Float32Array(9)
+    expect(() => new Heightmap(0, 0, NaN, 3, 3, e)).toThrow(RangeError)
+  })
+
+  it('rejects Infinity cellSize', () => {
+    const e = new Float32Array(9)
+    expect(() => new Heightmap(0, 0, Infinity, 3, 3, e)).toThrow(RangeError)
+  })
+
+  it('rejects NaN originX', () => {
+    const e = new Float32Array(9)
+    expect(() => new Heightmap(NaN, 0, 10, 3, 3, e)).toThrow(RangeError)
+  })
+
   it('rejects out-of-range indices', () => {
     const h = rampX()
     expect(() => h.elevationAtIndex(-1, 0)).toThrow(RangeError)

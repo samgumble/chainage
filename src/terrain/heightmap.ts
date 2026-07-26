@@ -21,8 +21,23 @@ export class Heightmap {
     if (cellSize <= 0) {
       throw new RangeError('cellSize must be positive')
     }
+    if (!Number.isFinite(cellSize)) {
+      throw new RangeError('cellSize must be finite')
+    }
+    if (!Number.isInteger(cols)) {
+      throw new RangeError('cols must be an integer')
+    }
+    if (!Number.isInteger(rows)) {
+      throw new RangeError('rows must be an integer')
+    }
     if (cols < 2 || rows < 2) {
       throw new RangeError('heightmap must be at least 2x2')
+    }
+    if (!Number.isFinite(originX)) {
+      throw new RangeError('originX must be finite')
+    }
+    if (!Number.isFinite(originY)) {
+      throw new RangeError('originY must be finite')
     }
     if (elevations.length !== cols * rows) {
       throw new RangeError(
