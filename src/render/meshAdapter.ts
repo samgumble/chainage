@@ -4,11 +4,16 @@ import type { MeshData } from '../mesh/ribbon'
 /**
  * Wrap renderer-agnostic mesh data as a three.js geometry.
  *
- * This is the single place the handedness conversion happens. The game's plan
- * coordinates are `(x, y)` with `y` north and `z` up; three.js wants `+Y` up.
- * The mapping is `(x, y, z) -> (x, z, -y)`, which preserves winding order and
- * therefore face orientation. Nothing upstream of this file knows three.js
- * exists, and nothing downstream should re-apply the conversion.
+ * The game's plan coordinates are `(x, y)` with `y` north and `z` up;
+ * three.js wants `+Y` up. The mapping is `(x, y, z) -> (x, z, -y)`, which
+ * preserves winding order and therefore face orientation.
+ *
+ * This conversion happens only inside `src/render/` (here, and again in
+ * `src/render/terrainMesh.ts`, which writes `(gx, z, -gy)` directly for the
+ * same reason) and in the debug scene, which hand-converts its orbit centre
+ * in `src/debug/roadScene.ts`. It is not applied anywhere upstream — never in
+ * `src/mesh/`, `src/terrain/`, or `src/geometry/`, which know nothing of
+ * three.js or of this handedness flip.
  */
 export const toBufferGeometry = (mesh: MeshData): THREE.BufferGeometry => {
   const geometry = new THREE.BufferGeometry()
