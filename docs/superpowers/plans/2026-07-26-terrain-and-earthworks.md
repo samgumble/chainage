@@ -2187,6 +2187,19 @@ export const drawLongSection = (canvas: HTMLCanvasElement): void => {
     pad.left, 46,
   )
 
+  // A truncated section reached the integration safety cap without daylighting,
+  // so its quantities are an under-estimate. Say so rather than presenting the
+  // number as fact — a silent under-report is the exact failure this flag exists
+  // to prevent, and it would otherwise flow straight into cost and duration.
+  if (quantities.truncatedStations > 0) {
+    ctx.fillStyle = '#d87a54'
+    ctx.fillText(
+      `⚠ ${quantities.truncatedStations} of ${quantities.stations.length} sections truncated ` +
+      `— quantities are an under-estimate`,
+      pad.left, 66,
+    )
+  }
+
   ctx.fillStyle = '#5d6b7a'
   ctx.fillText('natural ground ——   design line ——   cut ▨   fill ▨', pad.left, h - 18)
 }
