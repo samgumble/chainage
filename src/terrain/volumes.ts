@@ -1,7 +1,7 @@
 import type { Alignment } from '../geometry/alignment'
 import type { Vec2 } from '../geometry/vec2'
 import { fromAngle, add, scale } from '../geometry/vec2'
-import type { Heightmap } from './heightmap'
+import type { TerrainSampler } from './heightmap'
 import type { ProfilePoint } from './groundProfile'
 import { designElevationAt, isDaylighted, type CorridorTemplate } from './corridor'
 
@@ -16,7 +16,7 @@ export type StationAreas = {
 }
 
 export type EarthworkQuantities = {
-  readonly stations: StationAreas[]
+  readonly stations: readonly StationAreas[]
   readonly cutVolume: number
   readonly fillVolume: number
   /** cut − fill. Positive is surplus to dispose of; negative must be imported. */
@@ -71,7 +71,7 @@ const marchSide = (
   sign: 1 | -1,
   position: Vec2,
   normal: Vec2,
-  terrain: Heightmap,
+  terrain: TerrainSampler,
   station: ProfilePoint,
   template: CorridorTemplate,
   transverseStep: number,
@@ -131,10 +131,27 @@ const marchSide = (
     // bound and keeps the march going; ground that truly levels off leaves
     // the bound fixed, and the march stops there instead of running out to
     // the safety cap.
-    const requiredHalfWidth =
+    let requiredHalfWidth =
       template.formationHalfWidth +
       Math.max(template.cutSlope * maxCutDepthSeen, template.fillSlope * maxFillDepthSeen) +
       transverseStep
+
+    // Past a retaining wall, `designElevationAt` returns natural ground and
+    // the march contributes exactly zero area from there outward — there is
+    // nothing left to integrate. Without this clamp, a cross-slope steeper
+    // than the batter (about 1/(2*cutSlope) or 1/(2*fillSlope) for the
+    // default templates, which valley flanks exceed routinely) keeps
+    // `maxCutDepthSeen`/`maxFillDepthSeen` growing forever, so the bound
+    // above never catches up and the march runs to `MAX_SECTION_HALF_WIDTH`
+    // and reports `truncated: true` on a section whose areas are already
+    // exactly correct. Clamping to the wall's offset stops the march exactly
+    // where the design surface goes flat against natural ground for good.
+    if (template.maxBatterWidth !== undefined) {
+      requiredHalfWidth = Math.min(
+        requiredHalfWidth,
+        template.formationHalfWidth + template.maxBatterWidth,
+      )
+    }
 
     if (absOffset >= requiredHalfWidth && isDaylighted(offset, station.z, groundZ, template)) {
       return { cutArea, fillArea, truncated: false }
@@ -155,7 +172,7 @@ const marchSide = (
  */
 export const crossSectionAreas = (
   alignment: Alignment,
-  terrain: Heightmap,
+  terrain: TerrainSampler,
   station: ProfilePoint,
   template: CorridorTemplate,
   transverseStep: number = DEFAULT_TRANSVERSE_STEP,
@@ -189,7 +206,7 @@ export const crossSectionAreas = (
  */
 export const computeEarthworks = (
   alignment: Alignment,
-  terrain: Heightmap,
+  terrain: TerrainSampler,
   design: readonly ProfilePoint[],
   template: CorridorTemplate,
   transverseStep: number = DEFAULT_TRANSVERSE_STEP,

@@ -83,6 +83,15 @@ describe('isDaylighted', () => {
   it('is true immediately when design and ground coincide', () => {
     expect(isDaylighted(6, 100, 100, template())).toBe(true)
   })
+
+  it('is true beyond a retaining wall even though the batter never reached ground', () => {
+    // 5m cut at 2H:1V wants 10m of batter; only 4m is permitted, so a wall
+    // stands at offset 9 and the batter itself never gets close to daylight.
+    // Past the wall the design surface is defined as natural ground, so it
+    // must report daylighted there regardless.
+    const t = template({ maxBatterWidth: 4 })
+    expect(isDaylighted(20, 100, 105, t)).toBe(true)
+  })
 })
 
 describe('retaining walls', () => {
@@ -135,6 +144,19 @@ describe('retaining walls', () => {
     expect(designElevationAt(7, 100, 105, t)).toBeCloseTo(101, 9)
     // Beyond the wall there is no earthwork — the surface is natural ground.
     expect(designElevationAt(12, 100, 105, t)).toBeCloseTo(105, 9)
+  })
+
+  it('truncates the design surface at the wall on the fill side too', () => {
+    // 10m fill at 3H:1V wants 30m of batter; only 4m is permitted, so a wall
+    // stands at offset 9 (formationHalfWidth 5 + maxBatterWidth 4). The
+    // existing wall-truncation test above covers only the cut side — this is
+    // the fill-side mirror.
+    const t = template({ maxBatterWidth: 4 })
+    // Inside the permitted batter the surface still descends: 2m beyond the
+    // edge at 3H:1V drops 2/3.
+    expect(designElevationAt(7, 100, 90, t)).toBeCloseTo(100 - 2 / 3, 9)
+    // Beyond the wall there is no earthwork — the surface is natural ground.
+    expect(designElevationAt(12, 100, 90, t)).toBeCloseTo(90, 9)
   })
 })
 

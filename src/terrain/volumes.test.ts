@@ -214,6 +214,56 @@ describe('daylighting on cross-sloped ground', () => {
 })
 
 /**
+ * Ground on a uniform cross-slope across the whole corridor width — rising
+ * at `slopePerMetre` per metre of offset in every direction, with no flat
+ * portion on either side. A classic sidehill section: cut on the uphill
+ * side, fill on the downhill side, both diverging from the design surface
+ * without bound.
+ */
+const sidehillGround = (base: number, slopePerMetre: number): Heightmap => {
+  const originX = -520
+  const originY = -520
+  const cellSize = 10
+  const cols = 105
+  const rows = 105
+  const e = new Float32Array(cols * rows)
+  for (let row = 0; row < rows; row++) {
+    const y = originY + row * cellSize
+    const z = base + slopePerMetre * y
+    for (let col = 0; col < cols; col++) {
+      e[row * cols + col] = z
+    }
+  }
+  return new Heightmap(originX, originY, cellSize, cols, rows, e)
+}
+
+describe('marchSide respects maxBatterWidth', () => {
+  // Reviewer's counterexample: without the fix, requiredHalfWidth grows
+  // without bound on a cross-slope this steep, so both sides march to
+  // MAX_SECTION_HALF_WIDTH and truncated is falsely set on a section whose
+  // areas are already exact, because designElevationAt contributes nothing
+  // past the wall.
+  const wallTemplate: CorridorTemplate = {
+    formationHalfWidth: 5,
+    cutSlope: 2,
+    fillSlope: 3,
+    maxBatterWidth: 8,
+  }
+
+  it('computes correct areas with truncated: false on a steep sidehill cross-slope with walls both sides', () => {
+    const terrain = sidehillGround(98, 0.6)
+    const a = crossSectionAreas(road(100), terrain, { s: 50, z: 98 }, wallTemplate)
+
+    expect(a.truncated).toBe(false)
+    // Analytic areas (flat formation contribution plus the batter integral up
+    // to the wall at offset 13 = formationHalfWidth 5 + maxBatterWidth 8):
+    // cut 34.7 m^2, fill ~40.03 m^2.
+    expect(a.cutArea).toBeCloseTo(34.7, 1)
+    expect(a.fillArea).toBeCloseTo(40.03, 1)
+  })
+})
+
+/**
  * Ground on the uphill side (offset >= 0, i.e. y >= 0) that is flat at
  * `base` out to `notchLowY`, dips down across `[notchLowY, notchHighY]` to
  * exactly track the cut batter (`designZ + (y - formationHalfWidth) /
