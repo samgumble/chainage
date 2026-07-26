@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { junctionLegs } from './junctionLegs'
 import { RoadNetwork } from '../network/graph'
 import { Alignment } from '../geometry/alignment'
-import { Line } from '../geometry/primitives'
+import { Arc, Line } from '../geometry/primitives'
 import { vec2 } from '../geometry/vec2'
 import { ROAD_CLASSES, formationHalfWidth } from './roadClass'
 
@@ -86,5 +86,66 @@ describe('junctionLegs', () => {
     expect(legs).toHaveLength(1)
     // The road leaves the dead end heading east.
     expect(legs[0]!.direction.x).toBeCloseTo(1, 9)
+  })
+
+  it('wraps around the ±π boundary correctly', () => {
+    const net = new RoadNetwork()
+    // Three roads leaving node (100, 0) near the ±π boundary
+    // Road 1: heading -170° (leaving southwest)
+    net.addRoad(new Alignment([new Line(vec2(100, 0), (-170 * Math.PI) / 180, 100)]), 'rural')
+    // Road 2: heading +170° (leaving northwest)
+    net.addRoad(new Alignment([new Line(vec2(100, 0), (170 * Math.PI) / 180, 100)]), 'rural')
+    // Road 3: heading 0° (leaving east, away from boundary)
+    net.addRoad(new Alignment([new Line(vec2(100, 0), 0, 100)]), 'rural')
+
+    const legs = junctionLegs(net, net.nodeAt(vec2(100, 0))!.id)
+
+    // Correct number of legs
+    expect(legs).toHaveLength(3)
+
+    // All bearings within (−π, π]
+    for (const leg of legs) {
+      expect(leg.bearing).toBeGreaterThan(-Math.PI)
+      expect(leg.bearing).toBeLessThanOrEqual(Math.PI)
+    }
+
+    // Bearings in ascending order (tests sort and wraparound)
+    for (let i = 1; i < legs.length; i++) {
+      expect(legs[i]!.bearing).toBeGreaterThan(legs[i - 1]!.bearing)
+    }
+
+    // Direction agrees with bearing for each leg (would fail if wrong boundary handling)
+    for (const leg of legs) {
+      expect(Math.cos(leg.bearing)).toBeCloseTo(leg.direction.x, 9)
+      expect(Math.sin(leg.bearing)).toBeCloseTo(leg.direction.y, 9)
+    }
+  })
+
+  it('reads heading from the correct end of a curved alignment', () => {
+    const net = new RoadNetwork()
+
+    // Arc curving from north to east, starting at node
+    // Heading goes from π/2 (north) to 0 (east) as it curves right
+    const arcHeading = Math.PI / 2 // Start heading: north
+    const arcLength = 50
+    const arcCurvature = -Math.PI / arcLength // Negative = turn right (clockwise)
+    const arc = new Arc(vec2(100, 0), arcHeading, arcLength, arcCurvature)
+
+    net.addRoad(new Alignment([arc]), 'rural')
+    // Add second road to form a proper junction
+    net.addRoad(new Alignment([new Line(vec2(0, 0), 0, 100)]), 'rural')
+
+    const legs = junctionLegs(net, net.nodeAt(vec2(100, 0))!.id)
+    expect(legs).toHaveLength(2)
+
+    // The arc leg should have bearing matching arc's heading at start (π/2)
+    // This verifies we read poseAt(0), not poseAt(length)
+    const arcLeg = legs.find((l) => l.bearing > 1.5) // π/2 ≈ 1.57
+    expect(arcLeg).toBeDefined()
+    expect(arcLeg!.bearing).toBeCloseTo(arcHeading, 9)
+
+    // Direction must agree with bearing (would fail if we read end heading instead of start)
+    expect(Math.cos(arcLeg!.bearing)).toBeCloseTo(arcLeg!.direction.x, 9)
+    expect(Math.sin(arcLeg!.bearing)).toBeCloseTo(arcLeg!.direction.y, 9)
   })
 })

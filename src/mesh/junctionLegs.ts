@@ -50,5 +50,9 @@ export const junctionLegs = (
     }
   })
 
+  // Stable sort preserves insertion order for ties, so coincident legs (same
+  // bearing) are adjacent in the result according to node.ends order, not
+  // geometry. This insertion-order adjacency is load-bearing: downstream
+  // corner and trim code relies on it for consistent results.
   return legs.sort((a, b) => a.bearing - b.bearing)
 }
