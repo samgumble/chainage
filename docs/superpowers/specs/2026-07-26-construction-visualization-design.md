@@ -85,6 +85,12 @@ The phase covers three structure types, each with a different trigger:
 
 Roads with no structures skip the phase entirely, exactly as a flat road skips earthworks. The retaining-wall trigger is already computed in the terrain layer; the bridge and overpass triggers arrive with the mesh plan, which is where their geometry is generated.
 
+> **The bridge trigger is currently unreachable, and the mesh plan must fix it.** This surfaced in the terrain layer's final review and is easy to miss until it manifests as "why does every river crossing fail?"
+>
+> `solveGradeProfile` bounds every design elevation to `[ground − maxCutDepth, ground + maxFillHeight]`. A design line standing high above natural ground — precisely the bridge trigger described above — is therefore not something the solver can *produce*. Asked for one, it returns `feasible: false` instead. A ravine that ought to resolve to a bridge instead reads as an impossible alignment.
+>
+> The fix belongs in the mesh plan: a **structure allowance** distinct from the fill allowance. Below the fill allowance the gap is closed with earth; between the fill allowance and the structure allowance it resolves to a bridge; beyond the structure allowance it is genuinely infeasible. The vertical band between those two limits is what makes a crossing a structure rather than an embankment, and no such band exists today.
+
 Equipment is modelled in the parent spec's low-poly diorama style: simple blocky forms with correct silhouettes and correct motion, not detailed vehicle models. A player must be able to tell an excavator from a grader at a glance; they do not need to identify the make.
 
 ## 4. Durations from real productivity
