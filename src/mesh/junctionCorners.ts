@@ -48,6 +48,17 @@ const intersectLines = (
 }
 
 /**
+ * Are two legs opposite rather than coincident?
+ *
+ * `cross` vanishes for both, so it cannot tell them apart on its own. Opposite
+ * legs are a road passing straight through — the commonest junction there is —
+ * while coincident legs are two roads leaving on top of each other, which has
+ * no sensible junction at all.
+ */
+const isThroughPair = (a: JunctionLeg, b: JunctionLeg): boolean =>
+  dot(a.direction, b.direction) < 0
+
+/**
  * Work out where a junction's corners sit and how far each leg pulls back.
  *
  * Legs must already be sorted counter-clockwise. The corner between leg i and
@@ -86,8 +97,25 @@ export const solveJunction = (
     const originJ = scale(leftJ, -legJ.halfWidth)
 
     const position = intersectLines(originI, legI.direction, originJ, legJ.direction)
+
     if (!position) {
-      return { feasible: false, reason: 'near-parallel-legs' }
+      // No unique intersection. Which of the two degenerate cases is it?
+      if (!isThroughPair(legI, legJ)) {
+        // Coincident: two roads leaving on top of each other. No junction.
+        return { feasible: false, reason: 'near-parallel-legs' }
+      }
+      // Opposite: a road running straight through. The facing edges are
+      // parallel — coincident when the widths match — so there is no unique
+      // crossing point, but nothing is wrong. Put the corner at the foot of
+      // the perpendicular, laterally at the wider of the two. Being
+      // perpendicular to both legs, it contributes zero trim, which is right:
+      // a through road needs no pulling back on its outer side.
+      corners.push({
+        position: scale(leftI, Math.max(legI.halfWidth, legJ.halfWidth)),
+        beforeLeg: i,
+        afterLeg: j,
+      })
+      continue
     }
 
     corners.push({ position, beforeLeg: i, afterLeg: j })

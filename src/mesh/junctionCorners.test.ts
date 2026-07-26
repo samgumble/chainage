@@ -46,6 +46,34 @@ describe('solveJunction feasibility', () => {
     expect(r.reason).toBe('near-parallel-legs')
   })
 
+  it('accepts opposite legs, which are a road running straight through', () => {
+    // The through pair of a T has cross() of essentially zero, exactly like a
+    // coincident pair — but it is the commonest junction there is. Rejecting
+    // it would reject every T.
+    const r = solveJunction(legsAt([180, 90, -90]))
+    expect(r.feasible).toBe(true)
+  })
+
+  it('gives a through pair zero trim on its outer side', () => {
+    // The corner between the two opposite legs is perpendicular to both, so it
+    // contributes nothing; each leg's trim comes only from its other corner.
+    const w = 5
+    const r = solveJunction(legsAt([180, 90, -90], w))
+    expect(r.feasible).toBe(true)
+    if (!r.feasible) return
+    for (const trim of r.trims) expect(trim).toBeCloseTo(w, 6)
+  })
+
+  it('accepts a through pair of unequal widths', () => {
+    const legs = [
+      { roadId: 0, end: 'start' as const, direction: fromAngle(-Math.PI / 2), halfWidth: 4, bearing: -Math.PI / 2 },
+      { roadId: 1, end: 'start' as const, direction: fromAngle(Math.PI / 2), halfWidth: 9, bearing: Math.PI / 2 },
+      { roadId: 2, end: 'start' as const, direction: fromAngle(Math.PI), halfWidth: 5, bearing: Math.PI },
+    ].sort((a, b) => a.bearing - b.bearing)
+    const r = solveJunction(legs)
+    expect(r.feasible).toBe(true)
+  })
+
   it('rejects a junction demanding an absurd trim', () => {
     // A very acute pair pushes the corner far from the node.
     const r = solveJunction(legsAt([0, 2, 180]), MAX_TRIM_DISTANCE)
