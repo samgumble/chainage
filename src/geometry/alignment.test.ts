@@ -69,6 +69,20 @@ describe('Alignment', () => {
     expect(() => a.sample(0)).toThrow(RangeError)
     expect(() => a.sample(-1)).toThrow(RangeError)
   })
+
+  it('does not produce a near-duplicate final station under floating-point drift', () => {
+    // this.length lands one ULP above an exact multiple of spacing (25),
+    // reproducing the drift that MIN_STATION_GAP guards against in
+    // sampleGroundProfile and sweepRibbon.
+    const length = 100 + Number.EPSILON * 100
+    const a = new Alignment([new Line(vec2(0, 0), 0, length)])
+    const poses = a.sample(25)
+
+    for (let i = 1; i < poses.length; i++) {
+      expect(poses[i]!.s - poses[i - 1]!.s).toBeGreaterThan(1e-6)
+    }
+    expect(poses[poses.length - 1]!.s).toBe(length)
+  })
 })
 
 describe('Alignment station reporting', () => {

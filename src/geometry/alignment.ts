@@ -16,6 +16,19 @@ const POSITION_TOLERANCE = 1e-3
 const HEADING_TOLERANCE = 1e-4
 
 /**
+ * Minimum allowed gap between consecutive stations, in metres.
+ *
+ * Mirrors the constant of the same name and purpose in
+ * `src/terrain/groundProfile.ts` and `src/mesh/ribbon.ts`: `i * spacing`
+ * stepping can still land a hair under `this.length` through floating-point
+ * noise, and without this guard the final-station append below would add a
+ * near-duplicate station instead of replacing the last stepped one.
+ * `src/geometry/` imports nothing from outside itself, so this is defined
+ * locally rather than shared with those two.
+ */
+const MIN_STATION_GAP = 1e-6
+
+/**
  * Find every joint where the chain fails to meet.
  *
  * A sound alignment is continuous in position and heading at each joint —
@@ -124,7 +137,17 @@ export class Alignment {
     for (let i = 0; i * spacing < this.length; i++) {
       poses.push(this.poseAt(i * spacing))
     }
-    poses.push(this.poseAt(this.length))
+
+    // The final station is always this.length; if that would land within
+    // MIN_STATION_GAP of the last stepped station, replace it rather than
+    // append a near-duplicate (see MIN_STATION_GAP above).
+    const last = poses[poses.length - 1]
+    if (!last || this.length - last.s > MIN_STATION_GAP) {
+      poses.push(this.poseAt(this.length))
+    } else if (last.s !== this.length) {
+      poses[poses.length - 1] = this.poseAt(this.length)
+    }
+
     return poses
   }
 }
