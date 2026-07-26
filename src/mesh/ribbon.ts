@@ -28,9 +28,23 @@ export type RibbonOptions = {
   readonly startStation?: number
   /** Where to stop. Default the alignment length. This is what renders a road mid-construction. */
   readonly endStation?: number
-  /** Metres of road per V tile, so markings repeat at real-world scale. Default 10. */
+  /**
+   * Metres of road per V tile, so markings repeat at real-world scale.
+   * Default 10. Must be positive; throws `RangeError` otherwise, since a
+   * non-positive value would divide V coordinates by zero or negate them.
+   */
   readonly uvTileLength?: number
 }
+
+/**
+ * Minimum allowed gap between consecutive stations, in metres.
+ *
+ * `from + steps * spacing` can land a hair under `to` through floating-point
+ * noise. Without a guard, the final-station append below would then add a
+ * near-duplicate station, producing sliver triangles. Mirrors the constant
+ * of the same name and purpose in `src/terrain/groundProfile.ts`.
+ */
+const MIN_STATION_GAP = 1e-6
 
 const EMPTY: MeshData = {
   positions: new Float32Array(0),
@@ -68,6 +82,12 @@ const designElevationAt = (design: readonly ProfilePoint[], s: number): number =
  * they cannot drift, and the final station of the range is always included.
  * V coordinates run on **arc length**, not vertex index, so lane markings
  * keep their real-world spacing through a curve instead of stretching.
+ *
+ * `section` is assumed sorted ascending by `offset` and symmetric about the
+ * centreline (offset 0), as `crossSection.ts` produces: U normalization
+ * takes `halfWidth` from the last point's offset, which is only the true
+ * half-width under that assumption. Not enforced here — every current
+ * caller satisfies it and a runtime check would be dead weight.
  */
 export const sweepRibbon = (
   alignment: Alignment,
@@ -106,7 +126,11 @@ export const sweepRibbon = (
   const steps = Math.floor(span / spacing)
   for (let i = 0; i <= steps; i++) stations.push(from + i * spacing)
   const lastStation = stations[stations.length - 1]!
-  if (lastStation < to) stations.push(to)
+  if (to - lastStation > MIN_STATION_GAP) {
+    stations.push(to)
+  } else if (lastStation !== to) {
+    stations[stations.length - 1] = to
+  }
   if (stations.length < 2) return EMPTY
 
   const across = section.length
@@ -193,6 +217,17 @@ export const sweepRibbon = (
     }
   }
 
+  // Winding must agree with the vertex normals computed above. For a
+  // triangle (A, B, C) the face normal is (B-A) x (C-A). For the first
+  // triangle (topLeft, topRight, bottomLeft), B-A is the across step and
+  // C-A is the along step, giving across x along: up, matching the vertex
+  // normals. For the second (topRight, bottomRight, bottomLeft), B-A is
+  // along and C-A is (along - across), and along x (along - across) =
+  // -(along x across) = across x along: also up. Get this backwards (e.g.
+  // topLeft, bottomLeft, topRight) and every face normal points down
+  // instead of up: under three.js's counter-clockwise front-face
+  // convention the whole road would be backface-culled and invisible from
+  // above, the only angle anyone looks at it from.
   let t = 0
   for (let row = 0; row < stations.length - 1; row++) {
     for (let col = 0; col < across - 1; col++) {
@@ -202,12 +237,12 @@ export const sweepRibbon = (
       const bottomRight = bottomLeft + 1
 
       indices[t++] = topLeft
-      indices[t++] = bottomLeft
       indices[t++] = topRight
+      indices[t++] = bottomLeft
 
       indices[t++] = topRight
-      indices[t++] = bottomLeft
       indices[t++] = bottomRight
+      indices[t++] = bottomLeft
     }
   }
 

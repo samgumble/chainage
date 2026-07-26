@@ -92,6 +92,49 @@ describe('sweepRibbon geometry', () => {
   })
 })
 
+describe('sweepRibbon winding', () => {
+  /**
+   * For every triangle, the face normal computed from vertex *positions*
+   * ((v1-v0) x (v2-v0)) must agree with the stored vertex *normal* at v0.
+   * The normals array is built independently of the index array, so this is
+   * the only check that ties winding to the normals it is supposed to match
+   * — a backwards index order (front face pointing down) would sail through
+   * every other test in this file while rendering the road inside-out.
+   */
+  const expectWindingMatchesNormals = (m: ReturnType<typeof sweepRibbon>) => {
+    for (let i = 0; i < m.indices.length; i += 3) {
+      const i0 = m.indices[i]!
+      const i1 = m.indices[i + 1]!
+      const i2 = m.indices[i + 2]!
+
+      const v0x = m.positions[i0 * 3]!, v0y = m.positions[i0 * 3 + 1]!, v0z = m.positions[i0 * 3 + 2]!
+      const v1x = m.positions[i1 * 3]!, v1y = m.positions[i1 * 3 + 1]!, v1z = m.positions[i1 * 3 + 2]!
+      const v2x = m.positions[i2 * 3]!, v2y = m.positions[i2 * 3 + 1]!, v2z = m.positions[i2 * 3 + 2]!
+
+      const ex = v1x - v0x, ey = v1y - v0y, ez = v1z - v0z
+      const fx = v2x - v0x, fy = v2y - v0y, fz = v2z - v0z
+
+      const nx = ey * fz - ez * fy
+      const ny = ez * fx - ex * fz
+      const nz = ex * fy - ey * fx
+
+      const dot = nx * m.normals[i0 * 3]! + ny * m.normals[i0 * 3 + 1]! + nz * m.normals[i0 * 3 + 2]!
+      expect(dot).toBeGreaterThan(0)
+    }
+  }
+
+  it('winds triangles so the face normal agrees with the vertex normal on a straight road', () => {
+    const m = sweepRibbon(straight(100), level(100, 50), flatSection, { spacing: 20 })
+    expectWindingMatchesNormals(m)
+  })
+
+  it('winds triangles so the face normal agrees with the vertex normal through a curve', () => {
+    const curve = new Alignment([new Arc(vec2(0, 0), 0, 200, 1 / 150)])
+    const m = sweepRibbon(curve, level(200, 50), flatSection, { spacing: 10 })
+    expectWindingMatchesNormals(m)
+  })
+})
+
 describe('sweepRibbon station range', () => {
   it('builds only the requested range', () => {
     const full = sweepRibbon(straight(100), level(100, 50), flatSection, { spacing: 25 })
@@ -151,5 +194,27 @@ describe('sweepRibbon validation', () => {
     expect(() => sweepRibbon(straight(100), level(100, 50), flatSection, {
       startStation: 80, endStation: 20,
     })).toThrow(RangeError)
+  })
+
+  it('rejects non-positive uvTileLength', () => {
+    expect(() => sweepRibbon(straight(100), level(100, 50), flatSection, { uvTileLength: 0 }))
+      .toThrow(RangeError)
+    expect(() => sweepRibbon(straight(100), level(100, 50), flatSection, { uvTileLength: -5 }))
+      .toThrow(RangeError)
+  })
+})
+
+describe('sweepRibbon station tolerance', () => {
+  it('does not append a near-duplicate final station from floating-point noise', () => {
+    // 100 / 3 * 3 lands a hair off 100 in floating point; the range should
+    // still end in exactly one final station at 100, not a sliver on top.
+    const m = sweepRibbon(straight(100), level(100, 50), flatSection, { spacing: 100 / 3 })
+    const stationCount = m.vertexCount / flatSection.length
+    // 3 steps of ~33.33 plus a snapped-to-100 final station: 4 stations total,
+    // not 5 (which a strict `<` comparison would produce from the fp residue).
+    expect(stationCount).toBe(4)
+
+    const lastCrownX = m.positions[(m.vertexCount - 2) * 3]!
+    expect(lastCrownX).toBeCloseTo(100, 4)
   })
 })
