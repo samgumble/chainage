@@ -16,12 +16,21 @@ const MAX_GRADE = 0.07
 const MAX_CUT_DEPTH = 12
 const MAX_FILL_HEIGHT = 10
 
-/** Layer colours: dark earth, grey aggregate, near-black asphalt. */
+/** Layer colours: warm earth, pale aggregate, dark asphalt — tuned for
+ * contrast against each other and against the terrain so the three
+ * differing end-stations are unmistakable. */
 const LAYER_COLOURS: Record<string, number> = {
-  subgrade: 0x6b5c48,
-  base: 0x8a8a86,
-  wearing: 0x2e3033,
+  subgrade: 0x8a6a3f,
+  base: 0xc7c3ba,
+  wearing: 0x35383d,
 }
+
+/** Orbit camera: one revolution every ORBIT_PERIOD_S seconds, looking down
+ * at the road's plan midpoint from a raised angle. */
+const ORBIT_CENTER = new THREE.Vector3(1300, 105, -1300)
+const ORBIT_RADIUS = 1400
+const ORBIT_HEIGHT = 700
+const ORBIT_PERIOD_S = 40
 
 const buildAlignment = (a: Vec2, corner: Vec2, b: Vec2): Alignment | null => {
   const dIn = sub(corner, a)
@@ -44,12 +53,17 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   renderer.setClearColor(0x14181d)
 
   const scene = new THREE.Scene()
-  scene.fog = new THREE.Fog(0x14181d, 1200, 3200)
+  // Pushed well past the orbit radius (~1400m) so it no longer greys out
+  // the terrain and road; kept as gentle depth cueing near the far clip.
+  scene.fog = new THREE.Fog(0x14181d, 3800, 6000)
 
   const camera = new THREE.PerspectiveCamera(45, 1, 1, 6000)
 
-  scene.add(new THREE.HemisphereLight(0xbdd7ff, 0x3a3227, 1.1))
-  const sun = new THREE.DirectionalLight(0xfff2d8, 2.2)
+  // three r185 uses physically-based lighting, so intensities read very
+  // differently to older three.js versions — these are tuned by eye to
+  // give the terrain clear form and separate the three road layers.
+  scene.add(new THREE.HemisphereLight(0xbdd7ff, 0x3a3227, 3.5))
+  const sun = new THREE.DirectionalLight(0xfff2d8, 4.5)
   sun.position.set(-600, 900, 400)
   scene.add(sun)
 
@@ -60,7 +74,12 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
 
   scene.add(new THREE.Mesh(
     terrainGeometry(terrain, 1),
-    new THREE.MeshStandardMaterial({ color: 0x5e6b4a, roughness: 0.95, flatShading: false }),
+    // DoubleSide: the raised orbit camera looks down on the terrain from
+    // angles the old near-level fixed camera never reached, and the grid
+    // winding culls as back-facing from directly above without this.
+    new THREE.MeshStandardMaterial({
+      color: 0x7a8a63, roughness: 0.95, flatShading: false, side: THREE.DoubleSide,
+    }),
   ))
 
   const alignment = buildAlignment(vec2(200, 1300), vec2(1400, 1200), vec2(2400, 1340))
@@ -96,10 +115,6 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     }
   }
 
-  // Look along the road from above and behind its start.
-  camera.position.set(-200, 420, -700)
-  camera.lookAt(1300, 110, -1280)
-
   const resize = () => {
     const w = canvas.clientWidth
     const h = canvas.clientHeight
@@ -110,12 +125,22 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   resize()
   window.addEventListener('resize', resize)
 
+  // Slow automatic orbit around the road's midpoint, at a raised angle
+  // looking down, so every side of the terrain and the layer stepping is
+  // eventually visible without manual input.
   let frame = 0
-  const tick = () => {
+  const tick = (timeMs: number) => {
     frame = requestAnimationFrame(tick)
+    const angle = (timeMs / 1000 / ORBIT_PERIOD_S) * Math.PI * 2
+    camera.position.set(
+      ORBIT_CENTER.x + Math.cos(angle) * ORBIT_RADIUS,
+      ORBIT_CENTER.y + ORBIT_HEIGHT,
+      ORBIT_CENTER.z + Math.sin(angle) * ORBIT_RADIUS,
+    )
+    camera.lookAt(ORBIT_CENTER)
     renderer.render(scene, camera)
   }
-  tick()
+  tick(0)
 
   return () => {
     cancelAnimationFrame(frame)
