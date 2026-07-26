@@ -3,6 +3,17 @@ import type { Pose, Primitive } from './primitives'
 
 /** Integration steps per metre. 0.5 gives sub-millimetre error at road scale. */
 const STEPS_PER_METRE = 0.5
+/**
+ * Extra integration steps per radian of total heading sweep over the
+ * integrated segment. STEPS_PER_METRE alone scales with length only, so a
+ * short, tightly-curving spiral (large heading change over little distance)
+ * under-samples the oscillating cos/sin integrand. 40 was chosen empirically
+ * against a 20000-interval Simpson reference: it brings a 40m spiral with
+ * curvature swinging from -1/10 to +1/10 (the reported failure case, ~2.7e-4
+ * error before this fix) down to ~5e-8, comfortably under the 5e-5 tolerance
+ * implied by the tests' toBeCloseTo(x, 4).
+ */
+const STEPS_PER_RADIAN = 40
 const MIN_STEPS = 16
 
 /**
@@ -41,8 +52,13 @@ export class Spiral implements Primitive {
   poseAt(s: number): Pose {
     const t = s < 0 ? 0 : s > this.length ? this.length : s
 
+    // Bound the total heading swept over [0, t]: for a rate that changes
+    // sign this isn't the net turn, but (|k0| + |k(t)|)/2 * t safely bounds
+    // the swept magnitude that drives how fast cos/sin oscillate.
+    const sweep = (Math.abs(this.startCurvature) + Math.abs(this.curvatureAt(t))) / 2 * t
+
     // Composite Simpson's rule needs an even number of intervals.
-    let n = Math.max(MIN_STEPS, Math.ceil(t * STEPS_PER_METRE))
+    let n = Math.max(MIN_STEPS, Math.ceil(t * STEPS_PER_METRE + sweep * STEPS_PER_RADIAN))
     if (n % 2 !== 0) n += 1
 
     const h = t / n
