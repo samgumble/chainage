@@ -105,11 +105,17 @@ export const solveJunction = (
         return { feasible: false, reason: 'near-parallel-legs' }
       }
       // Opposite: a road running straight through. The facing edges are
-      // parallel — coincident when the widths match — so there is no unique
-      // crossing point, but nothing is wrong. Put the corner at the foot of
-      // the perpendicular, laterally at the wider of the two. Being
-      // perpendicular to both legs, it contributes zero trim, which is right:
-      // a through road needs no pulling back on its outer side.
+      // parallel — coincident when the widths match, so any point on them
+      // serves and the perpendicular foot is the natural choice. For unequal
+      // widths they are offset, and choosing the wider half-width makes the
+      // narrower road's boundary flare outward to meet it. This avoids leaving
+      // a gap at the wider road's edge and keeps the junction convex; the
+      // alternative of taking the narrower would leave the wider road outside
+      // the polygon, and a midpoint would gap one side and overlap the other.
+      // The visible consequence is a slight flare at an asymmetric T junction,
+      // which is what a real road junction does anyway. Being perpendicular to
+      // both legs, it contributes zero trim, which is right: a through road
+      // needs no pulling back on its outer side.
       corners.push({
         position: scale(leftI, Math.max(legI.halfWidth, legJ.halfWidth)),
         beforeLeg: i,

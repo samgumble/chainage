@@ -74,6 +74,27 @@ describe('solveJunction feasibility', () => {
     expect(r.feasible).toBe(true)
   })
 
+  it('places an unequal-width through pair corner at the wider half-width', () => {
+    // A through pair with unequal widths (4 and 9) plus a third leg for a valid junction.
+    // The corner between the opposite pair should sit at the wider width's offset,
+    // not the narrower width or a midpoint.
+    const legs = [
+      { roadId: 0, end: 'start' as const, direction: fromAngle(-Math.PI / 2), halfWidth: 4, bearing: -Math.PI / 2 },
+      { roadId: 1, end: 'start' as const, direction: fromAngle(Math.PI / 2), halfWidth: 9, bearing: Math.PI / 2 },
+      { roadId: 2, end: 'start' as const, direction: fromAngle(Math.PI), halfWidth: 5, bearing: Math.PI },
+    ].sort((a, b) => a.bearing - b.bearing)
+    const r = solveJunction(legs)
+    expect(r.feasible).toBe(true)
+    if (!r.feasible) return
+    // Find the corner between the opposite pair (beforeLeg 0, afterLeg 1).
+    const throughCorner = r.corners.find((c) => c.beforeLeg === 0 && c.afterLeg === 1)
+    expect(throughCorner).toBeDefined()
+    if (!throughCorner) return
+    // The lateral distance should be exactly the wider half-width (9, not 4 or 6.5).
+    const lateralDistance = Math.hypot(throughCorner.position.x, throughCorner.position.y)
+    expect(lateralDistance).toBeCloseTo(9, 6)
+  })
+
   it('rejects a junction demanding an absurd trim', () => {
     // A very acute pair pushes the corner far from the node.
     const r = solveJunction(legsAt([0, 2, 180]), MAX_TRIM_DISTANCE)
