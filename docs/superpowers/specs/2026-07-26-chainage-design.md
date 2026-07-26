@@ -340,7 +340,7 @@ Set `instanceMatrix.setUsage(THREE.DynamicDrawUsage)` — `InstancedMesh` does n
 - **three.js** r185, WebGL2 (WebGPU is ~84% coverage with real gaps on Firefox Linux and Android; nothing here requires it)
 - **Vitest** for unit tests, particularly `geometry/` and `sim/`
 - **Web Worker** via `new Worker(new URL('./sim.worker.ts', import.meta.url), {type: 'module'})` — the `new URL()` must be inline, not hoisted, or it silently 404s in production
-- Static build → GitHub Pages
+- Static build → GitHub Pages at `https://samgumble.github.io/chainage/`, so `base: '/chainage/'`
 - Save via `localStorage`, with schema versioning from the first release
 
 ## 9. Milestones
@@ -376,7 +376,6 @@ Rationale: the drag-a-road interaction is touched every second of play — if it
 
 ## 11. Open questions
 
-- GitHub username and repository name (needed for Vite `base` before first deploy)
 - Final name — Chainage is a placeholder
 - Mobile/touch support: out of scope for now, revisit after M1
 - Audio direction: deferred to M5
