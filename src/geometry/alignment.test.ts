@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { Alignment } from './alignment'
+import { Alignment, checkContinuity } from './alignment'
 import { Line, Arc } from './primitives'
 import { vec2 } from './vec2'
 
@@ -130,5 +130,86 @@ describe('Alignment.primitiveAt', () => {
 
   it('throws on an empty alignment', () => {
     expect(() => new Alignment([]).primitiveAt(0)).toThrow(RangeError)
+  })
+})
+
+describe('Alignment continuity', () => {
+  it('reports no breaks for a sound chain', () => {
+    const a = new Alignment([
+      new Line(vec2(0, 0), 0, 50),
+      new Line(vec2(50, 0), 0, 50),
+    ])
+    expect(a.continuityBreaks).toEqual([])
+    expect(a.isContinuous).toBe(true)
+  })
+
+  it('reports no breaks for a line meeting an arc tangentially', () => {
+    const a = new Alignment([
+      new Line(vec2(0, 0), 0, 50),
+      new Arc(vec2(50, 0), 0, 100, 1 / 200),
+    ])
+    expect(a.isContinuous).toBe(true)
+  })
+
+  it('detects a position gap', () => {
+    const a = new Alignment([
+      new Line(vec2(0, 0), 0, 50),
+      new Line(vec2(51, 0), 0, 50),   // starts 1m past where the first ends
+    ])
+    expect(a.isContinuous).toBe(false)
+    expect(a.continuityBreaks).toHaveLength(1)
+    expect(a.continuityBreaks[0]!.index).toBe(1)
+    expect(a.continuityBreaks[0]!.positionGap).toBeCloseTo(1, 6)
+  })
+
+  it('detects a heading kink even when positions match', () => {
+    const a = new Alignment([
+      new Line(vec2(0, 0), 0, 50),
+      new Line(vec2(50, 0), 0.3, 50),   // same point, 0.3 rad kink
+    ])
+    expect(a.isContinuous).toBe(false)
+    expect(a.continuityBreaks[0]!.headingGap).toBeCloseTo(0.3, 6)
+    expect(a.continuityBreaks[0]!.positionGap).toBeCloseTo(0, 6)
+  })
+
+  it('tolerates a sub-millimetre position gap', () => {
+    const a = new Alignment([
+      new Line(vec2(0, 0), 0, 50),
+      new Line(vec2(50.0001, 0), 0, 50),
+    ])
+    expect(a.isContinuous).toBe(true)
+  })
+
+  it('measures the heading gap across the PI wraparound', () => {
+    // Both headings point very nearly west; naive subtraction would give ~2*PI.
+    const a = new Alignment([
+      new Line(vec2(0, 0), Math.PI - 1e-6, 50),
+      new Line(new Line(vec2(0, 0), Math.PI - 1e-6, 50).poseAt(50).position, -Math.PI + 1e-6, 50),
+    ])
+    expect(a.isContinuous).toBe(true)
+  })
+
+  it('reports every break in a chain with several', () => {
+    const a = new Alignment([
+      new Line(vec2(0, 0), 0, 10),
+      new Line(vec2(11, 0), 0, 10),
+      new Line(vec2(30, 0), 0, 10),
+    ])
+    expect(a.continuityBreaks).toHaveLength(2)
+    expect(a.continuityBreaks.map((b) => b.index)).toEqual([1, 2])
+  })
+
+  it('treats an empty or single-primitive alignment as continuous', () => {
+    expect(new Alignment([]).isContinuous).toBe(true)
+    expect(new Alignment([new Line(vec2(0, 0), 0, 10)]).isContinuous).toBe(true)
+  })
+
+  it('exposes checkContinuity independently of the class', () => {
+    const breaks = checkContinuity([
+      new Line(vec2(0, 0), 0, 50),
+      new Line(vec2(55, 0), 0, 50),
+    ])
+    expect(breaks).toHaveLength(1)
+    expect(breaks[0]!.positionGap).toBeCloseTo(5, 6)
   })
 })
