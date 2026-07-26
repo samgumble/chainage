@@ -297,7 +297,7 @@ Strict dependency direction. Nothing below depends on anything above it.
 | `geometry/` | Alignment primitives, curve math, offsets, fillets | nothing |
 | `terrain/` | Heightmap, edit layers, cut/fill volumes | `geometry` |
 | `network/` | Road graph: nodes, edges, classes, topology ops | `geometry` |
-| `mesh/` | Road ribbons, junction polygons, bridges → BufferGeometry | `geometry`, `network`, `terrain` |
+| `mesh/` | **Layered** road ribbons, junction polygons, bridges → BufferGeometry | `geometry`, `network`, `terrain` |
 | `sim/` | **Worker.** Traffic, routing, demand, pavement | `network` (serialized) |
 | `render/` | three.js scene, camera, materials, post | `mesh`, sim snapshots |
 | `tools/` | Road tool: control points, snapping, preview, commit | all of the above |
@@ -356,6 +356,10 @@ M1's renderer scope is deliberately bounded: terrain, road, and water materials 
 Rationale: the drag-a-road interaction is touched every second of play — if it is not superb, no amount of simulation depth compensates. It is also where the hardest technical problems meet (spline geometry, mesh generation, junction polygons, terrain deformation), so failing there early is cheap.
 
 **M2 — Traffic.** Vehicle simulation, routing, intersection control, the delay-ratio overlay.
+
+**M2.5 — Construction.** Build sequence with equipment, then engineering representation (in-world annotations, blueprint view, inspector). Specified separately in [2026-07-26-construction-visualization-design.md](2026-07-26-construction-visualization-design.md).
+
+That spec imposes one requirement that reaches back into M1: **road meshes must be layer-aware** — subgrade, base and wearing course separately addressable, each drawable to an arbitrary station along the alignment — so a road can be rendered mid-construction. Retrofitting this onto a monolithic road mesh would mean rewriting mesh generation, which is already the project's highest-risk component. It belongs in the mesh plan from the outset, not later.
 
 **M3 — Region.** Towns, demand, growth, accessibility, induced demand.
 
