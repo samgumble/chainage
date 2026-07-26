@@ -796,14 +796,27 @@ describe('solveGradeProfile — feasible cases', () => {
   })
 
   it('stays within the permitted cut and fill envelope', () => {
+    // Ground rises 5m per 25m station — a 20% grade against a 7% limit — so
+    // the solver must deviate substantially and the envelope genuinely binds.
+    // A 10m allowance is the smallest that keeps this feasible: the solution
+    // lands exactly on the cut limit at the final station. With 6m the bands
+    // collapse to min 114 > max 113 there and the alignment is infeasible.
     const gp = ground([100, 105, 110, 115, 120])
-    const r = solveGradeProfile(gp, constraints({ maxCutDepth: 6, maxFillHeight: 6 }))
+    const allowance = 10
+    const r = solveGradeProfile(
+      gp,
+      constraints({ maxCutDepth: allowance, maxFillHeight: allowance }),
+    )
     expect(r.feasible).toBe(true)
     if (!r.feasible) return
     r.profile.forEach((p, i) => {
-      expect(p.z).toBeGreaterThanOrEqual(gp[i]!.z - 6 - 1e-9)
-      expect(p.z).toBeLessThanOrEqual(gp[i]!.z + 6 + 1e-9)
+      expect(p.z).toBeGreaterThanOrEqual(gp[i]!.z - allowance - 1e-9)
+      expect(p.z).toBeLessThanOrEqual(gp[i]!.z + allowance + 1e-9)
     })
+    // The last station sits exactly at the cut limit, so this is not a
+    // vacuous pass — a solver that ignored the envelope would overshoot it.
+    const last = r.profile[r.profile.length - 1]!
+    expect(last.z).toBeCloseTo(gp[gp.length - 1]!.z - allowance, 6)
   })
 
   it('honours fixed start and end elevations', () => {
@@ -1052,12 +1065,29 @@ At any station, what elevation does the earthworks design surface sit at, a give
 - Create: `src/terrain/corridor.ts`
 - Test: `src/terrain/corridor.test.ts`
 
+**Retaining walls are part of this task.** A retaining wall is what you build when there is not enough room to run a batter out to natural ground — a constrained corridor, a property boundary, a watercourse. It is a cross-section variant, not a structure added afterwards, which is why it belongs here rather than in the mesh plan.
+
+The template gains an optional `maxBatterWidth`. When the batter needed to reach natural ground would exceed it, the batter is truncated at that width and a vertical retaining wall makes up the remaining height. The maths:
+
+```
+depth              = |groundZ − designZ|
+naturalBatterWidth = depth × slope
+if maxBatterWidth is undefined or naturalBatterWidth ≤ maxBatterWidth:
+    no wall, height 0
+else:
+    wall stands at offset (formationHalfWidth + maxBatterWidth)
+    wall height = depth − maxBatterWidth / slope
+```
+
+Two sanity checks worth holding onto: `maxBatterWidth = 0` gives a wall of the full depth, and `maxBatterWidth = naturalBatterWidth` gives a wall of exactly zero. Both fall out of the formula.
+
 **Interfaces:**
 - Consumes: nothing
 - Produces:
-  - `type CorridorTemplate = { formationHalfWidth: number; cutSlope: number; fillSlope: number }` — slopes are horizontal-to-vertical ratios; `2` means 2H:1V
-  - `designElevationAt(offset: number, designZ: number, groundZ: number, template: CorridorTemplate): number` — elevation of the design surface at transverse `offset` metres from the centreline. Throws `RangeError` if `formationHalfWidth < 0` or either slope is `<= 0`.
+  - `type CorridorTemplate = { formationHalfWidth: number; cutSlope: number; fillSlope: number; maxBatterWidth?: number }` — slopes are horizontal-to-vertical ratios; `2` means 2H:1V. `maxBatterWidth` is in metres; omitted means batters may run out as far as they need.
+  - `designElevationAt(offset: number, designZ: number, groundZ: number, template: CorridorTemplate): number` — elevation of the design surface at transverse `offset` metres from the centreline. Throws `RangeError` if `formationHalfWidth < 0`, either slope is `<= 0`, or `maxBatterWidth` is present and negative.
   - `isDaylighted(offset: number, designZ: number, groundZ: number, template: CorridorTemplate): boolean` — true once the side slope has met or passed natural ground at this offset
+  - `retainingWall(designZ: number, groundZ: number, template: CorridorTemplate): { readonly offset: number; readonly height: number } | null` — where the wall stands and how tall it is, or `null` when no wall is needed. `offset` is the distance from the centreline, always positive; a wall exists symmetrically on both sides.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1065,7 +1095,7 @@ At any station, what elevation does the earthworks design surface sit at, a give
 
 ```ts
 import { describe, it, expect } from 'vitest'
-import { designElevationAt, isDaylighted, type CorridorTemplate } from './corridor'
+import { designElevationAt, isDaylighted, retainingWall, type CorridorTemplate } from './corridor'
 
 const template = (over: Partial<CorridorTemplate> = {}): CorridorTemplate => ({
   formationHalfWidth: 5,
@@ -1151,11 +1181,65 @@ describe('isDaylighted', () => {
   })
 })
 
+describe('retaining walls', () => {
+  it('needs no wall when the batter has room to daylight', () => {
+    // 2m cut at 2H:1V needs 4m of batter; 10m is available.
+    expect(retainingWall(100, 102, template({ maxBatterWidth: 10 }))).toBeNull()
+  })
+
+  it('needs no wall when maxBatterWidth is not set', () => {
+    expect(retainingWall(100, 130, template())).toBeNull()
+  })
+
+  it('stands the wall at the end of the permitted batter', () => {
+    // 5m cut at 2H:1V wants 10m of batter, but only 4m is available.
+    const wall = retainingWall(100, 105, template({ maxBatterWidth: 4 }))!
+    expect(wall).not.toBeNull()
+    expect(wall.offset).toBeCloseTo(9, 9)   // formationHalfWidth 5 + 4
+  })
+
+  it('makes up exactly the height the batter could not', () => {
+    // depth 5, batter covers 4/2 = 2m of it, so the wall is 3m.
+    const wall = retainingWall(100, 105, template({ maxBatterWidth: 4 }))!
+    expect(wall.height).toBeCloseTo(3, 9)
+  })
+
+  it('gives a full-depth wall when no batter is allowed at all', () => {
+    const wall = retainingWall(100, 105, template({ maxBatterWidth: 0 }))!
+    expect(wall.height).toBeCloseTo(5, 9)
+    expect(wall.offset).toBeCloseTo(5, 9)
+  })
+
+  it('gives exactly zero height when the allowance equals what is needed', () => {
+    // 3m fill at 3H:1V needs exactly 9m of batter.
+    expect(retainingWall(100, 97, template({ maxBatterWidth: 9 }))).toBeNull()
+  })
+
+  it('uses the fill slope on fill sections', () => {
+    // 4m fill at 3H:1V wants 12m; only 6m allowed, so batter covers 2m.
+    const wall = retainingWall(100, 96, template({ maxBatterWidth: 6 }))!
+    expect(wall.height).toBeCloseTo(2, 9)
+  })
+
+  it('needs no wall where design sits on natural ground', () => {
+    expect(retainingWall(100, 100, template({ maxBatterWidth: 0 }))).toBeNull()
+  })
+
+  it('truncates the design surface at the wall', () => {
+    const t = template({ maxBatterWidth: 4 })
+    // Inside the permitted batter the surface still climbs.
+    expect(designElevationAt(7, 100, 105, t)).toBeCloseTo(101, 9)
+    // Beyond the wall there is no earthwork — the surface is natural ground.
+    expect(designElevationAt(12, 100, 105, t)).toBeCloseTo(105, 9)
+  })
+})
+
 describe('designElevationAt — validation', () => {
   it('rejects an invalid template', () => {
     expect(() => designElevationAt(0, 100, 95, template({ formationHalfWidth: -1 }))).toThrow(RangeError)
     expect(() => designElevationAt(0, 100, 95, template({ cutSlope: 0 }))).toThrow(RangeError)
     expect(() => designElevationAt(0, 100, 95, template({ fillSlope: -2 }))).toThrow(RangeError)
+    expect(() => designElevationAt(0, 100, 95, template({ maxBatterWidth: -1 }))).toThrow(RangeError)
   })
 })
 ```
@@ -1189,6 +1273,11 @@ export type CorridorTemplate = {
   cutSlope: number
   /** Fill batter, horizontal-to-vertical. */
   fillSlope: number
+  /**
+   * How far a batter may run out from the formation edge before a retaining
+   * wall takes over, metres. Omitted means batters may run as far as needed.
+   */
+  maxBatterWidth?: number
 }
 
 const validate = (t: CorridorTemplate): void => {
@@ -1197,6 +1286,47 @@ const validate = (t: CorridorTemplate): void => {
   }
   if (t.cutSlope <= 0 || t.fillSlope <= 0) {
     throw new RangeError('slopes must be positive')
+  }
+  if (t.maxBatterWidth !== undefined && t.maxBatterWidth < 0) {
+    throw new RangeError('maxBatterWidth must not be negative')
+  }
+}
+
+/** Which batter applies here — cut above the design line, fill below. */
+const slopeFor = (designZ: number, groundZ: number, t: CorridorTemplate): number =>
+  groundZ > designZ ? t.cutSlope : t.fillSlope
+
+/**
+ * Where a retaining wall stands and how tall it is, or null if none is needed.
+ *
+ * A wall is what you build when there is not enough room to run a batter out
+ * to natural ground — a constrained corridor, a property boundary, a
+ * watercourse. The batter is truncated at `maxBatterWidth` and a vertical
+ * wall makes up whatever height it could not.
+ *
+ * `offset` is distance from the centreline and is always positive; the wall
+ * exists symmetrically on both sides.
+ */
+export const retainingWall = (
+  designZ: number,
+  groundZ: number,
+  template: CorridorTemplate,
+): { readonly offset: number; readonly height: number } | null => {
+  validate(template)
+
+  const { maxBatterWidth } = template
+  if (maxBatterWidth === undefined) return null
+
+  const depth = Math.abs(groundZ - designZ)
+  if (depth === 0) return null
+
+  const slope = slopeFor(designZ, groundZ, template)
+  const naturalBatterWidth = depth * slope
+  if (naturalBatterWidth <= maxBatterWidth) return null
+
+  return {
+    offset: template.formationHalfWidth + maxBatterWidth,
+    height: depth - maxBatterWidth / slope,
   }
 }
 
@@ -1218,6 +1348,15 @@ export const designElevationAt = (
 
   const beyondFormation = Math.abs(offset) - template.formationHalfWidth
   if (beyondFormation <= 0) return designZ
+
+  // Past a retaining wall there is no earthwork at all — the wall holds the
+  // ground back and the surface beyond it is simply natural ground.
+  if (
+    template.maxBatterWidth !== undefined &&
+    beyondFormation > template.maxBatterWidth
+  ) {
+    return groundZ
+  }
 
   if (groundZ > designZ) {
     // Cut: the batter climbs outward toward the higher ground.
@@ -1254,7 +1393,7 @@ export const isDaylighted = (
 npm test -- src/terrain/corridor.test.ts
 ```
 
-Expected: PASS, 13 tests.
+Expected: PASS, 22 tests.
 
 - [ ] **Step 5: Verify the typecheck**
 
@@ -1268,7 +1407,7 @@ Expected: no TypeScript errors.
 
 ```bash
 git add src/terrain/corridor.ts src/terrain/corridor.test.ts
-git commit -m "feat: add corridor cross-section with cut and fill batters"
+git commit -m "feat: add corridor cross-section with batters and retaining walls"
 ```
 
 ---
@@ -1284,8 +1423,10 @@ The average end-area method: compute cut and fill *areas* at each station, then 
 **Interfaces:**
 - Consumes: `Alignment` from `../geometry/alignment`; `Heightmap` from `./heightmap`; `ProfilePoint` from `./groundProfile`; `CorridorTemplate`, `designElevationAt` from `./corridor`
 - Produces:
-  - `type StationAreas = { readonly s: number; readonly cutArea: number; readonly fillArea: number }`
-  - `type EarthworkQuantities = { readonly stations: StationAreas[]; readonly cutVolume: number; readonly fillVolume: number; readonly netVolume: number }` — `netVolume` is `cutVolume - fillVolume`; positive means surplus to dispose of, negative means material must be imported
+  - `type StationAreas = { readonly s: number; readonly cutArea: number; readonly fillArea: number; readonly truncated: boolean }` — `truncated` is true when the section reached the safety cap without daylighting, so its areas are an under-estimate
+  - `type EarthworkQuantities = { readonly stations: StationAreas[]; readonly cutVolume: number; readonly fillVolume: number; readonly netVolume: number; readonly truncatedStations: number }` — `netVolume` is `cutVolume - fillVolume`; positive means surplus to dispose of, negative means material must be imported. A non-zero `truncatedStations` means the quantities are an under-estimate.
+
+> **The integration bound must be found by marching, not predicted.** An earlier draft of this task derived a fixed half-width from the depth at the centreline. That silently under-reports on cross-sloped ground: where the ground rises away from the centreline, the uphill batter daylights well beyond a bound computed from the centre, and the loop stops without ever checking whether daylight was reached. Since the game's terrain is a valley, cross-slope is the normal case, not an edge case. March outward on each side independently until the design surface has equalled natural ground for four consecutive samples, cap at `MAX_SECTION_HALF_WIDTH = 500` metres, and report `truncated` when the cap is hit — so an under-estimate is visible rather than silent.
   - `crossSectionAreas(alignment: Alignment, terrain: Heightmap, station: ProfilePoint, template: CorridorTemplate, transverseStep?: number): StationAreas` — `transverseStep` defaults to `0.5` metres
   - `computeEarthworks(alignment: Alignment, terrain: Heightmap, design: readonly ProfilePoint[], template: CorridorTemplate, transverseStep?: number): EarthworkQuantities`
 
@@ -1881,7 +2022,13 @@ import type { CorridorTemplate } from '../terrain/corridor'
 
 const SAMPLE_SPACING = 10
 const MAX_GRADE = 0.07
-const CURVE_RADIUS = 300
+const CURVE_RADIUS = 400
+
+// Cut and fill allowances, metres. Chosen by measuring candidate routes across
+// this terrain rather than guessed: 12/10 is the tightest envelope under which
+// the route below is feasible, and it yields a near-balanced design.
+const MAX_CUT_DEPTH = 12
+const MAX_FILL_HEIGHT = 10
 
 const TEMPLATE: CorridorTemplate = {
   formationHalfWidth: 5,
@@ -1924,9 +2071,15 @@ export const drawLongSection = (canvas: HTMLCanvasElement): void => {
     floorElevation: 100, ridgeHeight: 70, valleyHalfWidth: 400, seed: 7,
   })
 
-  // A road climbing from the valley floor up over the northern ridge.
+  // A road running the length of the valley, crossing the meandering axis
+  // twice. Route chosen by measurement, not by eye: a road climbing the ridge
+  // flank is genuinely infeasible here — the smoothstep gives that flank a 26%
+  // gradient against a 7% limit — and routes that merely survive it move around
+  // 250 m3 per metre, which is mountain-pass earthmoving, not a valley road.
+  // This one is feasible at the tightest envelope and comes out nearly
+  // balanced, which is what a designer actually aims for.
   const alignment = buildAlignment(
-    vec2(200, 1280), vec2(1400, 1280), vec2(2200, 2200),
+    vec2(200, 1300), vec2(1400, 1200), vec2(2400, 1340),
   )
   if (!alignment) return
 
@@ -1934,7 +2087,9 @@ export const drawLongSection = (canvas: HTMLCanvasElement): void => {
   if (ground.length < 2) return
 
   const solution = solveGradeProfile(ground, {
-    maxGrade: MAX_GRADE, maxCutDepth: 15, maxFillHeight: 12,
+    maxGrade: MAX_GRADE,
+    maxCutDepth: MAX_CUT_DEPTH,
+    maxFillHeight: MAX_FILL_HEIGHT,
   })
 
   const pad = { left: 70, right: 30, top: 60, bottom: 50 }
@@ -2046,6 +2201,19 @@ export const drawLongSection = (canvas: HTMLCanvasElement): void => {
     pad.left, 46,
   )
 
+  // A truncated section reached the integration safety cap without daylighting,
+  // so its quantities are an under-estimate. Say so rather than presenting the
+  // number as fact — a silent under-report is the exact failure this flag exists
+  // to prevent, and it would otherwise flow straight into cost and duration.
+  if (quantities.truncatedStations > 0) {
+    ctx.fillStyle = '#d87a54'
+    ctx.fillText(
+      `⚠ ${quantities.truncatedStations} of ${quantities.stations.length} sections truncated ` +
+      `— quantities are an under-estimate`,
+      pad.left, 66,
+    )
+  }
+
   ctx.fillStyle = '#5d6b7a'
   ctx.fillText('natural ground ——   design line ——   cut ▨   fill ▨', pad.left, h - 18)
 }
@@ -2093,7 +2261,7 @@ Expected: no TypeScript errors. If `tsc` reports `alignmentPreview.ts` is still 
 npm test
 ```
 
-Expected: PASS, 145 tests across 13 files — the 69 from plan 1, plus 10 heightmap, 7 generate, 6 groundProfile, 14 gradeSolver, 13 corridor, 14 volumes, 12 editLayer.
+Expected: PASS, 159 tests across 13 files — the 69 from plan 1, plus 15 heightmap, 7 generate, 6 groundProfile, 14 gradeSolver, 22 corridor, 14 volumes, 12 editLayer.
 
 - [ ] **Step 5: Commit and push**
 
@@ -2112,7 +2280,8 @@ What the reviewer will check:
 - The design line stays visibly gentler than the ground wherever the ground is steep — that is the grade solver working.
 - Reported max grade is at or just under 7%, never above.
 - Cut bands appear where the design line runs *below* ground, fill bands where it runs *above*. Reversed colouring means the sign convention is inverted somewhere in the chain.
-- Cut and fill volumes are plausible for a road of this length — thousands to tens of thousands of cubic metres, not tens or millions.
+- Cut and fill volumes are plausible **per metre of road**, which is the figure that actually means something. Expect roughly 50–100 m³/m on this terrain: a 7% limit over rolling ground forces real earthworks. On the 2,214m route that is around 150,000 m³ of each. An absolute total tells you nothing without the length beside it.
+- Cut and fill come out close to balanced. That is not luck — it is what the grade solver's hug-the-ground selection produces, and it is what a designer aims for, since hauling surplus off site or importing material both cost money.
 - The design line does not float implausibly far from the ground; the cut and fill allowances should keep it within about 15m.
 
 ---
@@ -2123,7 +2292,11 @@ At the end of this plan, roads have a vertical dimension: terrain can be sampled
 
 ### Deliberately not in this plan
 
-**Bridges.** The design spec (§4.2) requires that a bridge generate automatically where the design profile sits far enough above terrain — deck, piers at intervals, abutments. That is mesh generation, so it belongs in plan 3 alongside road ribbons and junction polygons, not here. This plan supplies the input it needs: the height of the design line above natural ground at every station, which is exactly the trigger condition.
+**Bridges and overpasses.** Both generate geometry — deck, piers at intervals, abutments — so they belong in plan 3 with road ribbons and junction polygons. An overpass additionally needs the road network graph, because it has to know what it is crossing and at what clearance; that graph does not exist until plan 3 either.
+
+This plan supplies exactly the trigger condition they need. The height of the design line above natural ground is available at every station from `solveGradeProfile`, and it is what decides between an embankment and a structure: below a threshold you fill, above it the fill becomes uneconomic and absurd-looking and you build a bridge instead.
+
+**Retaining walls are NOT deferred** — they are in Task 5. A wall is a cross-section variant chosen when there is no room for a batter, not a structure added on top of finished earthworks, so it belongs with the corridor. Task 5 returns where the wall stands and how tall it is; plan 3 turns that into geometry.
 
 **Applying the corridor to the edit layer.** `TerrainEditLayer` is built and fully tested here, but nothing in this plan writes earthwork deformation into it. Wiring the corridor through to actual terrain deformation belongs with the interactive tool in plan 4, where an edit becomes something the player commits and can undo. Building the layer now — rather than when it is first needed — is deliberate: it is the piece that makes undo possible, and it is cheaper to get right in isolation than under pressure from the tool.
 

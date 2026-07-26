@@ -1,4 +1,4 @@
-import { drawAlignmentPreview } from './debug/alignmentPreview'
+import { drawLongSection } from './debug/longSectionPreview'
 
 const app = document.getElementById('app')
 
@@ -9,7 +9,7 @@ if (app) {
   canvas.style.display = 'block'
   app.appendChild(canvas)
 
-  const render = () => drawAlignmentPreview(canvas)
+  const render = () => drawLongSection(canvas)
   render()
   window.addEventListener('resize', render)
 }
