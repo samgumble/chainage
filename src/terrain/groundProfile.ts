@@ -79,3 +79,38 @@ export const sampleGroundProfile = (
 
   return points
 }
+
+/**
+ * Design (or ground) elevation at an arbitrary station, linearly interpolated
+ * between the profile points bracketing it — the shared longitudinal
+ * counterpart to `designSurfaceAtOffset` in `src/terrain/corridor.ts`, which
+ * answers the transverse question (elevation across the corridor at a fixed
+ * station) rather than this one (elevation along the alignment at a fixed
+ * offset).
+ *
+ * `profile` is assumed sorted by station, which both `sampleGroundProfile`
+ * and `solveGradeProfile` guarantee. Returns 0 for an empty profile, and
+ * clamps to the first/last point's elevation for `s` outside the profile's
+ * range.
+ */
+export const designElevationAtStation = (
+  profile: readonly ProfilePoint[],
+  s: number,
+): number => {
+  if (profile.length === 0) return 0
+  const first = profile[0]!
+  const last = profile[profile.length - 1]!
+  if (s <= first.s) return first.z
+  if (s >= last.s) return last.z
+
+  for (let i = 1; i < profile.length; i++) {
+    const a = profile[i - 1]!
+    const b = profile[i]!
+    if (s <= b.s) {
+      const span = b.s - a.s
+      const t = span === 0 ? 0 : (s - a.s) / span
+      return a.z + (b.z - a.z) * t
+    }
+  }
+  return last.z
+}

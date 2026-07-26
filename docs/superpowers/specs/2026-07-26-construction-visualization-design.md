@@ -24,7 +24,7 @@ The whole system rests on one idea, and everything else falls out of it.
 **A road under construction carries seven completion stations** — distances along its alignment, one per layer:
 
 ```
-cleared ≥ earthworks ≥ structures ≥ subgrade ≥ base ≥ surface ≥ marked
+cleared ≥ earthworks ≥ structures ≥ subgrade ≥ base ≥ wearing ≥ marked
 ```
 
 Each is a distance in metres from the alignment's start. The ordering is a hard invariant: a layer can never overtake the layer beneath it, because you cannot pave ground you have not graded.
@@ -62,7 +62,7 @@ Eight phases, each with the equipment that actually performs it.
 | 5 | Structures | `structures` | Piling rig, crawler crane, concrete truck, formwork crew |
 | 6 | Subgrade | `subgrade` | Motor grader trimming, smooth drum roller |
 | 7 | Base course | `base` | Tippers dropping aggregate, grader spreading, roller |
-| 8 | Surfacing | `surface` | Asphalt paver fed by haul truck, tandem roller, steam |
+| 8 | Surfacing | `wearing` | Asphalt paver fed by haul truck, tandem roller, steam |
 | 9 | Line marking | `marked` | Line marking truck |
 
 Two of these need their relationship to the six stations spelled out, or the model is ambiguous.

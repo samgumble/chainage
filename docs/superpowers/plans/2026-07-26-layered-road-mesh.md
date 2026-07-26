@@ -1563,7 +1563,12 @@ export const sweepRibbon = (
 
     for (let j = 0; j < across; j++) {
       const point = section[j]!
-      const p = add(pose.position, scale(normal, point.offset))
+      // `normal` points LEFT of travel, but SectionPoint.offset is negative to
+      // the left (positive-is-right, the CAD convention). So the offset must be
+      // negated to land on the correct side. Getting this wrong mirrors the
+      // section, which is invisible on a symmetric road and silently swaps
+      // lane sides the moment anything is asymmetric.
+      const p = add(pose.position, scale(normal, -point.offset))
 
       positions[v * 3] = p.x
       positions[v * 3 + 1] = p.y
@@ -1632,13 +1637,17 @@ export const sweepRibbon = (
       const bottomLeft = topLeft + across
       const bottomRight = bottomLeft + 1
 
+      // Winding must agree with the vertex normals computed above, or the
+      // whole road renders inside-out and is backface-culled from the only
+      // angle anyone looks at it from. The face normal of (A, B, C) is
+      // (B-A) x (C-A); both triangles below give across x along, matching.
       indices[t++] = topLeft
-      indices[t++] = bottomLeft
       indices[t++] = topRight
+      indices[t++] = bottomLeft
 
       indices[t++] = topRight
-      indices[t++] = bottomLeft
       indices[t++] = bottomRight
+      indices[t++] = bottomLeft
     }
   }
 

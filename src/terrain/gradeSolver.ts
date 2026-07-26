@@ -8,11 +8,26 @@ export type GradeConstraints = {
   readonly maxCutDepth: number
   /** How far above natural ground the road may be filled, metres. */
   readonly maxFillHeight: number
+  /**
+   * How far above natural ground the road may be carried on a STRUCTURE,
+   * metres. Must be at least `maxFillHeight`; defaults to it, meaning no
+   * structures are permitted.
+   *
+   * Without this the solver can never produce a design line standing high
+   * above the ground, so a ravine that ought to become a bridge reads as an
+   * impossible alignment instead. Below `maxFillHeight` the gap is closed with
+   * earth; between the two it is a structure; beyond it, genuinely infeasible.
+   * The cut side is unaffected — a bridge does not help you get through a hill.
+   */
+  readonly maxStructureHeight?: number
   /** Elevation the profile must start at, if tied to existing road. */
   readonly fixedStart?: number
   /** Elevation the profile must end at, if tied to existing road. */
   readonly fixedEnd?: number
 }
+
+/** How a station is held up. */
+export type StationSupport = 'earthwork' | 'structure'
 
 export type GradeSolution =
   | { readonly feasible: true; readonly profile: ProfilePoint[] }
@@ -20,6 +35,16 @@ export type GradeSolution =
 
 /** Interval comparisons tolerate this much floating-point slack. */
 const EPSILON = 1e-9
+
+/**
+ * Largest allowed difference between a ground station and its corresponding
+ * design station before they are considered mismatched, metres. Matches the
+ * `MIN_STATION_GAP` floor `groundProfile.ts` enforces between stations, so
+ * anything larger than this tolerance cannot be floating-point noise from
+ * that pipeline — it means the two profiles were not built over the same
+ * stations.
+ */
+const STATION_TOLERANCE = 1e-6
 
 /**
  * Find a vertical alignment that respects the maximum grade and stays as
@@ -48,13 +73,19 @@ export const solveGradeProfile = (
   ground: readonly ProfilePoint[],
   constraints: GradeConstraints,
 ): GradeSolution => {
-  const { maxGrade, maxCutDepth, maxFillHeight, fixedStart, fixedEnd } = constraints
+  const { maxGrade, maxCutDepth, maxFillHeight, maxStructureHeight, fixedStart, fixedEnd } =
+    constraints
 
   if (maxGrade <= 0) {
     throw new RangeError('maxGrade must be positive')
   }
   if (maxCutDepth < 0 || maxFillHeight < 0) {
     throw new RangeError('cut and fill allowances must not be negative')
+  }
+
+  const maxAbove = maxStructureHeight ?? maxFillHeight
+  if (maxAbove < maxFillHeight) {
+    throw new RangeError('maxStructureHeight must not be less than maxFillHeight')
   }
 
   const n = ground.length
@@ -66,7 +97,7 @@ export const solveGradeProfile = (
   for (let i = 0; i < n; i++) {
     const g = ground[i]!.z
     min[i] = g - maxCutDepth
-    max[i] = g + maxFillHeight
+    max[i] = g + maxAbove
   }
 
   if (fixedStart !== undefined) {
@@ -115,4 +146,35 @@ export const solveGradeProfile = (
   }
 
   return { feasible: true, profile }
+}
+
+/**
+ * Which stations are carried on earth and which need a structure.
+ *
+ * A station standing more than the fill allowance above natural ground is a
+ * structure — beyond that height an embankment stops being economic and
+ * starts looking absurd. Depth of cut is irrelevant: a bridge does not help
+ * you get through a hill.
+ */
+export const classifySupport = (
+  ground: readonly ProfilePoint[],
+  design: readonly ProfilePoint[],
+  maxFillHeight: number,
+): StationSupport[] => {
+  if (ground.length !== design.length) {
+    throw new RangeError('ground and design profiles must have the same length')
+  }
+  for (let i = 0; i < ground.length; i++) {
+    const gs = ground[i]!.s
+    const ds = design[i]!.s
+    if (Math.abs(gs - ds) > STATION_TOLERANCE) {
+      throw new RangeError(
+        `ground and design profiles must share stations: station ${i} is ${gs} on ` +
+          `ground but ${ds} on design`,
+      )
+    }
+  }
+  return design.map((d, i) =>
+    d.z - ground[i]!.z > maxFillHeight ? 'structure' : 'earthwork',
+  )
 }

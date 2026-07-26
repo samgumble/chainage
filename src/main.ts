@@ -1,4 +1,4 @@
-import { drawLongSection } from './debug/longSectionPreview'
+import { drawRoadScene } from './debug/roadScene'
 
 const app = document.getElementById('app')
 
@@ -8,8 +8,5 @@ if (app) {
   canvas.style.height = '100%'
   canvas.style.display = 'block'
   app.appendChild(canvas)
-
-  const render = () => drawLongSection(canvas)
-  render()
-  window.addEventListener('resize', render)
+  drawRoadScene(canvas)
 }

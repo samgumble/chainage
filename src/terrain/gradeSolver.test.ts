@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { solveGradeProfile, type GradeConstraints } from './gradeSolver'
+import { solveGradeProfile, classifySupport, type GradeConstraints } from './gradeSolver'
 import type { ProfilePoint } from './groundProfile'
 
 const constraints = (over: Partial<GradeConstraints> = {}): GradeConstraints => ({
@@ -156,5 +156,124 @@ describe('solveGradeProfile — argument validation', () => {
   it('rejects negative cut or fill allowances', () => {
     expect(() => solveGradeProfile(ground([100]), constraints({ maxCutDepth: -1 }))).toThrow(RangeError)
     expect(() => solveGradeProfile(ground([100]), constraints({ maxFillHeight: -1 }))).toThrow(RangeError)
+  })
+})
+
+describe('structure allowance', () => {
+  it('is infeasible across a ravine without one', () => {
+    // A 40m ravine with 10m of fill available.
+    const gp = ground([100, 100, 60, 100, 100])
+    const r = solveGradeProfile(gp, constraints({ maxCutDepth: 10, maxFillHeight: 10 }))
+    expect(r.feasible).toBe(false)
+  })
+
+  it('becomes feasible with a structure allowance', () => {
+    const gp = ground([100, 100, 60, 100, 100])
+    const r = solveGradeProfile(
+      gp,
+      constraints({ maxCutDepth: 10, maxFillHeight: 10, maxStructureHeight: 45 }),
+    )
+    expect(r.feasible).toBe(true)
+  })
+
+  it('carries the design line across the ravine rather than dropping into it', () => {
+    const gp = ground([100, 100, 60, 100, 100])
+    const r = solveGradeProfile(
+      gp,
+      constraints({ maxCutDepth: 10, maxFillHeight: 10, maxStructureHeight: 45 }),
+    )
+    expect(r.feasible).toBe(true)
+    if (!r.feasible) return
+    // The station over the ravine floor stays far above it.
+    expect(r.profile[2]!.z).toBeGreaterThan(90)
+  })
+
+  it('does not widen the cut side, however large the structure allowance', () => {
+    // Ends pinned at 100 with a 20m peak between them. At 7% over 25m stations
+    // the design can climb only 1.75m per step, so it must cut through the
+    // peak — and with 3m of cut available it cannot. Band at the peak is
+    // [117, ...] against a grade-limited ceiling of 103.5, so: infeasible.
+    // An implementation that widened the CUT side to maxStructureHeight would
+    // open that band to [70, ...] and wrongly report this as feasible.
+    const gp = ground([100, 100, 120, 100, 100])
+    const r = solveGradeProfile(
+      gp,
+      constraints({
+        maxCutDepth: 3, maxFillHeight: 3, maxStructureHeight: 50,
+        fixedStart: 100, fixedEnd: 100,
+      }),
+    )
+    expect(r.feasible).toBe(false)
+  })
+
+  it('becomes feasible once the cut allowance itself is large enough', () => {
+    // Same terrain and the same structure allowance; only the cut allowance
+    // changes. This proves the cut allowance is what binds above, rather than
+    // something incidental about the fixture.
+    const gp = ground([100, 100, 120, 100, 100])
+    const r = solveGradeProfile(
+      gp,
+      constraints({
+        maxCutDepth: 20, maxFillHeight: 3, maxStructureHeight: 50,
+        fixedStart: 100, fixedEnd: 100,
+      }),
+    )
+    expect(r.feasible).toBe(true)
+  })
+
+  it('rejects a structure allowance below the fill allowance', () => {
+    expect(() =>
+      solveGradeProfile(ground([100]), constraints({ maxFillHeight: 10, maxStructureHeight: 5 })),
+    ).toThrow(RangeError)
+  })
+
+  it('behaves identically when the structure allowance equals the fill allowance', () => {
+    const gp = ground([100, 105, 110, 115, 120])
+    const withOut = solveGradeProfile(gp, constraints({ maxCutDepth: 10, maxFillHeight: 10 }))
+    const withEqual = solveGradeProfile(
+      gp,
+      constraints({ maxCutDepth: 10, maxFillHeight: 10, maxStructureHeight: 10 }),
+    )
+    expect(withOut.feasible).toBe(true)
+    expect(withEqual.feasible).toBe(true)
+    if (!withOut.feasible || !withEqual.feasible) return
+    expect(withEqual.profile.map((p) => p.z)).toEqual(withOut.profile.map((p) => p.z))
+  })
+})
+
+describe('classifySupport', () => {
+  it('marks stations standing above the fill allowance as structure', () => {
+    const gp = ground([100, 100, 60, 100, 100])
+    const design = ground([100, 100, 100, 100, 100])
+    expect(classifySupport(gp, design, 10)).toEqual([
+      'earthwork', 'earthwork', 'structure', 'earthwork', 'earthwork',
+    ])
+  })
+
+  it('marks everything earthwork when the design hugs the ground', () => {
+    const gp = ground([100, 101, 102])
+    expect(classifySupport(gp, gp, 10)).toEqual(['earthwork', 'earthwork', 'earthwork'])
+  })
+
+  it('marks cut as earthwork however deep', () => {
+    const gp = ground([100, 100, 100])
+    const design = ground([80, 80, 80])
+    expect(classifySupport(gp, design, 10)).toEqual(['earthwork', 'earthwork', 'earthwork'])
+  })
+
+  it('treats exactly the fill allowance as earthwork', () => {
+    const gp = ground([100])
+    const design = ground([110])
+    expect(classifySupport(gp, design, 10)).toEqual(['earthwork'])
+  })
+
+  it('rejects mismatched lengths', () => {
+    expect(() => classifySupport(ground([100, 100]), ground([100]), 10)).toThrow(RangeError)
+  })
+
+  it('rejects mismatched stations even when lengths match', () => {
+    const gp = ground([100, 100, 100])
+    const design = [{ s: 0, z: 100 }, { s: 30, z: 100 }, { s: 50, z: 100 }]
+    expect(() => classifySupport(gp, design, 10)).toThrow(RangeError)
   })
 })

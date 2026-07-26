@@ -21,7 +21,7 @@ export type CorridorTemplate = {
   readonly maxBatterWidth?: number
 }
 
-// NOTE: hot path. `designElevationAt` is called thousands of times per
+// NOTE: hot path. `designSurfaceAtOffset` is called thousands of times per
 // station by the transverse integration in volumes.ts (`marchSide`), and
 // `validate` re-checks the same template on every one of those calls. It is
 // left in place here for safety, but if profiling ever points at this
@@ -85,7 +85,7 @@ export const retainingWall = (
  * there — the daylight point. Past that the design surface simply is natural
  * ground, so cut and fill areas integrate to zero out there.
  */
-export const designElevationAt = (
+export const designSurfaceAtOffset = (
   offset: number,
   designZ: number,
   groundZ: number,
@@ -130,5 +130,5 @@ export const isDaylighted = (
   validate(template)
 
   if (Math.abs(offset) <= template.formationHalfWidth) return false
-  return designElevationAt(offset, designZ, groundZ, template) === groundZ
+  return designSurfaceAtOffset(offset, designZ, groundZ, template) === groundZ
 }

@@ -181,3 +181,16 @@ describe('Spiral with non-zero curvature rate', () => {
     expect(error).toBeLessThan(5e-5)
   })
 })
+
+describe('Spiral station', () => {
+  it('reports the local station', () => {
+    const spiral = new Spiral(vec2(0, 0), 0, 100, 0, 1 / 50)
+    expect(spiral.poseAt(0).s).toBeCloseTo(0, 9)
+    expect(spiral.poseAt(60).s).toBeCloseTo(60, 9)
+  })
+
+  it('reports the clamped station', () => {
+    const spiral = new Spiral(vec2(0, 0), 0, 50, 0, 1 / 100)
+    expect(spiral.poseAt(999).s).toBeCloseTo(50, 9)
+  })
+})
