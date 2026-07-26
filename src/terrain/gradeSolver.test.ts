@@ -59,14 +59,27 @@ describe('solveGradeProfile — feasible cases', () => {
   })
 
   it('stays within the permitted cut and fill envelope', () => {
-    const gp = ground([100, 101.75, 103.5, 105.25, 107])
-    const r = solveGradeProfile(gp, constraints({ maxCutDepth: 6, maxFillHeight: 6 }))
+    // Ground rises 5m per 25m station — a 20% grade against a 7% limit — so
+    // the solver must deviate substantially and the envelope genuinely binds.
+    // A 10m allowance is the smallest that keeps this feasible: the solution
+    // lands exactly on the cut limit at the final station. With 6m the bands
+    // collapse to min 114 > max 113 there and the alignment is infeasible.
+    const gp = ground([100, 105, 110, 115, 120])
+    const allowance = 10
+    const r = solveGradeProfile(
+      gp,
+      constraints({ maxCutDepth: allowance, maxFillHeight: allowance }),
+    )
     expect(r.feasible).toBe(true)
     if (!r.feasible) return
     r.profile.forEach((p, i) => {
-      expect(p.z).toBeGreaterThanOrEqual(gp[i]!.z - 6 - 1e-9)
-      expect(p.z).toBeLessThanOrEqual(gp[i]!.z + 6 + 1e-9)
+      expect(p.z).toBeGreaterThanOrEqual(gp[i]!.z - allowance - 1e-9)
+      expect(p.z).toBeLessThanOrEqual(gp[i]!.z + allowance + 1e-9)
     })
+    // The last station sits exactly at the cut limit, so this is not a
+    // vacuous pass — a solver that ignored the envelope would overshoot it.
+    const last = r.profile[r.profile.length - 1]!
+    expect(last.z).toBeCloseTo(gp[gp.length - 1]!.z - allowance, 6)
   })
 
   it('honours fixed start and end elevations', () => {
