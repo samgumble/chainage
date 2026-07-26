@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   sideFrictionFactor, designSpeedForRadius, minimumRadiusForSpeed,
+  MAX_TABULATED_SPEED_KPH,
 } from './designSpeed'
 
 describe('sideFrictionFactor', () => {
@@ -53,16 +54,43 @@ describe('designSpeedForRadius', () => {
     expect(() => designSpeedForRadius(0)).toThrow(RangeError)
     expect(() => designSpeedForRadius(-10)).toThrow(RangeError)
   })
+
+  it('gives a low but positive, sensible speed at a very tight radius', () => {
+    const v = designSpeedForRadius(10)
+    expect(v).toBeGreaterThan(0)
+    expect(v).toBeLessThan(30)
+  })
+
+  it('caps at MAX_TABULATED_SPEED_KPH for a very large radius', () => {
+    // Above ~756 m (at e=0.06) the uncapped solve would exceed the AASHTO
+    // table's range and grow without bound (e.g. ~308 km/h at R=5000), which
+    // is not physically meaningful — the curve stops being the limiting
+    // factor on design speed, so the result saturates at the table's cap.
+    expect(designSpeedForRadius(5000)).toBe(MAX_TABULATED_SPEED_KPH)
+  })
 })
 
 describe('minimumRadiusForSpeed', () => {
   it('round-trips against designSpeedForRadius', () => {
     // Exact at the fixed point; assert relative error so the tolerance is
-    // meaningful at both 50 m and 1000 m.
-    for (const r of [50, 100, 250, 500, 1000]) {
+    // meaningful at both 50 m and 700 m.
+    // Radii are kept below ~756 m (the R whose design speed is exactly
+    // MAX_TABULATED_SPEED_KPH at e=0.06): above that, designSpeedForRadius
+    // clamps to the cap and the round trip no longer holds (see the
+    // "breaks above the cap" test below).
+    for (const r of [50, 100, 250, 500, 700]) {
       const v = designSpeedForRadius(r)
       expect(Math.abs(minimumRadiusForSpeed(v) - r) / r).toBeLessThan(0.01)
     }
+  })
+
+  it('round-trip breaks above the cap, in the expected direction', () => {
+    // designSpeedForRadius(5000) saturates at the cap instead of reporting
+    // the true (physically meaningless) solved speed, so feeding it back
+    // through minimumRadiusForSpeed recovers the cap's radius (~756 m), not
+    // 5000 m.
+    expect(designSpeedForRadius(5000)).toBe(MAX_TABULATED_SPEED_KPH)
+    expect(minimumRadiusForSpeed(designSpeedForRadius(5000))).toBeLessThan(5000)
   })
 
   it('increases with speed', () => {
