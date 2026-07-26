@@ -1637,13 +1637,17 @@ export const sweepRibbon = (
       const bottomLeft = topLeft + across
       const bottomRight = bottomLeft + 1
 
+      // Winding must agree with the vertex normals computed above, or the
+      // whole road renders inside-out and is backface-culled from the only
+      // angle anyone looks at it from. The face normal of (A, B, C) is
+      // (B-A) x (C-A); both triangles below give across x along, matching.
       indices[t++] = topLeft
-      indices[t++] = bottomLeft
       indices[t++] = topRight
+      indices[t++] = bottomLeft
 
       indices[t++] = topRight
-      indices[t++] = bottomLeft
       indices[t++] = bottomRight
+      indices[t++] = bottomLeft
     }
   }
 
