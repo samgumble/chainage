@@ -39,6 +39,12 @@ export const buildRoadMesh = (
       : stations[spec.name] ?? 0
 
     const section = layerTopProfile(roadClass, spec.name)
+    // `startStation`/`endStation` are deliberately overridden below, even if
+    // the caller supplied them in `options`: construction always begins at
+    // the road's start (station 0), and sweeping each layer only to its own
+    // per-layer construction station is this function's whole purpose. A
+    // caller wanting a partial range should slice the alignment itself
+    // rather than pass station bounds here.
     const mesh = sweepRibbon(alignment, design, section, {
       ...options,
       startStation: 0,
