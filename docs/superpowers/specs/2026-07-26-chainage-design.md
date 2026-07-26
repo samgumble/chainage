@@ -361,6 +361,13 @@ Rationale: the drag-a-road interaction is touched every second of play — if it
 
 That spec imposes one requirement that reaches back into M1: **road meshes must be layer-aware** — subgrade, base and wearing course separately addressable, each drawable to an arbitrary station along the alignment — so a road can be rendered mid-construction. Retrofitting this onto a monolithic road mesh would mean rewriting mesh generation, which is already the project's highest-risk component. It belongs in the mesh plan from the outset, not later.
 
+**Structures** — retaining walls, bridges, and overpasses — are split across two plans by what each actually is:
+
+- **Retaining walls** are a cross-section variant, chosen when a batter has no room to reach natural ground. They belong with the corridor in the terrain plan, which computes where a wall stands and how tall it is.
+- **Bridges and overpasses** are generated geometry — deck, piers, abutments — so they belong with the mesh plan. An overpass additionally needs the road network graph, to know what it crosses and at what clearance.
+
+All three appear in construction as a single **Structures** phase, between earthworks and subgrade: built on completed earth, finished before pavement runs over them.
+
 **M3 — Region.** Towns, demand, growth, accessibility, induced demand.
 
 **M4 — Stewardship.** Road classes, upgrades, budget, pavement aging, freight.

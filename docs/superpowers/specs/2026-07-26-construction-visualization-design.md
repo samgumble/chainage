@@ -21,10 +21,10 @@ This serves the parent spec's second design pillar ("genuine engineering — the
 
 The whole system rests on one idea, and everything else falls out of it.
 
-**A road under construction carries six completion stations** — distances along its alignment, one per layer:
+**A road under construction carries seven completion stations** — distances along its alignment, one per layer:
 
 ```
-cleared  ≥  earthworks  ≥  subgrade  ≥  base  ≥  surface  ≥  marked
+cleared ≥ earthworks ≥ structures ≥ subgrade ≥ base ≥ surface ≥ marked
 ```
 
 Each is a distance in metres from the alignment's start. The ordering is a hard invariant: a layer can never overtake the layer beneath it, because you cannot pave ground you have not graded.
@@ -39,7 +39,7 @@ Each is a distance in metres from the alignment's start. The ordering is a hard 
 
 **Fast-forward is a rate multiplier.** No separate code path.
 
-**Saving is six floats per road.**
+**Saving is seven floats per road.**
 
 **It is testable with no graphics.** `construction/` is pure logic over numbers, in the same spirit as `geometry/`.
 
@@ -59,10 +59,11 @@ Eight phases, each with the equipment that actually performs it.
 | 2 | Clearing & grubbing | `cleared` | Mulcher, stump grinder, chainsaw crew |
 | 3 | Cut | `earthworks` | Excavator loading haul trucks; scraper on long runs |
 | 4 | Fill & compaction | `earthworks` | Dozer spreading in lifts, padfoot roller |
-| 5 | Subgrade | `subgrade` | Motor grader trimming, smooth drum roller |
-| 6 | Base course | `base` | Tippers dropping aggregate, grader spreading, roller |
-| 7 | Surfacing | `surface` | Asphalt paver fed by haul truck, tandem roller, steam |
-| 8 | Line marking | `marked` | Line marking truck |
+| 5 | Structures | `structures` | Piling rig, crawler crane, concrete truck, formwork crew |
+| 6 | Subgrade | `subgrade` | Motor grader trimming, smooth drum roller |
+| 7 | Base course | `base` | Tippers dropping aggregate, grader spreading, roller |
+| 8 | Surfacing | `surface` | Asphalt paver fed by haul truck, tandem roller, steam |
+| 9 | Line marking | `marked` | Line marking truck |
 
 Two of these need their relationship to the six stations spelled out, or the model is ambiguous.
 
@@ -71,6 +72,18 @@ Two of these need their relationship to the six stations spelled out, or the mod
 **Cut and fill share the `earthworks` station, and this is correct rather than a compromise.** At any given station the road is in cut or in fill — never both — depending on whether the design elevation sits below or above existing ground. So a single frontier advancing along the alignment is doing whichever operation applies where it currently is, and the equipment shown changes accordingly: excavator and haul trucks where the frontier is in cut, dozer and padfoot roller where it is in fill. The haul truck cycle visibly carries spoil from the cut reaches to the fill reaches, which is the single most legible piece of civil engineering in the whole game.
 
 Because the two operations have different productivity rates (§4), the frontier advances at different speeds along different reaches of the same road — visibly slowing through a deep cut. That is real, and it is free.
+
+**Structures get their own station, between earthworks and subgrade.** Bridges, overpasses and retaining walls are built on completed earthworks and must be finished before the pavement layers can run over them, so a station of their own places them correctly in the sequence with no special-casing.
+
+The phase covers three structure types, each with a different trigger:
+
+| Structure | Trigger | Source |
+|---|---|---|
+| Retaining wall | The batter has no room to daylight, so a wall makes up the height | `retainingWall()` in the terrain layer |
+| Bridge | The design line stands high enough above natural ground that fill becomes uneconomic | Height of design line above ground, per station |
+| Overpass | The alignment crosses another road and must clear it | Road network graph, plus clearance |
+
+Roads with no structures skip the phase entirely, exactly as a flat road skips earthworks. The retaining-wall trigger is already computed in the terrain layer; the bridge and overpass triggers arrive with the mesh plan, which is where their geometry is generated.
 
 Equipment is modelled in the parent spec's low-poly diorama style: simple blocky forms with correct silhouettes and correct motion, not detailed vehicle models. A player must be able to tell an excavator from a grader at a glance; they do not need to identify the make.
 
@@ -85,6 +98,7 @@ Planning-grade figures, to be tuned for pacing:
 | Clearing | 300–600 m²/hr | Mulcher on light-to-medium vegetation |
 | Cut | 50–80 m³/hr | 20-tonne excavator, bank measure, after efficiency and swell |
 | Fill & compaction | 100–200 m³/hr | D6-class dozer spreading in lifts |
+| Structures | per structure, not per metre | Piling, abutments, deck erection — days per bridge, hours per retaining wall panel |
 | Subgrade | 500–1,500 m²/hr | Motor grader trimming to level |
 | Base course | 400–1,000 m²/hr | Supply-limited by tipper cycle |
 | Surfacing | 50–150 m/hr | Asphalt paver, supply-limited by haul trucks |
@@ -189,7 +203,8 @@ Plans 5 and 6 are separable: 5 delivers the build sequence with equipment, 6 del
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| Twelve machine models is the largest art task in the project so far | Medium | Low-poly diorama style; correct silhouette and motion matter far more than detail. Build one machine end to end first and judge it before committing to the rest. |
+| Around sixteen machine models is the largest art task in the project so far | Medium | Low-poly diorama style; correct silhouette and motion matter far more than detail. Build one machine end to end first and judge it before committing to the rest. |
+| Structure geometry (bridge decks, piers, wall panels) is generated, not authored | Medium | Retaining walls are the easy case and land first — a wall is an extruded panel along the alignment at a known offset and height. Bridges and overpasses follow once the mesh layer exists. |
 | Fast-forward becomes the default and the animation goes unseen | Medium | Fast-forward is momentary, not persisted (§5). Watch this in playtesting — if players hold it down constantly, durations are too long, not the feature wrong. |
 | Blueprint view is effectively a second render pipeline | Medium | Sequenced last, and separable from the annotations work in the same plan. |
 | Layer-aware mesh is harder than a monolithic one | Medium | Accepted deliberately and scheduled into plan 3 rather than retrofitted. |
