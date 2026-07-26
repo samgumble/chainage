@@ -1544,9 +1544,11 @@ npm run dev
 
 Open the printed local URL. Verify by eye:
 
-- The road runs from lower-left, turns at the upper-right corner, and heads down — one smooth curve, no kink at either tangent point.
+- The road runs from lower-left along the bottom, turns at the **lower-right** corner, and heads **up** — one smooth curve, no kink at either tangent point.
 - The curve is *inside* the dashed construction corner, not outside it. Outside means a sign error in the fillet.
-- The readout shows `R 120 m` and a design speed around 90–100 km/h.
+- The readout shows `R 120 m` and a design speed of about **59 km/h**.
+
+That speed is worth sanity-checking rather than taking on trust, because it is the one number a player will read as engineering fact. Cross-check it against the published AASHTO table: minimum radius at 60 km/h with e=6% is 123 m, and at 50 km/h is 79 m. A 120 m radius therefore lands just under 60 km/h. If the readout instead shows something near 90–100 km/h, the friction table or the superelevation default is wrong.
 
 Fix any issue before continuing; a handedness error here will otherwise propagate into every later system.
 
