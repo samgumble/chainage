@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest'
-import { buildNetworkMesh } from './networkMesh'
+import { buildNetworkMesh, MAX_JUNCTION_ELEVATION_SPREAD } from './networkMesh'
 import { RoadNetwork } from '../network/graph'
 import { Alignment } from '../geometry/alignment'
-import { Line } from '../geometry/primitives'
+import { Line, Arc } from '../geometry/primitives'
 import { vec2 } from '../geometry/vec2'
 import type { ProfilePoint } from '../terrain/groundProfile'
 import type { RoadId } from '../network/graph'
@@ -123,5 +123,81 @@ describe('buildNetworkMesh', () => {
     const road = m.roads.get(west)!
     expect(road.layers.find((l) => l.name === 'subgrade')!.mesh.vertexCount).toBeGreaterThan(0)
     expect(road.layers.find((l) => l.name === 'wearing')!.mesh.vertexCount).toBe(0)
+  })
+
+  describe('junction elevation', () => {
+    it('sets the junction to the shared elevation when all legs agree', () => {
+      const { net, designs } = tJunction()
+      const m = buildNetworkMesh(net, designs, { spacing: 10 })
+      const junction = net.nodeAt(vec2(100, 0))!
+      const mesh = m.junctions.get(junction.id)!
+      for (let i = 0; i < mesh.vertexCount; i++) {
+        expect(mesh.positions[i * 3 + 2]).toBeCloseTo(50, 6)
+      }
+      expect(m.elevationMismatches.has(junction.id)).toBe(false)
+    })
+
+    it('sets the junction to the mean of disagreeing legs and records the spread', () => {
+      const { net, west, north, south } = tJunction()
+      // West's own attach station reads 50; north and south are offset by
+      // +0.6 and -0.6, an even split so the mean stays exactly 50.
+      const designs = new Map<RoadId, ProfilePoint[]>([
+        [west, level(100, 50)], [north, level(100, 50.6)], [south, level(100, 49.4)],
+      ])
+      const m = buildNetworkMesh(net, designs, { spacing: 10 })
+      const junction = net.nodeAt(vec2(100, 0))!
+      const mesh = m.junctions.get(junction.id)!
+      for (let i = 0; i < mesh.vertexCount; i++) {
+        expect(mesh.positions[i * 3 + 2]).toBeCloseTo(50, 6)
+      }
+      expect(m.elevationMismatches.get(junction.id)).toBeCloseTo(1.2, 6)
+    })
+
+    it('does not record a spread below the threshold', () => {
+      const { net, west, north, south } = tJunction()
+      const designs = new Map<RoadId, ProfilePoint[]>([
+        [west, level(100, 50)], [north, level(100, 50.1)], [south, level(100, 49.95)],
+      ])
+      // Spread is 0.15m, comfortably under MAX_JUNCTION_ELEVATION_SPREAD (0.25m).
+      const m = buildNetworkMesh(net, designs, { spacing: 10 })
+      expect(0.15).toBeLessThan(MAX_JUNCTION_ELEVATION_SPREAD)
+      const junction = net.nodeAt(vec2(100, 0))!
+      expect(m.elevationMismatches.has(junction.id)).toBe(false)
+    })
+  })
+
+  it('handles a road that loops back to its own node', () => {
+    const net = new RoadNetwork()
+    // A full circle: both ends land on the same point, so this road
+    // contributes two independent legs to one node.
+    const radius = 30
+    const loopStart = vec2(200, 0)
+    const loop = net.addRoad(
+      new Alignment([new Arc(loopStart, 0, 2 * Math.PI * radius, 1 / radius)]),
+      'rural',
+    )
+    // A third leg at the same node so it qualifies as a junction.
+    const spur = net.addRoad(new Alignment([new Line(loopStart, Math.PI / 2, 100)]), 'rural')
+
+    const designs = new Map<RoadId, ProfilePoint[]>([
+      [loop, level(2 * Math.PI * radius, 50)], [spur, level(100, 50)],
+    ])
+    const m = buildNetworkMesh(net, designs, { spacing: 10 })
+
+    const node = net.nodeAt(loopStart)!
+    expect(m.infeasibleJunctions.has(node.id)).toBe(false)
+
+    const wearing = m.roads.get(loop)!.layers.find((l) => l.name === 'wearing')!.mesh
+    expect(wearing.vertexCount).toBeGreaterThan(0)
+
+    // Both the loop's start and end stations map to the same physical point
+    // (loopStart). If either trim had failed to apply — `from` left at 0 or
+    // `to` left at the full length — a vertex would sit right on it. Seeing
+    // none confirms both ends were trimmed, not just one.
+    for (let i = 0; i < wearing.vertexCount; i++) {
+      const x = wearing.positions[i * 3]!
+      const y = wearing.positions[i * 3 + 1]!
+      expect(Math.hypot(x - loopStart.x, y - loopStart.y)).toBeGreaterThan(0.1)
+    }
   })
 })

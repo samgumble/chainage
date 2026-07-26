@@ -20,7 +20,18 @@ export type NetworkMesh = {
   readonly junctions: ReadonlyMap<NodeId, MeshData>
   /** Nodes whose junction could not be solved, and why. */
   readonly infeasibleJunctions: ReadonlyMap<NodeId, string>
+  /** Nodes whose legs disagree about elevation, and by how much (metres). */
+  readonly elevationMismatches: ReadonlyMap<NodeId, number>
 }
+
+/**
+ * Largest tolerable spread between legs' design elevations at a junction,
+ * metres, before it's recorded in `elevationMismatches`.
+ *
+ * A quarter of a metre is a step a player would see; below that the join
+ * reads as flush.
+ */
+export const MAX_JUNCTION_ELEVATION_SPREAD = 0.25
 
 /**
  * Build every road and junction in a network.
@@ -44,6 +55,7 @@ export const buildNetworkMesh = (
 
   const junctions = new Map<NodeId, MeshData>()
   const infeasibleJunctions = new Map<NodeId, string>()
+  const elevationMismatches = new Map<NodeId, number>()
   /** roadId -> { from, to } accumulated from both its end nodes. */
   const trims = new Map<RoadId, { from: number; to: number }>()
 
@@ -62,13 +74,31 @@ export const buildNetworkMesh = (
       continue
     }
 
-    // Elevation from any leg's design profile at the node.
-    const firstLeg = legs[0]!
-    const firstRoad = network.road(firstLeg.roadId)
-    const design = designs.get(firstLeg.roadId) ?? []
-    const stationAtNode =
-      firstLeg.end === 'start' ? 0 : firstRoad.alignment.length
-    const elevation = designElevationAtStation(design, stationAtNode)
+    // Elevation is the mean of every leg's own design elevation at the node,
+    // not one leg's arbitrarily — roads graded independently routinely
+    // disagree, and averaging halves the worst step instead of handing one
+    // leg a perfect join and the rest the whole error. Legs with an empty
+    // design profile are skipped: `designElevationAtStation` returns 0 for
+    // those, and treating that as a real elevation would fabricate a huge
+    // spread.
+    const legElevations: number[] = []
+    for (const leg of legs) {
+      const design = designs.get(leg.roadId)
+      if (!design || design.length === 0) continue
+      const road = network.road(leg.roadId)
+      const stationAtNode = leg.end === 'start' ? 0 : road.alignment.length
+      legElevations.push(designElevationAtStation(design, stationAtNode))
+    }
+
+    let elevation = 0
+    if (legElevations.length > 0) {
+      elevation =
+        legElevations.reduce((sum, z) => sum + z, 0) / legElevations.length
+      const spread = Math.max(...legElevations) - Math.min(...legElevations)
+      if (spread > MAX_JUNCTION_ELEVATION_SPREAD) {
+        elevationMismatches.set(node.id, spread)
+      }
+    }
 
     junctions.set(
       node.id,
@@ -109,5 +139,5 @@ export const buildNetworkMesh = (
     )
   }
 
-  return { roads, junctions, infeasibleJunctions }
+  return { roads, junctions, infeasibleJunctions, elevationMismatches }
 }
