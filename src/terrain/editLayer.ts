@@ -1,4 +1,4 @@
-import { Heightmap } from './heightmap'
+import { Heightmap, clampNumber, bilinearInterpolate } from './heightmap'
 
 /**
  * Terrain deformation held separately from the ground it deforms.
@@ -48,11 +48,11 @@ export class TerrainEditLayer {
   /**
    * Base elevation plus deformation, bilinearly interpolated.
    *
-   * Mirrors `Heightmap.sample` exactly, including edge clamping, so an edited
-   * terrain behaves identically to an unedited one everywhere.
+   * Uses the same `bilinearInterpolate` helper as `Heightmap.sample`, with
+   * the same edge clamping, so an edited terrain behaves identically to an
+   * unedited one everywhere — the two can no longer silently diverge.
    */
   sample(x: number, y: number): number {
-
     const baseZ = this.base.sample(x, y)
     if (this.deltas.size === 0) return baseZ
 
@@ -71,10 +71,7 @@ export class TerrainEditLayer {
     const d01 = this.deltaAt(col0, row0 + 1)
     const d11 = this.deltaAt(col0 + 1, row0 + 1)
 
-    const bottom = d00 + (d10 - d00) * tx
-    const top = d01 + (d11 - d01) * tx
-
-    return baseZ + bottom + (top - bottom) * ty
+    return baseZ + bilinearInterpolate(d00, d10, d01, d11, tx, ty)
   }
 
   /**
@@ -98,6 +95,3 @@ export class TerrainEditLayer {
     return new Heightmap(originX, originY, cellSize, cols, rows, elevations)
   }
 }
-
-const clampNumber = (v: number, lo: number, hi: number): number =>
-  v < lo ? lo : v > hi ? hi : v

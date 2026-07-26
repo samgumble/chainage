@@ -58,6 +58,13 @@ describe('sampleGroundProfile', () => {
     expect(() => sampleGroundProfile(straightAlongX(100), rampX(), -5)).toThrow(RangeError)
   })
 
+  it('rejects a spacing smaller than MIN_STATION_GAP', () => {
+    // A positive but sub-gap spacing would still produce interior stations
+    // too close together for the downstream grade solver's divide-by-gap
+    // arithmetic to be safe.
+    expect(() => sampleGroundProfile(straightAlongX(100), rampX(), 1e-9)).toThrow(RangeError)
+  })
+
   it('computes stations as exact multiples of spacing, not accumulated sums', () => {
     // 0.1 is not exactly representable in binary floating point, so an
     // accumulating (`s += spacing`) implementation would drift measurably

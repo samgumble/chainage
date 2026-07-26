@@ -1,16 +1,16 @@
 import { Heightmap } from './heightmap'
 
 export type ValleyOptions = {
-  cols: number
-  rows: number
-  cellSize: number
+  readonly cols: number
+  readonly rows: number
+  readonly cellSize: number
   /** Elevation of the valley floor, metres. */
-  floorElevation: number
+  readonly floorElevation: number
   /** How far the ridges rise above the floor, metres. */
-  ridgeHeight: number
+  readonly ridgeHeight: number
   /** Distance from the valley axis to the ridge crest, metres. */
-  valleyHalfWidth: number
-  seed: number
+  readonly valleyHalfWidth: number
+  readonly seed: number
 }
 
 /**

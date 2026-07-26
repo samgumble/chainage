@@ -1,16 +1,17 @@
 import type { ProfilePoint } from './groundProfile'
+import { clampNumber } from './heightmap'
 
 export type GradeConstraints = {
   /** Maximum absolute grade as a rise-over-run fraction. 7% is 0.07. */
-  maxGrade: number
+  readonly maxGrade: number
   /** How far below natural ground the road may be cut, metres. */
-  maxCutDepth: number
+  readonly maxCutDepth: number
   /** How far above natural ground the road may be filled, metres. */
-  maxFillHeight: number
+  readonly maxFillHeight: number
   /** Elevation the profile must start at, if tied to existing road. */
-  fixedStart?: number
+  readonly fixedStart?: number
   /** Elevation the profile must end at, if tied to existing road. */
-  fixedEnd?: number
+  readonly fixedEnd?: number
 }
 
 export type GradeSolution =
@@ -115,6 +116,3 @@ export const solveGradeProfile = (
 
   return { feasible: true, profile }
 }
-
-const clampNumber = (v: number, lo: number, hi: number): number =>
-  v < lo ? lo : v > hi ? hi : v

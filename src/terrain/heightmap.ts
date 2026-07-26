@@ -1,4 +1,14 @@
 /**
+ * Anything that can report ground elevation at a world position.
+ *
+ * Both `Heightmap` and `TerrainEditLayer` satisfy this. Consumers should
+ * depend on it rather than on `Heightmap` directly, so an edited terrain can
+ * be fed through the chain without first being flattened — flattening is
+ * lossy and one-way, which would defeat the point of non-destructive editing.
+ */
+export type TerrainSampler = { sample(x: number, y: number): number }
+
+/**
  * A regular grid of ground elevations.
  *
  * Grid point (col, row) sits at world position
@@ -76,9 +86,7 @@ export class Heightmap {
     const z01 = this.elevationAtIndex(col0, row0 + 1)
     const z11 = this.elevationAtIndex(col0 + 1, row0 + 1)
 
-    const bottom = z00 + (z10 - z00) * tx
-    const top = z01 + (z11 - z01) * tx
-    return bottom + (top - bottom) * ty
+    return bilinearInterpolate(z00, z10, z01, z11, tx, ty)
   }
 
   static flat(
@@ -95,5 +103,27 @@ export class Heightmap {
   }
 }
 
-const clampNumber = (v: number, lo: number, hi: number): number =>
+/** Clamps `v` to the closed interval `[lo, hi]`. */
+export const clampNumber = (v: number, lo: number, hi: number): number =>
   v < lo ? lo : v > hi ? hi : v
+
+/**
+ * Bilinear interpolation between the four corners of a grid cell.
+ *
+ * `tx` and `ty` are the fractional position within the cell along each axis,
+ * in `[0, 1]`. Shared by `Heightmap.sample` and `TerrainEditLayer.sample` so
+ * the two interpolate identically by construction rather than by a comment
+ * asserting they happen to match.
+ */
+export const bilinearInterpolate = (
+  z00: number,
+  z10: number,
+  z01: number,
+  z11: number,
+  tx: number,
+  ty: number,
+): number => {
+  const bottom = z00 + (z10 - z00) * tx
+  const top = z01 + (z11 - z01) * tx
+  return bottom + (top - bottom) * ty
+}

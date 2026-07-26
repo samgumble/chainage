@@ -1,7 +1,13 @@
 import type { Alignment } from '../geometry/alignment'
-import type { Heightmap } from './heightmap'
+import type { TerrainSampler } from './heightmap'
 
-/** Natural ground elevation at a station along an alignment. */
+/**
+ * A station along an alignment paired with an elevation, metres.
+ *
+ * Used both for natural ground — the raw output of `sampleGroundProfile` —
+ * and for the design profile `solveGradeProfile` returns, which shares the
+ * same station/elevation shape.
+ */
 export type ProfilePoint = {
   /** Distance along the alignment, metres. */
   readonly s: number
@@ -19,6 +25,10 @@ export type ProfilePoint = {
  * that blows up the downstream grade calculation (which divides by the gap
  * between stations). One micron is far below any meaningful road station
  * and comfortably above floating-point noise at road-scale magnitudes.
+ *
+ * Also the floor on `spacing` itself: a caller passing a sub-gap spacing
+ * would produce interior stations that are just as thin, regardless of the
+ * final-point handling below.
  */
 const MIN_STATION_GAP = 1e-6
 
@@ -33,11 +43,14 @@ const MIN_STATION_GAP = 1e-6
  */
 export const sampleGroundProfile = (
   alignment: Alignment,
-  terrain: Heightmap,
+  terrain: TerrainSampler,
   spacing: number,
 ): ProfilePoint[] => {
   if (spacing <= 0) {
     throw new RangeError('spacing must be positive')
+  }
+  if (spacing < MIN_STATION_GAP) {
+    throw new RangeError(`spacing must be at least ${MIN_STATION_GAP} metres`)
   }
   if (alignment.isEmpty) return []
 

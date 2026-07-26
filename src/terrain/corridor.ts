@@ -9,18 +9,24 @@
  */
 export type CorridorTemplate = {
   /** Half the formation width — carriageway plus shoulders — in metres. */
-  formationHalfWidth: number
+  readonly formationHalfWidth: number
   /** Cut batter, horizontal-to-vertical. */
-  cutSlope: number
+  readonly cutSlope: number
   /** Fill batter, horizontal-to-vertical. */
-  fillSlope: number
+  readonly fillSlope: number
   /**
    * How far a batter may run out from the formation edge before a retaining
    * wall takes over, metres. Omitted means batters may run as far as needed.
    */
-  maxBatterWidth?: number
+  readonly maxBatterWidth?: number
 }
 
+// NOTE: hot path. `designElevationAt` is called thousands of times per
+// station by the transverse integration in volumes.ts (`marchSide`), and
+// `validate` re-checks the same template on every one of those calls. It is
+// left in place here for safety, but if profiling ever points at this
+// function, hoisting validation out of the per-sample loop is the first
+// thing to look at.
 const validate = (t: CorridorTemplate): void => {
   if (t.formationHalfWidth < 0) {
     throw new RangeError('formationHalfWidth must not be negative')
