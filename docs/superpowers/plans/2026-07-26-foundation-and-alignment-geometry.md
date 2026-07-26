@@ -93,8 +93,9 @@ Keep the `dependencies` and `devDependencies` blocks npm generated. Ensure `"pri
 - [ ] **Step 5: Write `vite.config.ts`**
 
 ```ts
-/// <reference types="vitest" />
-import { defineConfig } from 'vite'
+// Import from 'vitest/config', not 'vite' — vitest 4's `test` key is not on
+// vite's own UserConfigExport type, so `tsc --noEmit` fails otherwise.
+import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
   base: '/chainage/',
@@ -388,10 +389,21 @@ npm test -- src/geometry/vec2.test.ts
 
 Expected: PASS, 6 tests.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Delete the scaffold smoke test**
+
+It existed only to prove the test runner worked before any real code existed. Real tests now cover that, and a test asserting `1 + 1 === 2` is noise.
 
 ```bash
-git add src/geometry/vec2.ts src/geometry/vec2.test.ts
+rm src/smoke.test.ts
+npm test
+```
+
+Expected: PASS, 7 tests in 1 file.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add -A
 git commit -m "feat: add 2D vector and angle math"
 ```
 
@@ -1378,6 +1390,8 @@ Proves the geometry library end to end by drawing a real alignment — straight,
 
 It draws to a 2D canvas, not three.js. The 3D renderer is a later plan; this exists to validate geometry, and a plan view is the honest way to read plan geometry.
 
+> **This file is deliberately untested, and that is an approved decision — not an oversight.** The geometry it exercises is already covered by 49 unit tests. What this file adds is precisely what unit tests cannot catch: sign errors, handedness errors, and a fillet that bulges the wrong side of a corner. Mocking a 2D canvas context and asserting on draw calls would verify that the code calls the functions it calls, which is coverage without value. Reviewers should not flag the absence of tests here.
+
 **Files:**
 - Create: `src/debug/alignmentPreview.ts`
 - Modify: `src/main.ts` (replace entirely), `index.html` (replace the `#app` styling rule)
@@ -1530,9 +1544,11 @@ npm run dev
 
 Open the printed local URL. Verify by eye:
 
-- The road runs from lower-left, turns at the upper-right corner, and heads down — one smooth curve, no kink at either tangent point.
+- The road runs from lower-left along the bottom, turns at the **lower-right** corner, and heads **up** — one smooth curve, no kink at either tangent point.
 - The curve is *inside* the dashed construction corner, not outside it. Outside means a sign error in the fillet.
-- The readout shows `R 120 m` and a design speed around 90–100 km/h.
+- The readout shows `R 120 m` and a design speed of about **59 km/h**.
+
+That speed is worth sanity-checking rather than taking on trust, because it is the one number a player will read as engineering fact. Cross-check it against the published AASHTO table: minimum radius at 60 km/h with e=6% is 123 m, and at 50 km/h is 79 m. A 120 m radius therefore lands just under 60 km/h. If the readout instead shows something near 90–100 km/h, the friction table or the superelevation default is wrong.
 
 Fix any issue before continuing; a handedness error here will otherwise propagate into every later system.
 
