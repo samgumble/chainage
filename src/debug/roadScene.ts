@@ -2,10 +2,13 @@ import * as THREE from 'three'
 import { Alignment } from '../geometry/alignment'
 import { Line } from '../geometry/primitives'
 import { filletCorner } from '../geometry/fillet'
-import { vec2, angleOf, sub, distance, type Vec2 } from '../geometry/vec2'
+import { vec2, angleOf, sub, distance, fromAngle, type Vec2 } from '../geometry/vec2'
 import { generateValley } from '../terrain/generate'
-import { sampleGroundProfile } from '../terrain/groundProfile'
+import type { Heightmap } from '../terrain/heightmap'
+import { sampleGroundProfile, type ProfilePoint } from '../terrain/groundProfile'
 import { solveGradeProfile } from '../terrain/gradeSolver'
+import { TerrainEditLayer } from '../terrain/editLayer'
+import { designElevationAt, type CorridorTemplate } from '../terrain/corridor'
 import { ROAD_CLASSES } from '../mesh/roadClass'
 import { buildRoadMesh } from '../mesh/roadMesh'
 import { toBufferGeometry } from '../render/meshAdapter'
@@ -15,6 +18,36 @@ const CURVE_RADIUS = 400
 const MAX_GRADE = 0.07
 const MAX_CUT_DEPTH = 12
 const MAX_FILL_HEIGHT = 10
+
+/** Earthworks cross-section used to carve the corridor into the terrain,
+ * consistent with the road actually being drawn (see ROAD_CLASSES.rural). */
+const CORRIDOR_TEMPLATE: CorridorTemplate = {
+  formationHalfWidth: 5,
+  cutSlope: 2,
+  fillSlope: 3,
+}
+
+/** How far apart, along the alignment, the excavation walk takes stations. */
+const EXCAVATION_STATION_SPACING = 5
+/** Extra width beyond the computed batter run-out, so the daylight line is
+ * never clipped by an undersized excavation footprint. */
+const EXCAVATION_MARGIN = 5
+/**
+ * Extra depth carved below the corridor template's surface everywhere along
+ * the corridor, metres.
+ *
+ * The template's own surface is the design profile itself (top of the
+ * finished road), but a "nearest grid node" excavation on a terrain grid
+ * whose cell size is comparable to the formation width cannot land exactly
+ * on that surface — bilinearly-sampled terrain a station or two away from an
+ * excavated node still carries some of the untouched raw ground. Without
+ * this margin that residual few tenths of a metre is enough for the (thin)
+ * pavement layers to clip in and out of natural ground over and over along
+ * the corridor. A couple of metres of headroom, invisible against terrain
+ * relief that runs to tens of metres, is what actually makes the road read
+ * as continuously above the dirt rather than flickering through it.
+ */
+const EXCAVATION_CLEARANCE = 2.5
 
 /** Layer colours: warm earth, pale aggregate, dark asphalt — tuned for
  * contrast against each other and against the terrain so the three
@@ -47,6 +80,101 @@ const buildAlignment = (a: Vec2, corner: Vec2, b: Vec2): Alignment | null => {
   ])
 }
 
+/**
+ * Design elevation at an arbitrary station, linearly interpolated between the
+ * profile points bracketing it. `profile` is assumed sorted by station, which
+ * both `sampleGroundProfile` and `solveGradeProfile` guarantee.
+ */
+const designElevationAtStation = (s: number, profile: readonly ProfilePoint[]): number => {
+  const first = profile[0]
+  if (!first) return 0
+  if (s <= first.s) return first.z
+
+  const last = profile[profile.length - 1]!
+  if (s >= last.s) return last.z
+
+  for (let i = 1; i < profile.length; i++) {
+    const point = profile[i]!
+    if (s <= point.s) {
+      const previous = profile[i - 1]!
+      const t = (s - previous.s) / (point.s - previous.s)
+      return previous.z + (point.z - previous.z) * t
+    }
+  }
+  return last.z
+}
+
+/**
+ * Cut and fill the terrain down to the design surface along the corridor.
+ *
+ * This is the piece that was missing: without it, the solved design line
+ * (correctly placed below natural ground through cuts) sits inside an
+ * un-dug hill and only pokes through where it happens to break the surface.
+ *
+ * Approach, approximate by design — this feeds a debug view, not the real
+ * earthworks pipeline:
+ *
+ * 1. Walk the alignment every `EXCAVATION_STATION_SPACING` metres.
+ * 2. At each station, take the design elevation from the solved profile and
+ *    step transversely across the corridor, no further per step than the
+ *    terrain's own cell size, out to a half-width generous enough to cover
+ *    the batters (formation half-width, plus the steeper of the two slopes
+ *    times the local cut/fill depth, plus a margin).
+ * 3. At each transverse sample, snap to the nearest terrain grid node, read
+ *    its existing (unedited) elevation, compute the corridor template's
+ *    target elevation there, and record the difference as that node's delta
+ *    in the edit layer.
+ *
+ * Grid nodes get written from multiple nearby stations/offsets; last write
+ * wins, which is fine here since neighbouring stations along a gently curving
+ * alignment agree closely on the design surface at a shared node.
+ */
+const excavateCorridor = (
+  terrain: Heightmap,
+  alignment: Alignment,
+  profile: readonly ProfilePoint[],
+  template: CorridorTemplate,
+): TerrainEditLayer => {
+  const layer = new TerrainEditLayer(terrain)
+  if (alignment.isEmpty || profile.length === 0) return layer
+
+  const transverseStep = terrain.cellSize
+  const maxSlope = Math.max(template.cutSlope, template.fillSlope)
+  const steps = Math.max(1, Math.ceil(alignment.length / EXCAVATION_STATION_SPACING))
+
+  for (let i = 0; i <= steps; i++) {
+    const s = Math.min(i * EXCAVATION_STATION_SPACING, alignment.length)
+    const pose = alignment.poseAt(s)
+    // Carve to just below the design surface (see EXCAVATION_CLEARANCE) so
+    // grid-resolution error can't leave the terrain poking back through the
+    // pavement it's meant to sit under.
+    const designZ = designElevationAtStation(s, profile) - EXCAVATION_CLEARANCE
+
+    const centreGroundZ = terrain.sample(pose.position.x, pose.position.y)
+    const depth = Math.abs(centreGroundZ - designZ)
+    const half = template.formationHalfWidth + maxSlope * depth + EXCAVATION_MARGIN
+
+    const normal = fromAngle(pose.heading + Math.PI / 2)
+    const transverseSteps = Math.max(1, Math.ceil(half / transverseStep))
+
+    for (let j = -transverseSteps; j <= transverseSteps; j++) {
+      const offset = (half * j) / transverseSteps
+      const worldX = pose.position.x + normal.x * offset
+      const worldY = pose.position.y + normal.y * offset
+
+      const col = Math.round((worldX - terrain.originX) / terrain.cellSize)
+      const row = Math.round((worldY - terrain.originY) / terrain.cellSize)
+      if (col < 0 || col >= terrain.cols || row < 0 || row >= terrain.rows) continue
+
+      const groundZ = terrain.elevationAtIndex(col, row)
+      const targetZ = designElevationAt(offset, designZ, groundZ, template)
+      layer.setDelta(col, row, targetZ - groundZ)
+    }
+  }
+
+  return layer
+}
+
 export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true })
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
@@ -67,22 +195,21 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   sun.position.set(-600, 900, 400)
   scene.add(sun)
 
+  // Fine enough that the excavated corridor (a 10m-wide formation) isn't lost
+  // between grid nodes: at the original 20m cellSize, a single cell spans the
+  // whole formation width plus both batters, so the cut/fill dissolves into
+  // the surrounding terrain's own noise instead of reading as an engineered
+  // surface. Same 2560m footprint as before, just twice the density.
   const terrain = generateValley({
-    cols: 129, rows: 129, cellSize: 20,
+    cols: 257, rows: 257, cellSize: 10,
     floorElevation: 100, ridgeHeight: 70, valleyHalfWidth: 400, seed: 7,
   })
 
-  scene.add(new THREE.Mesh(
-    terrainGeometry(terrain, 1),
-    // DoubleSide: the raised orbit camera looks down on the terrain from
-    // angles the old near-level fixed camera never reached, and the grid
-    // winding culls as back-facing from directly above without this.
-    new THREE.MeshStandardMaterial({
-      color: 0x7a8a63, roughness: 0.95, flatShading: false, side: THREE.DoubleSide,
-    }),
-  ))
-
   const alignment = buildAlignment(vec2(200, 1300), vec2(1400, 1200), vec2(2400, 1340))
+
+  // Falls back to the raw heightmap when there is no alignment (or no
+  // feasible grade solution) to excavate against.
+  let terrainSource: { sample(x: number, y: number): number } = terrain
 
   if (alignment) {
     const ground = sampleGroundProfile(alignment, terrain, 10)
@@ -93,6 +220,12 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     })
 
     if (solution.feasible) {
+      // Excavate the terrain down to the design line before anything is
+      // rendered, so the road sits in a real cutting/embankment rather than
+      // buried inside (or floating above) untouched ground.
+      const editLayer = excavateCorridor(terrain, alignment, solution.profile, CORRIDOR_TEMPLATE)
+      terrainSource = editLayer
+
       // Deliberately part-built, so all three layers are visible at once.
       const total = alignment.length
       const road = buildRoadMesh(
@@ -115,15 +248,47 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     }
   }
 
-  const resize = () => {
-    const w = canvas.clientWidth
-    const h = canvas.clientHeight
-    renderer.setSize(w, h, false)
-    camera.aspect = w / h
+  scene.add(new THREE.Mesh(
+    terrainGeometry(terrain, 1, terrainSource),
+    // DoubleSide: the raised orbit camera looks down on the terrain from
+    // angles the old near-level fixed camera never reached, and the grid
+    // winding culls as back-facing from directly above without this.
+    new THREE.MeshStandardMaterial({
+      color: 0x7a8a63, roughness: 0.95, flatShading: false, side: THREE.DoubleSide,
+    }),
+  ))
+
+  // A window `resize` event alone isn't enough: it fires only for the
+  // window's own dimensions, not for every reason the canvas's box can
+  // change size (layout, container changes, fractional-pixel rounding
+  // between the window and the element). ResizeObserver reports the
+  // canvas's actual content-box size directly — including once immediately
+  // on observe(), with the real post-layout size — so the renderer and
+  // camera are sized from the same source of truth the canvas is actually
+  // displayed at, and stay correct across every kind of resize.
+  let lastWidth = -1
+  let lastHeight = -1
+  const resize = (width: number, height: number) => {
+    if (width <= 0 || height <= 0) return
+    if (width === lastWidth && height === lastHeight) return
+    lastWidth = width
+    lastHeight = height
+    renderer.setSize(width, height, false)
+    camera.aspect = width / height
     camera.updateProjectionMatrix()
   }
-  resize()
-  window.addEventListener('resize', resize)
+
+  const resizeObserver = new ResizeObserver((entries) => {
+    for (const entry of entries) {
+      const box = entry.contentBoxSize?.[0]
+      if (box) {
+        resize(box.inlineSize, box.blockSize)
+      } else {
+        resize(entry.contentRect.width, entry.contentRect.height)
+      }
+    }
+  })
+  resizeObserver.observe(canvas)
 
   // Slow automatic orbit around the road's midpoint, at a raised angle
   // looking down, so every side of the terrain and the layer stepping is
@@ -131,6 +296,13 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   let frame = 0
   const tick = (timeMs: number) => {
     frame = requestAnimationFrame(tick)
+    // Belt and suspenders alongside the ResizeObserver above: cheap enough
+    // to check every frame, and it catches the box changing size for any
+    // reason the observer's host environment fails to notify for (some
+    // embeddings/automation contexts never deliver a ResizeObserver
+    // callback at all), rather than leaving the canvas stuck at a stale
+    // resolution until something else happens to touch it.
+    resize(canvas.clientWidth, canvas.clientHeight)
     const angle = (timeMs / 1000 / ORBIT_PERIOD_S) * Math.PI * 2
     camera.position.set(
       ORBIT_CENTER.x + Math.cos(angle) * ORBIT_RADIUS,
@@ -144,7 +316,7 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
 
   return () => {
     cancelAnimationFrame(frame)
-    window.removeEventListener('resize', resize)
+    resizeObserver.disconnect()
     renderer.dispose()
   }
 }
