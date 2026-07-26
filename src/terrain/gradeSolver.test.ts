@@ -188,15 +188,37 @@ describe('structure allowance', () => {
     expect(r.profile[2]!.z).toBeGreaterThan(90)
   })
 
-  it('still respects the cut side, which a structure does not help', () => {
-    const gp = ground([100, 100, 100])
+  it('does not widen the cut side, however large the structure allowance', () => {
+    // Ends pinned at 100 with a 20m peak between them. At 7% over 25m stations
+    // the design can climb only 1.75m per step, so it must cut through the
+    // peak — and with 3m of cut available it cannot. Band at the peak is
+    // [117, ...] against a grade-limited ceiling of 103.5, so: infeasible.
+    // An implementation that widened the CUT side to maxStructureHeight would
+    // open that band to [70, ...] and wrongly report this as feasible.
+    const gp = ground([100, 100, 120, 100, 100])
     const r = solveGradeProfile(
       gp,
-      constraints({ maxCutDepth: 3, maxFillHeight: 3, maxStructureHeight: 50 }),
+      constraints({
+        maxCutDepth: 3, maxFillHeight: 3, maxStructureHeight: 50,
+        fixedStart: 100, fixedEnd: 100,
+      }),
+    )
+    expect(r.feasible).toBe(false)
+  })
+
+  it('becomes feasible once the cut allowance itself is large enough', () => {
+    // Same terrain and the same structure allowance; only the cut allowance
+    // changes. This proves the cut allowance is what binds above, rather than
+    // something incidental about the fixture.
+    const gp = ground([100, 100, 120, 100, 100])
+    const r = solveGradeProfile(
+      gp,
+      constraints({
+        maxCutDepth: 20, maxFillHeight: 3, maxStructureHeight: 50,
+        fixedStart: 100, fixedEnd: 100,
+      }),
     )
     expect(r.feasible).toBe(true)
-    if (!r.feasible) return
-    for (const p of r.profile) expect(p.z).toBeGreaterThanOrEqual(97 - 1e-9)
   })
 
   it('rejects a structure allowance below the fill allowance', () => {
@@ -247,5 +269,11 @@ describe('classifySupport', () => {
 
   it('rejects mismatched lengths', () => {
     expect(() => classifySupport(ground([100, 100]), ground([100]), 10)).toThrow(RangeError)
+  })
+
+  it('rejects mismatched stations even when lengths match', () => {
+    const gp = ground([100, 100, 100])
+    const design = [{ s: 0, z: 100 }, { s: 30, z: 100 }, { s: 50, z: 100 }]
+    expect(() => classifySupport(gp, design, 10)).toThrow(RangeError)
   })
 })

@@ -37,6 +37,16 @@ export type GradeSolution =
 const EPSILON = 1e-9
 
 /**
+ * Largest allowed difference between a ground station and its corresponding
+ * design station before they are considered mismatched, metres. Matches the
+ * `MIN_STATION_GAP` floor `groundProfile.ts` enforces between stations, so
+ * anything larger than this tolerance cannot be floating-point noise from
+ * that pipeline — it means the two profiles were not built over the same
+ * stations.
+ */
+const STATION_TOLERANCE = 1e-6
+
+/**
  * Find a vertical alignment that respects the maximum grade and stays as
  * close to natural ground as possible — or report that none exists.
  *
@@ -153,6 +163,16 @@ export const classifySupport = (
 ): StationSupport[] => {
   if (ground.length !== design.length) {
     throw new RangeError('ground and design profiles must have the same length')
+  }
+  for (let i = 0; i < ground.length; i++) {
+    const gs = ground[i]!.s
+    const ds = design[i]!.s
+    if (Math.abs(gs - ds) > STATION_TOLERANCE) {
+      throw new RangeError(
+        `ground and design profiles must share stations: station ${i} is ${gs} on ` +
+          `ground but ${ds} on design`,
+      )
+    }
   }
   return design.map((d, i) =>
     d.z - ground[i]!.z > maxFillHeight ? 'structure' : 'earthwork',
