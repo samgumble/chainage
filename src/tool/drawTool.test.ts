@@ -47,13 +47,27 @@ describe('DrawTool', () => {
   it('drops the hovered position once it is placed', () => {
     const tool = new DrawTool(new RoadNetwork(), 'rural')
     tool.place({ x: 0, y: 0 })
-    tool.hover({ x: 200, y: 0 })
+    // Hover well away from where the next point actually lands. `points`
+    // never includes the hover and `buildPolylineAlignment` collapses an
+    // exact duplicate, so hovering and then placing at the *same* spot
+    // can't tell a leaked hover apart from a correctly cleared one — only a
+    // hover placed somewhere else can.
+    tool.hover({ x: 200, y: 100 })
     tool.place({ x: 200, y: 0 })
 
-    // Two placed points, not three: the hover must not survive as a duplicate.
     expect(tool.points).toHaveLength(2)
+    expect(tool.preview?.ok).toBe(true)
     if (!tool.preview?.ok) return
+
+    // A leaked hover would survive as a third pending point at (200, 100),
+    // bending the alignment through a corner there instead of ending
+    // straight at the placed (200, 0) — changing both the length and the
+    // endpoint. Only a genuinely two-point, straight preview produces both
+    // of these.
     expect(tool.preview.alignment.length).toBeCloseTo(200, 6)
+    const end = tool.preview.alignment.poseAt(tool.preview.alignment.length)
+    expect(end.position.x).toBeCloseTo(200, 6)
+    expect(end.position.y).toBeCloseTo(0, 6)
   })
 
   it('snaps a placed point to a nearby node', () => {
