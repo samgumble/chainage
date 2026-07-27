@@ -675,7 +675,10 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   // model lit by a single directional sun wants shadows soft enough to read
   // as daylight, not a laser-cut silhouette.
   renderer.shadowMap.enabled = true
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap
+  // PCFSoftShadowMap is deprecated in three 0.185 and silently falls back to
+  // PCFShadowMap with a console warning on every compile, so ask for what is
+  // actually going to be used rather than for a soft filter that is not.
+  renderer.shadowMap.type = THREE.PCFShadowMap
 
   const scene = new THREE.Scene()
   // No fog: depth of field (the tilt-shift pass, below) already tells the eye
@@ -733,53 +736,71 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   // instead from the terrain's own bounding sphere (see `terrainBounds`), with
   // a small margin so the frustum's edge is not razor-tight against it.
   const bounds = terrainBounds(terrain)
-  const SHADOW_FRUSTUM_MARGIN = 1.05
-  const shadowHalfSize = bounds.radius * SHADOW_FRUSTUM_MARGIN
-
   const shadowCamera = sun.shadow.camera
-  shadowCamera.left = -shadowHalfSize
-  shadowCamera.right = shadowHalfSize
-  shadowCamera.top = shadowHalfSize
-  shadowCamera.bottom = -shadowHalfSize
 
-  // The light itself sits a few terrain-radii out along the sun's direction,
-  // looking at the terrain's centre, so the shadow camera's near/far can
-  // bound the terrain comfortably whatever the sun's elevation.
-  const LIGHT_DISTANCE_FACTOR = 2.5
-  const lightDistance = bounds.radius * LIGHT_DISTANCE_FACTOR
-  shadowCamera.near = 1
-  shadowCamera.far = lightDistance + bounds.radius * 1.5
+  /**
+   * Fit the shadow frustum to what the camera can actually see.
+   *
+   * Sizing it to the whole terrain is the obvious thing and it does not work:
+   * this terrain is 2560m across, so even a 4096 map spends about 0.93m of
+   * ground on every shadow texel — coarser than the road features meant to
+   * cast, and coarse enough that the depth comparison mis-fires across the
+   * whole surface and paints it in self-shadowing acne. Following the camera
+   * instead spends the same texels on the few hundred metres in frame, which
+   * is a twentyfold gain in resolution and is what makes the shadows clean
+   * rather than what makes them cheap.
+   *
+   * Called every frame, because the extent depends on the rig's distance and
+   * the centre on its target, and both change as the player moves.
+   */
+  const updateSunShadow = (): void => {
+    // The camera sees roughly its own distance in ground height at this field
+    // of view, so a frustum of that order covers the frame with margin. The
+    // floor keeps close zooms from shrinking it to nothing.
+    const halfSize = Math.max(150, rig.distance)
+    shadowCamera.left = -halfSize
+    shadowCamera.right = halfSize
+    shadowCamera.top = halfSize
+    shadowCamera.bottom = -halfSize
 
-  const sunTargetPosition: RigVec3 = { x: bounds.centerX, y: bounds.centerY, z: bounds.centerZ }
-  const sunPosition: RigVec3 = {
-    x: bounds.centerX + sunlight.direction.x * lightDistance,
-    y: bounds.centerY + sunlight.direction.y * lightDistance,
-    z: bounds.centerZ + sunlight.direction.z * lightDistance,
+    // Far enough back that anything standing on the ground is inside near/far
+    // whatever the sun's elevation, and scaled to the frustum so the depth
+    // range stays tight — a needlessly long range costs precision.
+    const lightDistance = halfSize * 4
+    shadowCamera.near = 1
+    shadowCamera.far = lightDistance + halfSize * 2
+
+    const target = rig.target
+    sun.target.position.copy(toThreePosition(target))
+    sun.position.copy(
+      toThreePosition({
+        x: target.x + sunlight.direction.x * lightDistance,
+        y: target.y + sunlight.direction.y * lightDistance,
+        z: target.z + sunlight.direction.z * lightDistance,
+      }),
+    )
+    shadowCamera.updateProjectionMatrix()
   }
-  sun.position.copy(toThreePosition(sunPosition))
-  sun.target.position.copy(toThreePosition(sunTargetPosition))
   // The light's target must be in the scene graph for its world matrix to
   // update — otherwise it stays at the origin and the light points nowhere
   // near the terrain regardless of where `sun.position` is set.
   scene.add(sun.target)
 
   // Shadow acne (self-shadowing noise on a lit face) and peter-panning (the
-  // shadow visibly detached from the object casting it) pull in opposite
-  // directions from the same knob, so both are tuned together rather than
-  // either alone. At this shadow camera's size (radius in the hundreds of
-  // metres) the shadow map's own texel already covers roughly a metre of
-  // ground, so `normalBias` — which offsets the sampled position along the
-  // surface normal in world units — needs to be on that order to clear the
-  // texel-sized error acne comes from; `bias`, a small constant offset in
-  // normalized depth, only needs to be enough to clear ordinary depth
-  // quantization. These values were reached by looking at the rendered scene
-  // (Step 8): smaller bias/normalBias showed acne across the terrain and
-  // especially along the batters; larger normalBias visibly detached the
-  // road's shadow from the road itself on the cutting side.
-  sun.shadow.bias = -0.0004
-  sun.shadow.normalBias = 0.6
+  // shadow visibly detached from what casts it) pull in opposite directions
+  // from the same knob. `normalBias` offsets the sampled position along the
+  // surface normal in world units, so the value it wants is set by how much
+  // ground a shadow texel covers — which is why these are far smaller than
+  // they would be for a terrain-wide frustum. `updateSunShadow` keeps the
+  // frustum a few hundred metres across, giving texels on the order of a
+  // tenth of a metre, and the bias follows that scale rather than a metre's.
+  sun.shadow.bias = -0.0002
+  sun.shadow.normalBias = 0.05
   sun.shadow.mapSize.set(4096, 4096)
-  shadowCamera.updateProjectionMatrix()
+  // Deliberately not fitted here: `updateSunShadow` reads the camera rig,
+  // which is constructed further down, and calling it now would touch `rig`
+  // in its temporal dead zone and throw before the scene ever renders. The
+  // frame loop fits it before the first draw, so there is nothing to fit yet.
 
   scene.add(sun)
 
@@ -1591,6 +1612,9 @@ void main() {
     // resolution until something else happens to touch it.
     resize(canvas.clientWidth, canvas.clientHeight)
     updateCameraFromRig()
+    // The shadow frustum follows the camera, so it has to be refitted after
+    // the rig has been read and before anything is drawn with it.
+    updateSunShadow()
     updatePreview()
     updateHighlight()
 
