@@ -1260,7 +1260,15 @@ export const buildBridgeMesh = (
 
     // An abutment carries the full road width; a pier is a slender column.
     const halfAcross = isAbutment ? halfWidth : pierHalfWidth
-    addBox(builder, alignment, s, halfAcross, pierHalfWidth, groundZ, topZ)
+
+    // A box is centred on its station, so an abutment placed on the span
+    // boundary would overhang past the span end by its own half-length. Shift
+    // it inward so the whole structure stays within the span it belongs to.
+    const inward = isAbutment
+      ? (s === span.fromStation ? pierHalfWidth : -pierHalfWidth)
+      : 0
+
+    addBox(builder, alignment, s + inward, halfAcross, pierHalfWidth, groundZ, topZ)
   }
 
   return builder.build()
