@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildSceneContent, solveNetwork } from './roadScene'
+import { buildSceneContent, solveNetwork, terrainBounds } from './roadScene'
 import { buildNetworkMesh } from '../mesh/networkMesh'
 import type { RoadMesh } from '../mesh/roadMesh'
 import { RoadNetwork, type RoadId } from '../network/graph'
@@ -31,6 +31,45 @@ const structureVertices = (built: { structures: ReadonlyMap<number, { vertexCoun
   for (const [, mesh] of built.structures) total += mesh.vertexCount
   return total
 }
+
+/**
+ * `terrainBounds` sizes the sun's shadow camera (see `drawRoadScene`), so it
+ * is the one piece of that setup that is a pure function of the terrain and
+ * testable without a renderer — everything else in Step 3 needs a real
+ * `THREE.DirectionalLight` and is covered by using the app (Step 8).
+ */
+describe('terrainBounds', () => {
+  it('centres on a flat heightmap\'s footprint, at its own elevation', () => {
+    // 3x3 grid, cellSize 10, all elevations 0: a 20x20 footprint centred on
+    // (10, 10), with no elevation spread at all.
+    const flat = new Heightmap(0, 0, 10, 3, 3, new Float32Array(9))
+    const bounds = terrainBounds(flat)
+
+    expect(bounds.centerX).toBe(10)
+    expect(bounds.centerY).toBe(10)
+    expect(bounds.centerZ).toBe(0)
+    // Half-footprint is (10, 10) with no elevation spread, so the enclosing
+    // sphere's radius is exactly the flat diagonal: hypot(10, 10, 0).
+    expect(bounds.radius).toBeCloseTo(Math.hypot(10, 10, 0), 10)
+  })
+
+  it("grows the radius to cover the heightmap's own elevation spread", () => {
+    // 2x2 grid, cellSize 1, origin (5, 5): a single cell, one corner raised
+    // 10m above the other three — minZ=0, maxZ=10.
+    const elevations = new Float32Array([0, 0, 0, 10])
+    const bumpy = new Heightmap(5, 5, 1, 2, 2, elevations)
+    const bounds = terrainBounds(bumpy)
+
+    expect(bounds.centerX).toBe(5.5)
+    expect(bounds.centerY).toBe(5.5)
+    // Midpoint of the elevation range, not the mean of the four samples.
+    expect(bounds.centerZ).toBe(5)
+    // Half-footprint (0.5, 0.5) plus half the elevation spread (5) — a
+    // flat-heightmap radius (as above) would badly undersize the shadow
+    // camera's frustum against this much relief.
+    expect(bounds.radius).toBeCloseTo(Math.hypot(0.5, 0.5, 5), 10)
+  })
+})
 
 describe('the demo scene', () => {
   it('grades all three roads', () => {

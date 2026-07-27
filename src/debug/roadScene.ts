@@ -1,4 +1,8 @@
 import * as THREE from 'three'
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js'
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 import { Alignment } from '../geometry/alignment'
 import { Line } from '../geometry/primitives'
 import { vec2, fromAngle, type Vec2 } from '../geometry/vec2'
@@ -9,11 +13,14 @@ import { solveGradeProfile, type GradeSolution } from '../terrain/gradeSolver'
 import { TerrainEditLayer } from '../terrain/editLayer'
 import { designSurfaceAtOffset, type CorridorTemplate, type CorridorBatters } from '../terrain/corridor'
 import { rayTerrainIntersection, type Ray3, type Vec3 as GroundVec3 } from '../terrain/rayCast'
-import type { Heightmap, TerrainSampler } from '../terrain/heightmap'
+import { clampNumber, type Heightmap, type TerrainSampler } from '../terrain/heightmap'
 import { ROAD_CLASSES, formationHalfWidth, totalPavementThickness, type RoadClassName } from '../network/roadClass'
 import { toBufferGeometry } from '../render/meshAdapter'
 import { terrainGeometry } from '../render/terrainMesh'
 import { CameraRig, type Vec3 as RigVec3 } from '../render/cameraRig'
+import { sunAt } from '../render/sunlight'
+import { surfaceFor } from '../render/materials'
+import { TILT_SHIFT_FRAGMENT_SHADER, createTiltShiftUniforms } from '../render/tiltShift'
 import { RoadNetwork, type RoadId } from '../network/graph'
 import { buildNetworkMesh, type NetworkMesh } from '../mesh/networkMesh'
 import { DrawTool, SNAP_RADIUS } from '../tool/drawTool'
@@ -108,19 +115,14 @@ const EXCAVATION_MARGIN = 5
  */
 const EXCAVATION_ZFIGHT_MARGIN = 0.05
 
-/** Layer colours: warm earth, pale aggregate, dark asphalt — tuned for
- * contrast against each other and against the terrain so the three
- * differing end-stations are unmistakable. */
-const LAYER_COLOURS: Record<string, number> = {
-  subgrade: 0x8a6a3f,
-  base: 0xc7c3ba,
-  wearing: 0x35383d,
-}
-
-/** Structure (bridge/wall) colour — a neutral stone tone distinct from every
- * pavement layer, so a structure reads as a different kind of thing rather
- * than an odd-coloured road. */
-const STRUCTURE_COLOUR = 0x9a958c
+/**
+ * Where the demo network's three arms meet — a T junction on the valley
+ * floor, main road running east-west with a narrower gravel branch heading
+ * north. Module scope (not local to `buildSceneContent`) because
+ * `drawRoadScene` also needs it, to frame the camera rig on the same point
+ * the network was actually built around rather than a second guess at it.
+ */
+const JUNCTION = vec2(900, 1280)
 
 /**
  * Cut and fill the terrain down to the design surface along the corridor.
@@ -349,8 +351,6 @@ export const buildSceneContent = (): SceneContent => {
   // leg at the junction means every leg's own elevation there is natural
   // ground, so the three legs agree and the junction sits flush without
   // needing `elevationMismatches` to paper over a drifted arrival station.
-  const JUNCTION = vec2(900, 1280)
-
   const network = new RoadNetwork()
 
   // West and east arms both start at the junction, heading opposite ways
@@ -373,6 +373,86 @@ export const buildSceneContent = (): SceneContent => {
 
   const { designs, editLayer, built, infeasibleRoads } = solveNetwork(terrain, network)
   return { terrain, network, designs, editLayer, built, infeasibleRoads }
+}
+
+/** A sphere in the project's own convention (`(x, y)` ground, `z` up) that
+ * encloses a terrain's full footprint and elevation range. */
+export type TerrainBounds = {
+  readonly centerX: number
+  readonly centerY: number
+  readonly centerZ: number
+  readonly radius: number
+}
+
+/**
+ * The bounding sphere of a heightmap — its footprint (from `originX`/`originY`
+ * out to `width`/`height`) and the full spread of its own elevations.
+ *
+ * Exists to size the sun's shadow camera (see `drawRoadScene`): a
+ * `DirectionalLight`'s shadow is an orthographic camera whose default frustum
+ * is a couple of units across, which on terrain at this scene's scale
+ * produces either no shadows at all or a small square of them near the
+ * origin. A pure function of the terrain rather than a number picked by eye,
+ * so it stays correct if the demo terrain's footprint or relief ever changes.
+ * No three.js in sight, so it is testable without a renderer.
+ */
+export const terrainBounds = (terrain: Heightmap): TerrainBounds => {
+  let minZ = Infinity
+  let maxZ = -Infinity
+  for (const z of terrain.elevations) {
+    if (z < minZ) minZ = z
+    if (z > maxZ) maxZ = z
+  }
+
+  const centerX = terrain.originX + terrain.width / 2
+  const centerY = terrain.originY + terrain.height / 2
+  const centerZ = (minZ + maxZ) / 2
+  const halfElevation = (maxZ - minZ) / 2
+
+  return {
+    centerX,
+    centerY,
+    centerZ,
+    radius: Math.hypot(terrain.width / 2, terrain.height / 2, halfElevation),
+  }
+}
+
+/**
+ * Per-vertex colour for the terrain mesh, RGB triples in `terrainGeometry`'s
+ * own (row-major, step-1) vertex order.
+ *
+ * Undisturbed ground gets `surfaceFor('terrain')`'s colour; anywhere the edit
+ * layer has moved the ground from its natural elevation — the whole excavated
+ * corridor, batters included, not just where a road's ribbon sits — gets
+ * `surfaceFor('cutFace')`'s instead. Terrain and cut face share the same
+ * roughness and metalness (see `materials.ts`), so a single material with
+ * vertex colours carries the whole distinction; there is no second mesh here
+ * to give a different material to.
+ *
+ * Deliberately not built inside `terrainGeometry` itself: walking the same
+ * grid a second time here, rather than threading a colour concern into that
+ * function, keeps `terrainGeometry` free of anything but position/normal/uv,
+ * at the cost of repeating its (col, row) -> vertex-index walk. Must be
+ * called with `step = 1`, matching how `drawRoadScene` builds the geometry —
+ * a different step would desync the two vertex orderings.
+ */
+const terrainVertexColours = (terrain: Heightmap, editLayer: TerrainEditLayer): Float32Array => {
+  const terrainColour = new THREE.Color(surfaceFor('terrain').colour)
+  const cutColour = new THREE.Color(surfaceFor('cutFace').colour)
+  const colours = new Float32Array(terrain.cols * terrain.rows * 3)
+
+  for (let row = 0; row < terrain.rows; row++) {
+    for (let col = 0; col < terrain.cols; col++) {
+      const cut = editLayer.deltaAt(col, row) !== 0
+      const colour = cut ? cutColour : terrainColour
+      const i = (row * terrain.cols + col) * 3
+      colours[i] = colour.r
+      colours[i + 1] = colour.g
+      colours[i + 2] = colour.b
+    }
+  }
+
+  return colours
 }
 
 /**
@@ -407,17 +487,25 @@ const addNetworkMeshes = (
     )
   }
 
+  // Road and junction surfaces receive the sun's shadow (from terrain, from
+  // structures, from each other at a junction) as well as casting it — a
+  // ribbon in the shade of a cutting is exactly what a raised, low-sun view
+  // should show.
   for (const [, roadMesh] of built.roads) {
     for (const layer of roadMesh.layers) {
       if (layer.mesh.vertexCount === 0) continue
+      const surface = surfaceFor(layer.name)
       const mesh = new THREE.Mesh(
         toBufferGeometry(layer.mesh),
         new THREE.MeshStandardMaterial({
-          color: LAYER_COLOURS[layer.name] ?? 0x888888,
-          roughness: 0.9,
+          color: surface.colour,
+          roughness: surface.roughness,
+          metalness: surface.metalness,
           side: THREE.DoubleSide,
         }),
       )
+      mesh.castShadow = true
+      mesh.receiveShadow = true
       scene.add(mesh)
       meshes.push(mesh)
     }
@@ -425,14 +513,20 @@ const addNetworkMeshes = (
 
   for (const [, junctionMesh] of built.junctions) {
     if (junctionMesh.vertexCount === 0) continue
+    // A junction plate is the same sealed surface as the wearing course it
+    // joins, not a fourth material of its own.
+    const surface = surfaceFor('wearing')
     const mesh = new THREE.Mesh(
       toBufferGeometry(junctionMesh),
       new THREE.MeshStandardMaterial({
-        color: LAYER_COLOURS.wearing ?? 0x2e3033,
-        roughness: 0.9,
+        color: surface.colour,
+        roughness: surface.roughness,
+        metalness: surface.metalness,
         side: THREE.DoubleSide,
       }),
     )
+    mesh.castShadow = true
+    mesh.receiveShadow = true
     scene.add(mesh)
     meshes.push(mesh)
   }
@@ -446,12 +540,21 @@ const addNetworkMeshes = (
 
   for (const [, structureMesh] of built.structures) {
     if (structureMesh.vertexCount === 0) continue
+    // Bridge decks, abutments, piers and retaining walls are all structural
+    // concrete — one material, distinct from every pavement layer and from
+    // the terrain, so a structure reads as a different kind of thing rather
+    // than an odd-coloured road.
+    const surface = surfaceFor('concrete')
     const mesh = new THREE.Mesh(
       toBufferGeometry(structureMesh),
       new THREE.MeshStandardMaterial({
-        color: STRUCTURE_COLOUR, roughness: 0.85, side: THREE.DoubleSide,
+        color: surface.colour,
+        roughness: surface.roughness,
+        metalness: surface.metalness,
+        side: THREE.DoubleSide,
       }),
     )
+    mesh.castShadow = true
     scene.add(mesh)
     meshes.push(mesh)
   }
@@ -460,15 +563,31 @@ const addNetworkMeshes = (
     console.warn('crossings below minimum clearance', [...built.tightCrossings.entries()])
   }
 
+  // Vertex-coloured rather than a flat tint: the excavated corridor (see
+  // `terrainVertexColours`) is a different surface from undisturbed ground,
+  // not just a different shade of the same one. Terrain and cut face share a
+  // roughness and metalness (see `materials.ts`), so those two properties are
+  // still uniform across the mesh — only colour varies per vertex.
+  const terrainSurface = surfaceFor('terrain')
   const terrainMesh = new THREE.Mesh(
     terrainGeometry(terrain, 1, editLayer),
     // DoubleSide: the raised camera can look down on the terrain from angles
     // a near-level fixed camera never reached, and the grid winding culls as
     // back-facing from directly above without this.
     new THREE.MeshStandardMaterial({
-      color: 0x7a8a63, roughness: 0.95, flatShading: false, side: THREE.DoubleSide,
+      vertexColors: true,
+      roughness: terrainSurface.roughness,
+      metalness: terrainSurface.metalness,
+      flatShading: false,
+      side: THREE.DoubleSide,
     }),
   )
+  terrainMesh.geometry.setAttribute(
+    'color',
+    new THREE.BufferAttribute(terrainVertexColours(terrain, editLayer), 3),
+  )
+  terrainMesh.castShadow = true
+  terrainMesh.receiveShadow = true
   scene.add(terrainMesh)
   meshes.push(terrainMesh)
 
@@ -538,21 +657,53 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   renderer.setClearColor(0x14181d)
 
+  // ACES Filmic is what turns a bright sun into a scene instead of a clipped
+  // white wash — without it a physically-lit sun blows every surface it
+  // touches straight to (1,1,1) and the render reads like a screenshot of a
+  // spreadsheet. `outputColorSpace` is left alone rather than set blindly:
+  // three 0.185's `WebGLRenderer` already defaults it to `SRGBColorSpace`
+  // (confirmed by reading `WebGLRenderer.js`'s constructor), so setting it
+  // again here would only restate the default — but it is restated anyway,
+  // as a visible assertion of that fact rather than a silent reliance on it,
+  // so a future three.js version that changed the default would show up here
+  // as an explicit line rather than a quietly different render.
+  renderer.toneMapping = THREE.ACESFilmicToneMapping
+  renderer.toneMappingExposure = 1
+  renderer.outputColorSpace = THREE.SRGBColorSpace
+
+  // A model lit by a single directional sun wants a real shadow, not a flat
+  // unlit render.
+  renderer.shadowMap.enabled = true
+  // Not PCFSoftShadowMap: it is deprecated in three 0.185 and silently falls
+  // back to PCFShadowMap with a console warning on every compile, so this
+  // asks for what is actually going to be used (a filtered, though not
+  // softened, PCF shadow) rather than for a soft filter that is not.
+  renderer.shadowMap.type = THREE.PCFShadowMap
+
   const scene = new THREE.Scene()
-  // Pushed well past the camera's usual working distance so it no longer
-  // greys out the terrain and road; kept as gentle depth cueing near the far
-  // clip.
-  scene.fog = new THREE.Fog(0x14181d, 3800, 6000)
+  // No fog: depth of field (the tilt-shift pass, below) already tells the eye
+  // what is near and what is far. Fog on top of that reads as neither — two
+  // different ways of saying "distance" competing with each other rather than
+  // one clear one.
 
   const camera = new THREE.PerspectiveCamera(45, 1, 1, 6000)
 
-  // three r185 uses physically-based lighting, so intensities read very
-  // differently to older three.js versions — these are tuned by eye to
-  // give the terrain clear form and separate the three road layers.
-  scene.add(new THREE.HemisphereLight(0xbdd7ff, 0x3a3227, 3.5))
-  const sun = new THREE.DirectionalLight(0xfff2d8, 4.5)
-  sun.position.set(-600, 900, 400)
-  scene.add(sun)
+  /** Project convention `(x, y, z)`, `z` up, to three.js's `(x, z, -y)`. Must
+   * stay the exact inverse of `threeToProject` below. Takes the camera rig's
+   * own `Vec3` — this is only ever called with `rig.position`/`rig.target` —
+   * and, being a linear (origin-preserving) map, is reused as-is to convert
+   * the sun's direction vector too. */
+  const toThreePosition = (p: RigVec3): THREE.Vector3 => new THREE.Vector3(p.x, p.z, -p.y)
+
+  /** three.js's `(x, y, z)` back to the project's `(x, y, z)`, `z` up. The
+   * inverse of `meshAdapter.ts`'s `(x, y, z) -> (x, z, -y)`: three.x = x,
+   * three.y = z, three.z = -y, so x = three.x, z = three.y, y = -three.z.
+   * Returns the ground-cast's own `Vec3` — this only ever feeds `Ray3`. */
+  const threeToProject = (v: THREE.Vector3): GroundVec3 => ({
+    x: v.x,
+    y: -v.z,
+    z: v.y,
+  })
 
   const content = buildSceneContent()
   const { terrain, network } = content
@@ -560,6 +711,156 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   let built = content.built
   let infeasibleRoads = content.infeasibleRoads
   let terrainSampler: TerrainSampler = editLayer
+
+  // --- Sun and fill light ---------------------------------------------------
+  //
+  // Mid-afternoon: long enough shadows to read as a time of day, without the
+  // orange of sunset — `sunAt`'s own docstring calls this hour out as the
+  // reason `MAX_SUN_ELEVATION` is not overhead.
+  const SUN_HOUR = 15
+  const sunlight = sunAt(SUN_HOUR)
+
+  // Reduced from the fixed light's old 3.5: that light had to do all the
+  // work on its own, and now that the sun casts a real shadow, an
+  // equally-bright fill would flatten it straight back out. Kept, rather
+  // than removed, so the shadowed side of a cutting is dim, not black.
+  scene.add(new THREE.HemisphereLight(0xbdd7ff, 0x3a3227, 1.2))
+
+  const sun = new THREE.DirectionalLight(sunlight.colour, sunlight.intensity)
+  sun.castShadow = true
+
+  // The shadow camera is orthographic and, left at its default, has a
+  // frustum a couple of units across — on terrain at this scene's scale that
+  // produces either no shadows or a small square of them near the origin, and
+  // looks exactly like a terrain bug rather than an unsized camera.
+  // `updateSunShadow`, below, sizes it from the camera rig every frame; the
+  // terrain's own bounding sphere (`bounds`, from `terrainBounds`) is used
+  // only as that sizing's ceiling, not its everyday source — see the two
+  // constants right after it.
+  const bounds = terrainBounds(terrain)
+  const shadowCamera = sun.shadow.camera
+
+  /** Shadow map resolution, one edge. Read here and by `updateSunShadow`
+   * (for `normalBias`'s texel-size calculation, below) so the two can never
+   * disagree about what the map is actually sized to. */
+  const SHADOW_MAP_SIZE = 4096
+
+  /**
+   * Shadow frustum half-size floor and ceiling, world units.
+   *
+   * The floor keeps close zooms from shrinking the frustum to nothing.
+   *
+   * The ceiling is `bounds.radius` — the terrain's own bounding sphere —
+   * because nothing beyond the terrain's footprint ever needs a shadow in
+   * this scene: every caster and receiver here sits on or above it. Without
+   * it, zooming out toward `MAX_DISTANCE` (6000m) grows the frustum without
+   * bound, spending a 4096 map on a box wide enough to reproduce the exact
+   * self-shadowing acne `71c2d1f` fixed — and worse, now that `normalBias`
+   * itself scales down with a *smaller* frustum (see below), a `normalBias`
+   * left at that smaller frustum's scale would be far too tight for a
+   * frustum this size. Clamping the ceiling to the terrain's own extent
+   * keeps the worst-case texel bounded to what the terrain can actually show:
+   * `2 * bounds.radius / SHADOW_MAP_SIZE`, worked out in the fix-wave report.
+   *
+   * This ceiling does not, by itself, fix every case of the frustum being
+   * too *small*: at a shallow rig elevation the camera's own view frustum
+   * reaches ground kilometres away (see the `updateSunShadow` docstring),
+   * far beyond any frustum this scene can afford full-resolution shadows
+   * over. Past that point a shadow terminator is unavoidable without
+   * sacrificing the near-field resolution this whole scheme exists for; the
+   * fix-wave report says where it falls and why it is not visually
+   * prominent at the rig's default framing (the tilt-shift pass' own full
+   * blur distance falls close to it).
+   */
+  const MIN_SHADOW_HALF_SIZE = 150
+  const MAX_SHADOW_HALF_SIZE = bounds.radius
+
+  /**
+   * Fit the shadow frustum to what the camera can actually see.
+   *
+   * Sizing it to the whole terrain is the obvious thing and it does not work:
+   * this terrain is 2560m across, so even a 4096 map spends about 0.93m of
+   * ground on every shadow texel — coarser than the road features meant to
+   * cast, and coarse enough that the depth comparison mis-fires across the
+   * whole surface and paints it in self-shadowing acne. Following the camera
+   * instead spends the same texels on the few hundred metres in frame, which
+   * is a twentyfold gain in resolution and is what makes the shadows clean
+   * rather than what makes them cheap.
+   *
+   * Called every frame, because the extent depends on the rig's distance and
+   * the centre on its target, and both change as the player moves.
+   */
+  const updateSunShadow = (): void => {
+    // The camera sees roughly its own distance in ground height at this field
+    // of view, so a frustum of that order covers the frame with margin.
+    // Clamped both ways: see `MIN_SHADOW_HALF_SIZE`/`MAX_SHADOW_HALF_SIZE`,
+    // above, for why each bound exists.
+    const halfSize = clampNumber(rig.distance, MIN_SHADOW_HALF_SIZE, MAX_SHADOW_HALF_SIZE)
+    shadowCamera.left = -halfSize
+    shadowCamera.right = halfSize
+    shadowCamera.top = halfSize
+    shadowCamera.bottom = -halfSize
+
+    // Far enough back that anything standing on the ground is inside near/far
+    // whatever the sun's elevation, and scaled to the frustum so the depth
+    // range stays tight — a needlessly long range costs precision.
+    const lightDistance = halfSize * 4
+    shadowCamera.near = 1
+    shadowCamera.far = lightDistance + halfSize * 2
+
+    const target = rig.target
+    sun.target.position.copy(toThreePosition(target))
+    sun.position.copy(
+      toThreePosition({
+        x: target.x + sunlight.direction.x * lightDistance,
+        y: target.y + sunlight.direction.y * lightDistance,
+        z: target.z + sunlight.direction.z * lightDistance,
+      }),
+    )
+
+    // Shadow acne (self-shadowing noise on a lit face) and peter-panning (the
+    // shadow visibly detached from what casts it) pull in opposite directions
+    // from the same knob. `normalBias` offsets the sampled position along the
+    // surface normal in world units, so the value it wants is set by how much
+    // ground a shadow texel covers — a fixed value tuned for one frustum size
+    // is exactly what let acne back in on zoom-out (see `MAX_SHADOW_HALF_SIZE`
+    // above): a bias tuned for a ~300m frustum's ~0.15m texels is twelve times
+    // too small once the frustum (pre-ceiling) grew wide enough for ~2m ones.
+    // Deriving it from the texel size this frustum actually has, every frame,
+    // means it tracks whatever `halfSize` the clamp above produced instead of
+    // being right for only the size it was tuned against.
+    const texelSize = (2 * halfSize) / SHADOW_MAP_SIZE
+    sun.shadow.normalBias = texelSize * NORMAL_BIAS_TEXEL_FRACTION
+
+    shadowCamera.updateProjectionMatrix()
+  }
+  // The light's target must be in the scene graph for its world matrix to
+  // update — otherwise it stays at the origin and the light points nowhere
+  // near the terrain regardless of where `sun.position` is set.
+  scene.add(sun.target)
+
+  // Constant depth bias, not texel-scaled like `normalBias`: the shadow
+  // camera is orthographic, so its depth range is linear in world units and
+  // `near`/`far` already grow with `halfSize` (see `updateSunShadow`) — a
+  // fixed fraction of a range that itself scales with the frustum already
+  // scales with it too, unlike `normalBias`, which offsets in world units
+  // directly rather than as a fraction of the depth range.
+  sun.shadow.bias = -0.0002
+  // The fraction of one shadow-map texel `normalBias` offsets by, set once
+  // here (`updateSunShadow` computes the bias itself, every frame). Derived,
+  // not tuned fresh: at the frustum size this scene used to fix `normalBias`
+  // at (halfSize ~= 300, giving a ~0.1465m texel on a 4096 map),
+  // `0.05 / 0.1465 ~= 0.34` is the fraction that reproduces that original,
+  // already-working value — so this keeps the old tuning at the old scale
+  // and extrapolates it, rather than guessing a new number from nothing.
+  const NORMAL_BIAS_TEXEL_FRACTION = 1 / 3
+  sun.shadow.mapSize.set(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE)
+  // Deliberately not fitted here: `updateSunShadow` reads the camera rig,
+  // which is constructed further down, and calling it now would touch `rig`
+  // in its temporal dead zone and throw before the scene ever renders. The
+  // frame loop fits it before the first draw, so there is nothing to fit yet.
+
+  scene.add(sun)
 
   // The tool draws in whatever class the player picked; there is no class
   // picker yet, so it draws rural roads until the selection UI exists.
@@ -619,29 +920,25 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
 
   // --- Camera rig ---------------------------------------------------------
   //
-  // Targets the same place the old automatic orbit circled — ORBIT_CENTER
-  // converted from three.js's (x, z, -y) back to the project's (x, y, z) — and
-  // starts at the distance the old fixed radius/height implied, so the
-  // initial framing is unchanged even though the motion is now pointer-driven
-  // instead of automatic.
-  const RIG_TARGET: RigVec3 = { x: 1300, y: 1300, z: 105 }
-  const RIG_INITIAL_DISTANCE = Math.hypot(1400, 700)
+  // Targets the actual junction the demo network was built around (`JUNCTION`,
+  // module scope — see its docstring), not a separate guess at the same spot,
+  // so bringing the distance in below reliably frames the junction rather
+  // than empty terrain beside it.
+  const RIG_TARGET: RigVec3 = {
+    x: JUNCTION.x,
+    y: JUNCTION.y,
+    z: terrain.sample(JUNCTION.x, JUNCTION.y),
+  }
+
+  // Close enough that the junction — three formation widths meeting at one
+  // point — fills a useful part of the screen, rather than the old ~1565m
+  // that read every road as a hairline across a map (Step 6).
+  const RIG_INITIAL_DISTANCE = 300
   const rig = new CameraRig(RIG_TARGET, RIG_INITIAL_DISTANCE)
-
-  /** Project convention `(x, y, z)`, `z` up, to three.js's `(x, z, -y)`. Must
-   * stay the exact inverse of `threeToProject` below. Takes the camera rig's
-   * own `Vec3` — this is only ever called with `rig.position`/`rig.target`. */
-  const toThreePosition = (p: RigVec3): THREE.Vector3 => new THREE.Vector3(p.x, p.z, -p.y)
-
-  /** three.js's `(x, y, z)` back to the project's `(x, y, z)`, `z` up. The
-   * inverse of `meshAdapter.ts`'s `(x, y, z) -> (x, z, -y)`: three.x = x,
-   * three.y = z, three.z = -y, so x = three.x, z = three.y, y = -three.z.
-   * Returns the ground-cast's own `Vec3` — this only ever feeds `Ray3`. */
-  const threeToProject = (v: THREE.Vector3): GroundVec3 => ({
-    x: v.x,
-    y: -v.z,
-    z: v.y,
-  })
+  // Lower than `CameraRig`'s own default elevation (`Math.PI / 5`, 36°): a
+  // diorama is looked across at a raised, comfortable angle, not down at from
+  // near-plan.
+  rig.elevation = 0.4
 
   const updateCameraFromRig = (): void => {
     camera.position.copy(toThreePosition(rig.position))
@@ -1214,6 +1511,133 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   canvas.addEventListener('contextmenu', onContextMenu)
   window.addEventListener('keydown', onKeyDown)
 
+  // --- Post-processing: tilt-shift depth of field --------------------------
+  //
+  // A shallow depth of field, sharp only around what the camera is orbiting
+  // and blurring both nearer and farther, is what reads as a miniature rather
+  // than a smeared screenshot — see `tiltShift.ts`.
+  const initialWidth = Math.max(1, canvas.clientWidth)
+  const initialHeight = Math.max(1, canvas.clientHeight)
+  // Captured once: this renderer's own pixel ratio never changes after
+  // construction, and `EffectComposer` itself captures it the same way at
+  // construction time, so recomputing it later would only ever repeat this
+  // value.
+  const composerPixelRatio = renderer.getPixelRatio()
+
+  // The pass reads depth (see `TILT_SHIFT_FRAGMENT_SHADER`), so the render
+  // target it draws into needs a real depth *texture* — a composer's default
+  // target has only a depth *buffer*, which the shader cannot sample, and the
+  // effect would silently do nothing. `EffectComposer` uses this target (and
+  // a clone of it, which clones the depth texture along with it) as its two
+  // internal buffers, so both ends up with one.
+  //
+  // `type: THREE.HalfFloatType` matters as much as the depth texture does:
+  // left at the default (`UnsignedByteType`), the whole scene is quantised to
+  // 8-bit linear *before* `OutputPass` ever runs ACES tone mapping on it, so
+  // the tone curve stretches already-banded shadow and cut-face darks instead
+  // of smooth linear values. `EffectComposer`'s own default target uses
+  // `HalfFloatType` for exactly this reason (see `EffectComposer.js`); this
+  // target is supplied explicitly (for the depth texture, above) and so has
+  // to restate it rather than inherit it.
+  const composerRenderTarget = new THREE.WebGLRenderTarget(
+    initialWidth * composerPixelRatio,
+    initialHeight * composerPixelRatio,
+    {
+      depthTexture: new THREE.DepthTexture(initialWidth * composerPixelRatio, initialHeight * composerPixelRatio),
+      type: THREE.HalfFloatType,
+    },
+  )
+
+  const composer = new EffectComposer(renderer, composerRenderTarget)
+  composer.addPass(new RenderPass(scene, camera))
+
+  /** Standard full-screen-pass vertex shader — three's own `CopyShader` uses
+   * exactly this, and `TILT_SHIFT_FRAGMENT_SHADER` supplies only the
+   * fragment stage and expects this same `vUv`. */
+  const TILT_SHIFT_VERTEX_SHADER = `
+varying vec2 vUv;
+void main() {
+  vUv = uv;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`
+
+  // How much depth around the focal distance stays sharp, and how far beyond
+  // that band the blur takes to reach full strength, metres. Tuned by eye
+  // (Step 8) at the rig's default framing: narrow enough that the junction is
+  // unmistakably the one sharp thing in the frame, wide enough that the whole
+  // junction — not just the single point the rig orbits — stays in focus
+  // together.
+  const FOCUS_RANGE_METRES = 60
+  const FOCUS_FALLOFF_METRES = 220
+
+  /**
+   * The uniform shape `TILT_SHIFT_UNIFORM_NAMES` names, typed concretely (with
+   * real texture types, since this file — unlike `tiltShift.ts` — is allowed
+   * to know about three.js) so the per-frame/per-resize writes below don't
+   * have to fight three's own `{ [name: string]: { value: any } }` typing on
+   * `ShaderPass.uniforms`.
+   *
+   * Deliberately not built by hand here: `createTiltShiftUniforms` (see
+   * `tiltShift.ts`) is keyed off `TILT_SHIFT_UNIFORM_NAMES` itself, so a
+   * uniform the shader declares but this construction forgets — the failure
+   * mode `908fe00` already fixed once — is now a type error at that
+   * function's own return statement, not a silent no-op discovered by eye.
+   */
+  type TiltShiftUniforms = {
+    readonly tDiffuse: { value: THREE.Texture | null }
+    readonly tDepth: { value: THREE.Texture | null }
+    readonly uFocusDistance: { value: number }
+    readonly uFocusRange: { value: number }
+    readonly uFocusFalloff: { value: number }
+    readonly uNear: { value: number }
+    readonly uFar: { value: number }
+    readonly uTexelSize: { value: { x: number; y: number } }
+  }
+
+  const tiltShiftPass = new ShaderPass({
+    uniforms: createTiltShiftUniforms({
+      focusDistance: rig.distance,
+      focusRange: FOCUS_RANGE_METRES,
+      focusFalloff: FOCUS_FALLOFF_METRES,
+      near: camera.near,
+      far: camera.far,
+      texelWidth: 1 / (initialWidth * composerPixelRatio),
+      texelHeight: 1 / (initialHeight * composerPixelRatio),
+    }),
+    vertexShader: TILT_SHIFT_VERTEX_SHADER,
+    fragmentShader: TILT_SHIFT_FRAGMENT_SHADER,
+  })
+  composer.addPass(tiltShiftPass)
+
+  // Tone mapping and the sRGB encode happen in the material shader only when
+  // three renders to the *default framebuffer*. Rendering into a composer's
+  // target writes raw linear values instead, so without a final pass to
+  // convert them the linear buffer is handed to the screen as though it were
+  // already sRGB — which reads as a dark, desaturated, muddy image, and makes
+  // `toneMappingExposure` appear to do nothing at all, because no tone mapping
+  // ever ran. `OutputPass` exists for exactly this: it applies the renderer's
+  // tone mapping and output colour space as the last thing before the screen,
+  // so it must stay last in the chain.
+  //
+  // Kept in a named variable (rather than passed anonymously, as every other
+  // pass here is) only so the teardown at the bottom of this function can
+  // call its own `dispose()` — see that teardown's comment for why that
+  // matters in three 0.185.
+  const outputPass = new OutputPass()
+  composer.addPass(outputPass)
+
+  // `ShaderPass` deep-clones the uniforms object passed to its constructor
+  // (`UniformsUtils.cloneUniforms`, called on the object literal above) into
+  // a *new* object before handing it to the material it actually renders
+  // with. Holding onto the object literal itself and mutating it every frame
+  // would silently update nothing — every uniform read below goes through
+  // `tiltShiftPass.uniforms`, the clone that is actually live, not the
+  // literal above. The cast is safe rather than a hopeful guess: `cloneUniforms`
+  // maps every key of the source object 1:1, so the clone has exactly the
+  // shape of the literal just constructed above.
+  const tiltShiftUniforms = tiltShiftPass.uniforms as unknown as TiltShiftUniforms
+
   // A window `resize` event alone isn't enough: it fires only for the
   // window's own dimensions, not for every reason the canvas's box can
   // change size (layout, container changes, fractional-pixel rounding
@@ -1232,6 +1656,19 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     renderer.setSize(width, height, false)
     camera.aspect = width / height
     camera.updateProjectionMatrix()
+
+    // The composer owns render targets sized to the canvas — resizing the
+    // renderer alone leaves them (and the blur) at the old resolution.
+    // `EffectComposer.setSize` resizes both of its internal buffers (and,
+    // with them, the depth texture attached to each), so no separate
+    // render-target recreation is needed here.
+    composer.setSize(width, height)
+    // Not a `THREE.Vector2` (see `TiltShiftUniforms`, above, and
+    // `createTiltShiftUniforms` in `tiltShift.ts`) — a plain `{x, y}` pair, so
+    // set the two fields directly rather than calling a `.set()` that does
+    // not exist on this shape.
+    tiltShiftUniforms.uTexelSize.value.x = 1 / (width * composerPixelRatio)
+    tiltShiftUniforms.uTexelSize.value.y = 1 / (height * composerPixelRatio)
   }
 
   const resizeObserver = new ResizeObserver((entries) => {
@@ -1257,9 +1694,23 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     // resolution until something else happens to touch it.
     resize(canvas.clientWidth, canvas.clientHeight)
     updateCameraFromRig()
+    // The shadow frustum follows the camera, so it has to be refitted after
+    // the rig has been read and before anything is drawn with it.
+    updateSunShadow()
     updatePreview()
     updateHighlight()
-    renderer.render(scene, camera)
+
+    // What the player is orbiting around is what stays sharp: the focal
+    // distance follows the rig every frame, not a value fixed at scene
+    // creation, so zooming changes what is in focus instead of leaving the
+    // blur exactly where it started.
+    tiltShiftUniforms.uFocusDistance.value = rig.distance
+    // Read fresh every frame rather than cached once: the render target this
+    // points at is whichever buffer `RenderPass` just wrote the scene's depth
+    // into, and re-reading it here (rather than assuming which buffer that
+    // is) is what stays correct across a resize without extra bookkeeping.
+    tiltShiftUniforms.tDepth.value = composer.readBuffer.depthTexture
+    composer.render()
   }
   tick()
 
@@ -1293,6 +1744,25 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     scene.remove(marker)
     marker.geometry.dispose()
     ;(marker.material as THREE.MeshBasicMaterial).dispose()
+
+    // The post-processing chain's own GPU resources. `EffectComposer.dispose()`
+    // (present in three 0.185, whatever an older comment here used to claim)
+    // frees its own two render targets — one supplied here, one its own clone,
+    // each carrying a depth texture — and its internal `copyPass`'s material
+    // and full-screen quad, but it does not reach into the passes *this scene*
+    // added via `addPass`: `RenderPass` owns nothing further to free, but
+    // `OutputPass` and `tiltShiftPass` each carry their own shader material
+    // and full-screen quad, so each needs its own `dispose()` call too. Left
+    // undone, every mount of this scene would leak a pair of full-resolution
+    // colour+depth render targets plus two materials and full-screen quads.
+    composer.dispose()
+    outputPass.dispose()
+    tiltShiftPass.dispose()
+
+    // The sun's shadow map is a render target the renderer allocates lazily
+    // on first use, once shadows are enabled — not created by this function
+    // directly, but still this function's responsibility to free.
+    sun.shadow.dispose()
 
     renderer.dispose()
     messageEl.remove()
