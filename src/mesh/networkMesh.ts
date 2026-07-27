@@ -251,7 +251,8 @@ export const buildNetworkMesh = (
       const parts: MeshData[] = []
 
       if (design.length >= 2) {
-        const halfWidth = formationHalfWidth(ROAD_CLASSES[road.className])
+        const rc = ROAD_CLASSES[road.className]
+        const halfWidth = formationHalfWidth(rc)
 
         // The caller's spans if it has any — the corridor excavation needs
         // the same list, and handing it down is what stops the two from
@@ -263,7 +264,7 @@ export const buildNetworkMesh = (
           roadStructureSpans({ alignment: road.alignment, design, terrain, maxFillHeight, spacing })
 
         for (const span of spans) {
-          parts.push(buildBridgeMesh(road.alignment, terrain, design, span, halfWidth))
+          parts.push(buildBridgeMesh(road.alignment, terrain, design, span, halfWidth, rc))
         }
 
         if (batters !== undefined) {
