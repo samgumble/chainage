@@ -8,11 +8,22 @@ import {
 import { ROAD_CLASSES, formationHalfWidth } from './roadClass'
 import { type ProfilePoint, designElevationAtStation } from '../terrain/groundProfile'
 import type { MeshData } from './ribbon'
+import type { TerrainSampler } from '../terrain/heightmap'
+import { type CorridorTemplate } from '../terrain/corridor'
+import { classifySupport } from '../terrain/gradeSolver'
+import { sampleGroundProfile } from '../terrain/groundProfile'
+import { structureSpans } from './structures/spans'
+import { buildBridgeMesh } from './structures/bridgeMesh'
+import { wallSegments, buildRetainingWallMesh } from './structures/retainingWallMesh'
+import { findCrossings, MIN_OVERPASS_CLEARANCE } from '../network/crossings'
 
 export type NetworkMeshOptions = {
   readonly spacing?: number
   /** Per-road construction stations. A road not listed is fully built. */
   readonly stations?: ReadonlyMap<RoadId, LayerStations>
+  /** Required for structures — walls and bridges both need ground elevation. */
+  readonly terrain?: TerrainSampler
+  readonly corridorTemplate?: CorridorTemplate
 }
 
 export type NetworkMesh = {
@@ -22,6 +33,13 @@ export type NetworkMesh = {
   readonly infeasibleJunctions: ReadonlyMap<NodeId, JunctionInfeasibility>
   /** Nodes whose legs disagree about elevation, and by how much (metres). */
   readonly elevationMismatches: ReadonlyMap<NodeId, number>
+  /** Walls and bridges per road. Empty when no terrain was supplied. */
+  readonly structures: ReadonlyMap<RoadId, MeshData>
+  /**
+   * Crossings too tight for one road to pass over the other, keyed
+   * `"upperId:lowerId"`, with the measured clearance in metres.
+   */
+  readonly tightCrossings: ReadonlyMap<string, number>
 }
 
 /**
@@ -163,5 +181,103 @@ export const buildNetworkMesh = (
     )
   }
 
-  return { roads, junctions, infeasibleJunctions, elevationMismatches }
+  const structures = new Map<RoadId, MeshData>()
+
+  if (options.terrain && options.corridorTemplate) {
+    const terrain = options.terrain
+    const template = options.corridorTemplate
+
+    for (const road of network.roads) {
+      const design = designs.get(road.id) ?? []
+      const parts: MeshData[] = []
+
+      if (design.length >= 2) {
+        const halfWidth = formationHalfWidth(ROAD_CLASSES[road.className])
+        const ground = sampleGroundProfile(road.alignment, terrain, spacing)
+
+        // Resample the design onto the ground profile's own stations, so
+        // classifySupport compares like with like. The two profiles are
+        // sampled independently and will not otherwise share stations.
+        const designAtGround = ground.map((g) => ({
+          s: g.s,
+          z: designElevationAtStation(design, g.s),
+        }))
+
+        const support = classifySupport(ground, designAtGround, MAX_FILL_FOR_STRUCTURE)
+        for (const span of structureSpans(designAtGround, support, ground)) {
+          parts.push(buildBridgeMesh(road.alignment, terrain, design, span, halfWidth))
+        }
+
+        parts.push(
+          buildRetainingWallMesh(
+            road.alignment,
+            wallSegments(road.alignment, terrain, design, template, spacing),
+          ),
+        )
+      }
+
+      structures.set(road.id, mergeMeshes(parts))
+    }
+  }
+
+  const tightCrossings = new Map<string, number>()
+  for (const crossing of findCrossings(network, designs)) {
+    if (crossing.clearance < MIN_OVERPASS_CLEARANCE) {
+      tightCrossings.set(`${crossing.upper}:${crossing.lower}`, crossing.clearance)
+    }
+  }
+
+  return {
+    roads, junctions, infeasibleJunctions, elevationMismatches, structures, tightCrossings,
+  }
+}
+
+/**
+ * How high the design line may stand above ground on fill before it becomes a
+ * structure, metres.
+ *
+ * Above this an embankment stops being economic and starts looking absurd.
+ * This mirrors the `maxFillHeight` a caller passes to the grade solver; it is
+ * restated here because the network builder is not given those constraints.
+ */
+export const MAX_FILL_FOR_STRUCTURE = 10
+
+/**
+ * Concatenate several meshes into one, renumbering indices.
+ *
+ * Typed arrays are copied with `set` rather than spread — spreading a large
+ * `Float32Array` into a function call blows the argument limit, and these
+ * meshes are unbounded in size.
+ */
+const mergeMeshes = (meshes: readonly MeshData[]): MeshData => {
+  let vertexCount = 0
+  let indexCount = 0
+  for (const mesh of meshes) {
+    vertexCount += mesh.vertexCount
+    indexCount += mesh.indices.length
+  }
+
+  const positions = new Float32Array(vertexCount * 3)
+  const normals = new Float32Array(vertexCount * 3)
+  const uvs = new Float32Array(vertexCount * 2)
+  const indices = new Uint32Array(indexCount)
+
+  let vertexBase = 0
+  let indexBase = 0
+  for (const mesh of meshes) {
+    positions.set(mesh.positions, vertexBase * 3)
+    normals.set(mesh.normals, vertexBase * 3)
+    uvs.set(mesh.uvs, vertexBase * 2)
+    for (let i = 0; i < mesh.indices.length; i++) {
+      indices[indexBase + i] = mesh.indices[i]! + vertexBase
+    }
+    vertexBase += mesh.vertexCount
+    indexBase += mesh.indices.length
+  }
+
+  return {
+    positions, normals, uvs, indices,
+    vertexCount,
+    triangleCount: indexCount / 3,
+  }
 }

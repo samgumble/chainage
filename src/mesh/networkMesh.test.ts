@@ -278,3 +278,74 @@ describe('buildNetworkMesh', () => {
     }
   })
 })
+
+import { Heightmap } from '../terrain/heightmap'
+import type { CorridorTemplate } from '../terrain/corridor'
+
+const flatGround = (z: number) => Heightmap.flat(-1000, -1000, 100, 41, 41, z)
+const template: CorridorTemplate = {
+  formationHalfWidth: 5, cutSlope: 2, fillSlope: 3, maxBatterWidth: 1,
+}
+
+describe('buildNetworkMesh structures', () => {
+  it('builds no structures without a terrain', () => {
+    const { net, designs } = tJunction()
+    const m = buildNetworkMesh(net, designs, { spacing: 10 })
+    expect(m.structures.size).toBe(0)
+  })
+
+  it('builds a structure entry per road when a terrain is given', () => {
+    const { net, designs } = tJunction()
+    const m = buildNetworkMesh(net, designs, {
+      spacing: 10, terrain: flatGround(50), corridorTemplate: template,
+    })
+    expect(m.structures.size).toBe(3)
+  })
+
+  it('builds a bridge where the design stands high above ground', () => {
+    const { net, designs, west } = tJunction()
+    // Ground 40m below the roads, so every station needs a structure.
+    const m = buildNetworkMesh(net, designs, {
+      spacing: 10, terrain: flatGround(10), corridorTemplate: template,
+    })
+    expect(m.structures.get(west)!.vertexCount).toBeGreaterThan(0)
+  })
+
+  it('builds nothing where the road sits on the ground', () => {
+    const { net, designs, west } = tJunction()
+    const m = buildNetworkMesh(net, designs, {
+      spacing: 10,
+      terrain: flatGround(50),
+      corridorTemplate: { formationHalfWidth: 5, cutSlope: 2, fillSlope: 3 },
+    })
+    expect(m.structures.get(west)!.vertexCount).toBe(0)
+  })
+
+  it('reports a crossing that is too tight', () => {
+    const net = new RoadNetwork()
+    const a = net.addRoad(new Alignment([new Line(vec2(0, 0), 0, 200)]), 'rural')
+    const b = net.addRoad(new Alignment([new Line(vec2(100, -100), Math.PI / 2, 200)]), 'rural')
+    const designs = new Map<RoadId, ProfilePoint[]>([
+      [a, level(200, 50)], [b, level(200, 51)],
+    ])
+    const m = buildNetworkMesh(net, designs, { spacing: 10 })
+    expect(m.tightCrossings.size).toBe(1)
+  })
+
+  it('does not report a crossing with adequate clearance', () => {
+    const net = new RoadNetwork()
+    const a = net.addRoad(new Alignment([new Line(vec2(0, 0), 0, 200)]), 'rural')
+    const b = net.addRoad(new Alignment([new Line(vec2(100, -100), Math.PI / 2, 200)]), 'rural')
+    const designs = new Map<RoadId, ProfilePoint[]>([
+      [a, level(200, 50)], [b, level(200, 60)],
+    ])
+    const m = buildNetworkMesh(net, designs, { spacing: 10 })
+    expect(m.tightCrossings.size).toBe(0)
+  })
+
+  it('does not report roads meeting at a junction as a tight crossing', () => {
+    const { net, designs } = tJunction()
+    const m = buildNetworkMesh(net, designs, { spacing: 10 })
+    expect(m.tightCrossings.size).toBe(0)
+  })
+})

@@ -32,6 +32,20 @@ const corridorTemplateFor = (className: RoadClassName): CorridorTemplate => ({
   fillSlope: CORRIDOR_FILL_SLOPE,
 })
 
+/**
+ * Corridor template passed to `buildNetworkMesh` for structure geometry.
+ *
+ * `NetworkMeshOptions.corridorTemplate` takes one template for the whole
+ * network rather than one per road class, unlike the excavation above (which
+ * rightly varies by class via `corridorTemplateFor`). This uses the rural
+ * class's footprint, since the west/east arms are rural and are what the
+ * retaining-wall visual check is aimed at. The gravel branch's own excavation
+ * still carves its narrower footprint (formationHalfWidth 2.0m vs rural's
+ * 5.0m), so a wall built against this wider template there may not sit
+ * exactly flush with its actual excavated ground.
+ */
+const CORRIDOR_TEMPLATE: CorridorTemplate = corridorTemplateFor('rural')
+
 /** How far apart, along the alignment, the excavation walk takes stations. */
 const EXCAVATION_STATION_SPACING = 5
 /** Extra width beyond the computed batter run-out, so the daylight line is
@@ -238,7 +252,11 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   }
   const terrainSource: { sample(x: number, y: number): number } = editLayer
 
-  const built = buildNetworkMesh(network, designs, { spacing: 4 })
+  const built = buildNetworkMesh(network, designs, {
+    spacing: 4,
+    terrain: editLayer,
+    corridorTemplate: CORRIDOR_TEMPLATE,
+  })
 
   for (const [, roadMesh] of built.roads) {
     for (const layer of roadMesh.layers) {
@@ -271,6 +289,22 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   }
   if (built.elevationMismatches.size > 0) {
     console.warn('junction elevation mismatches', [...built.elevationMismatches.entries()])
+  }
+
+  const STRUCTURE_COLOUR = 0x9a958c
+
+  for (const [, structureMesh] of built.structures) {
+    if (structureMesh.vertexCount === 0) continue
+    scene.add(new THREE.Mesh(
+      toBufferGeometry(structureMesh),
+      new THREE.MeshStandardMaterial({
+        color: STRUCTURE_COLOUR, roughness: 0.85, side: THREE.DoubleSide,
+      }),
+    ))
+  }
+
+  if (built.tightCrossings.size > 0) {
+    console.warn('crossings below minimum clearance', [...built.tightCrossings.entries()])
   }
 
   scene.add(new THREE.Mesh(
