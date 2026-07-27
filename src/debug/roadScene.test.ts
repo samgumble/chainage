@@ -6,11 +6,13 @@ import { RoadNetwork, type RoadId } from '../network/graph'
 import { Alignment } from '../geometry/alignment'
 import { Line } from '../geometry/primitives'
 import { vec2 } from '../geometry/vec2'
-import { sampleGroundProfile } from '../terrain/groundProfile'
+import { sampleGroundProfile, designElevationAtStation } from '../terrain/groundProfile'
 import { solveGradeProfile } from '../terrain/gradeSolver'
 import { Heightmap } from '../terrain/heightmap'
 import { SelectTool } from '../tool/selectTool'
-import { ROAD_CLASSES, formationHalfWidth } from '../network/roadClass'
+import { ROAD_CLASSES, formationHalfWidth, totalPavementThickness } from '../network/roadClass'
+import { MIN_OVERPASS_CLEARANCE } from '../network/crossings'
+import { DECK_DEPTH } from '../mesh/structures/bridgeMesh'
 
 /**
  * The demo scene is the only end-to-end evidence the structures pipeline
@@ -338,5 +340,163 @@ describe('select mode mutations re-solve and rebuild', () => {
     // costs several decimal places before any road-width arithmetic starts.
     expect(widthBefore).toBeCloseTo(expectedBefore, 4)
     expect(widthAfter).toBeCloseTo(expectedAfter, 4)
+  })
+})
+
+/**
+ * Grade separation: two roads that cross in plan without a player ever having
+ * clicked where they meet.
+ *
+ * The rule is that the newer road goes over, always, and that the lift is a
+ * constraint on the newer road's grade solve rather than something done to
+ * its answer — see `solveNetwork`'s docstring. `solveNetwork` is exported, so
+ * both halves are checkable directly against a network built for the purpose.
+ *
+ * The demo scene cannot stand in for this: its three arms all meet at one
+ * shared node, so it has no crossings at all and never exercises this path.
+ */
+describe('roads that cross without a junction', () => {
+  /** Flat ground at 100m over a 600x600 footprint. */
+  const flat = (): Heightmap =>
+    new Heightmap(0, 0, 10, 61, 61, new Float32Array(61 * 61).fill(100))
+
+  /**
+   * Everything hanging below a rural road's design line where it is carried
+   * over something: the pavement stack it runs on, plus the deck slab under
+   * that. Restated from the same two sources `roadScene.ts` derives it from,
+   * so a test that agreed with a hardcoded number rather than with the deck
+   * that actually gets built would fail here.
+   */
+  const ruralStructureDepth = totalPavementThickness(ROAD_CLASSES.rural) + DECK_DEPTH
+
+  /**
+   * Two 400m straights meeting at (300, 300) at right angles, neither one's
+   * endpoint anywhere near the crossing, so nothing about this reads as a
+   * junction. `first` is added first and is therefore the older road.
+   */
+  const crossingPair = (network: RoadNetwork): { first: RoadId; second: RoadId } => ({
+    first: network.addRoad(new Alignment([new Line(vec2(100, 300), 0, 400)]), 'rural'),
+    second: network.addRoad(
+      new Alignment([new Line(vec2(300, 100), Math.PI / 2, 400)]),
+      'rural',
+    ),
+  })
+
+  it('raises the newer road clear of the older one', () => {
+    const terrain = flat()
+    const network = new RoadNetwork()
+    const { first, second } = crossingPair(network)
+
+    const { designs, built } = solveNetwork(terrain, network)
+
+    const older = designs.get(first)!
+    const newer = designs.get(second)!
+    expect(older).toBeDefined()
+    expect(newer).toBeDefined()
+
+    // The crossing is at station 200 on both. The road below stays on flat
+    // ground; the road above has to clear it by the lorry clearance plus its
+    // own deck and pavement.
+    const below = designElevationAtStation(older, 200)
+    const above = designElevationAtStation(newer, 200)
+    expect(below).toBeCloseTo(100, 6)
+    expect(above).toBeGreaterThanOrEqual(below + MIN_OVERPASS_CLEARANCE + ruralStructureDepth - 1e-6)
+
+    // And it climbs there legally. A profile that reached the clearance by
+    // stepping up between two stations would satisfy the assertion above
+    // while being unbuildable, which is the defect the constraint-not-
+    // post-process design exists to rule out.
+    for (let i = 1; i < newer.length; i++) {
+      const grade = (newer[i]!.z - newer[i - 1]!.z) / (newer[i]!.s - newer[i - 1]!.s)
+      expect(Math.abs(grade)).toBeLessThanOrEqual(0.07 + 1e-9)
+    }
+  })
+
+  it('leaves the older road\'s profile exactly as it would be on its own', () => {
+    const terrain = flat()
+    const network = new RoadNetwork()
+    const { first } = crossingPair(network)
+
+    const solo = new RoadNetwork()
+    const soloId = solo.addRoad(new Alignment([new Line(vec2(100, 300), 0, 400)]), 'rural')
+
+    // The whole reason the NEW road is the one that moves: an existing road's
+    // vertical profile is never touched, so its structures, its mesh and any
+    // road tied to its endpoints all stay valid.
+    expect(solveNetwork(terrain, network).designs.get(first)).toEqual(
+      solveNetwork(terrain, solo).designs.get(soloId),
+    )
+  })
+
+  it('leaves tightCrossings empty once the separation has been applied', () => {
+    const terrain = flat()
+    const network = new RoadNetwork()
+    crossingPair(network)
+
+    // This is what turns `tightCrossings` from routine console noise into a
+    // defect signal: a crossing this path handled must not still be reported
+    // as too tight to pass over.
+    expect([...solveNetwork(terrain, network).built.tightCrossings.entries()]).toEqual([])
+  })
+
+  it('does not raise a crossing that sits on a node — that is a junction', () => {
+    const terrain = flat()
+    const network = new RoadNetwork()
+    // A road running east-west, and a second road TERMINATING on it at
+    // (300, 300) rather than passing over. The second road's start node sits
+    // exactly on the crossing, which is the only evidence available that the
+    // player meant the two to meet, so nothing is lifted.
+    const through = network.addRoad(new Alignment([new Line(vec2(100, 300), 0, 400)]), 'rural')
+    const stub = network.addRoad(
+      new Alignment([new Line(vec2(300, 300), Math.PI / 2, 200)]),
+      'rural',
+    )
+
+    const { designs } = solveNetwork(terrain, network)
+    expect(designElevationAtStation(designs.get(through)!, 200)).toBeCloseTo(100, 6)
+    expect(designElevationAtStation(designs.get(stub)!, 0)).toBeCloseTo(100, 6)
+  })
+
+  it('reports a crossing it cannot raise instead of building it at grade', () => {
+    // A 120m-wide flat-bottomed trench 30m deep, running east-west along
+    // y = 300. A road crossing it north-south is held near the rim by the
+    // grade limit — a bridge, effectively — while a road running ALONG the
+    // trench floor sits 25m or so below it. Raising the second road over the
+    // first would need it to stand higher above its own ground than
+    // MAX_STRUCTURE_HEIGHT allows, so there is no legal profile for it.
+    const elevations = new Float32Array(61 * 61)
+    for (let row = 0; row < 61; row++) {
+      for (let col = 0; col < 61; col++) {
+        elevations[row * 61 + col] = Math.abs(row * 10 - 300) <= 60 ? 70 : 100
+      }
+    }
+    const trench = new Heightmap(0, 0, 10, 61, 61, elevations)
+
+    const network = new RoadNetwork()
+    // Across the trench first, so it is the older road...
+    const across = network.addRoad(
+      new Alignment([new Line(vec2(300, 100), Math.PI / 2, 400)]),
+      'rural',
+    )
+    // ...and along the floor second, so it is the one asked to climb over.
+    const along = network.addRoad(new Alignment([new Line(vec2(100, 300), 0, 400)]), 'rural')
+
+    const { designs, infeasibleRoads, infeasibleCrossings } = solveNetwork(trench, network)
+
+    // Both roads grade perfectly well on their own — this is not an
+    // impossible alignment, it is an impossible crossing, and the two must
+    // not be reported through the same channel.
+    expect([...infeasibleRoads.keys()]).toEqual([])
+    expect(designs.has(across)).toBe(true)
+
+    // No design profile for the road that could not be raised. Falling back
+    // to its unlifted solve would build it straight through the road above.
+    expect(designs.has(along)).toBe(false)
+    expect(infeasibleCrossings).toHaveLength(1)
+    expect(infeasibleCrossings[0]!.road).toBe(along)
+    expect(infeasibleCrossings[0]!.crosses).toBe(across)
+    expect(infeasibleCrossings[0]!.requiredElevation).toBeGreaterThan(
+      designElevationAtStation(designs.get(across)!, 200),
+    )
   })
 })

@@ -8,8 +8,13 @@ import { Line } from '../geometry/primitives'
 import { vec2, type Vec2 } from '../geometry/vec2'
 import type { PolylineRejection } from '../geometry/polyline'
 import { generateValley } from '../terrain/generate'
-import { sampleGroundProfile, type ProfilePoint } from '../terrain/groundProfile'
-import { solveGradeProfile, type GradeSolution } from '../terrain/gradeSolver'
+import {
+  sampleGroundProfile, designElevationAtStation, type ProfilePoint,
+} from '../terrain/groundProfile'
+import {
+  solveGradeProfile, STATION_TOLERANCE,
+  type GradeSolution, type ClearanceFloor,
+} from '../terrain/gradeSolver'
 import { TerrainEditLayer } from '../terrain/editLayer'
 import { type CorridorTemplate, type CorridorBatters } from '../terrain/corridor'
 import { CorridorExcavation, sweepCorridor } from '../terrain/excavation'
@@ -29,9 +34,12 @@ import { CameraRig, type Vec3 as RigVec3 } from '../render/cameraRig'
 import { sunAt } from '../render/sunlight'
 import { surfaceFor } from '../render/materials'
 import { TILT_SHIFT_FRAGMENT_SHADER, createTiltShiftUniforms } from '../render/tiltShift'
-import { RoadNetwork, type RoadId } from '../network/graph'
+import { RoadNetwork, NODE_SNAP_DISTANCE, type RoadId } from '../network/graph'
+import { findCrossings, MIN_OVERPASS_CLEARANCE } from '../network/crossings'
+import { classifyCrossing, type InfeasibleCrossing } from '../network/crossingKind'
 import { buildNetworkMesh, type NetworkMesh } from '../mesh/networkMesh'
 import { roadStructureSpans, type StructureSpan } from '../mesh/structures/spans'
+import { DECK_DEPTH } from '../mesh/structures/bridgeMesh'
 import { DrawTool, SNAP_RADIUS } from '../tool/drawTool'
 import { resolveSnap, type SnapTarget } from '../tool/snap'
 import { SelectTool, type SplitOutcome } from '../tool/selectTool'
@@ -40,6 +48,7 @@ import {
   describeSplitOutcome,
   describeUpgradeObstacles,
   describeInfeasibleRoads,
+  describeInfeasibleCrossings,
 } from '../tool/messages'
 
 const MAX_GRADE = 0.07
@@ -231,19 +240,105 @@ export type SceneContent = {
    * accompanies it.
    */
   readonly infeasibleRoads: ReadonlyMap<RoadId, number>
+  /**
+   * Crossings that had to become overpasses and could not be raised clear of
+   * the road below within the grade limit.
+   *
+   * A separate channel from `infeasibleRoads` because it is a separate
+   * failure: these roads grade perfectly well on their own terrain and only
+   * run out of room once they have to climb over something. They get no
+   * design profile either — building the crossing at grade instead would put
+   * one road through another, which is the defect being fixed, so it is
+   * reported rather than approximated.
+   */
+  readonly infeasibleCrossings: readonly InfeasibleCrossing[]
 }
+
+/** How far apart, along the alignment, the grade solve takes stations. */
+const GRADE_STATION_SPACING = 10
+
+/**
+ * How much structure hangs below a road's design line where it is carried
+ * over something, metres.
+ *
+ * The design line is the top of the wearing course; underneath it sits the
+ * whole pavement stack, and underneath that the deck slab. Both numbers come
+ * from the code that actually builds the deck (`buildBridgeMesh`'s
+ * `deckClearance` default and `DECK_DEPTH`) rather than being restated here:
+ * a second, independently-chosen deck thickness that drifted from the first
+ * would put the modelled soffit somewhere other than where the clearance was
+ * measured to, which is precisely the class of duplication this branch has
+ * already had to remove once.
+ */
+const overpassStructureDepth = (className: RoadClassName): number =>
+  totalPavementThickness(ROAD_CLASSES[className]) + DECK_DEPTH
 
 /** Grade a single alignment against natural ground: the full solver result,
  * feasible or not, so a caller that needs to know why can see the station
- * where the solve ran out of room. */
-const solveFor = (alignment: Alignment, terrain: Heightmap): GradeSolution => {
-  const ground = sampleGroundProfile(alignment, terrain, 10)
-  return solveGradeProfile(ground, {
+ * where the solve ran out of room. `clearanceFloors` carries any grade
+ * separation the alignment owes to roads it crosses (see `solveNetwork`). */
+const solveGround = (
+  ground: readonly ProfilePoint[],
+  clearanceFloors: readonly ClearanceFloor[] = [],
+): GradeSolution =>
+  solveGradeProfile(ground, {
     maxGrade: MAX_GRADE,
     maxCutDepth: MAX_CUT_DEPTH,
     maxFillHeight: MAX_FILL_HEIGHT,
     maxStructureHeight: MAX_STRUCTURE_HEIGHT,
+    clearanceFloors,
   })
+
+const solveFor = (alignment: Alignment, terrain: Heightmap): GradeSolution =>
+  solveGround(sampleGroundProfile(alignment, terrain, GRADE_STATION_SPACING))
+
+/**
+ * Clearance floors that force a profile at least `minimumElevation` high at
+ * an arbitrary station — not just at the sampled stations either side of it.
+ *
+ * `solveGradeProfile` constrains stations, and a crossing lands wherever the
+ * two alignments happen to meet, which is almost never on one. Flooring the
+ * NEAREST station would leave the crossing itself up to half a station away
+ * from where the clearance was enforced — on a 7% grade over this scene's 10m
+ * spacing, up to 0.35m of clearance quietly missing from the one place it was
+ * being measured. Flooring BOTH bracketing stations instead is exact: the
+ * profile is piecewise linear between stations, so if both ends of the
+ * interval clear the floor, every point inside it does too, the crossing
+ * included.
+ *
+ * It does ask for slightly more than the minimum — the road holds that height
+ * across the whole 10m interval rather than at one point in it. That is the
+ * direction to err in: the alternative rounds a hard clearance requirement
+ * down, and the excess is well under a metre of extra climb against a 5m
+ * clearance.
+ */
+const clearanceFloorsAt = (
+  ground: readonly ProfilePoint[],
+  station: number,
+  minimumElevation: number,
+): ClearanceFloor[] => {
+  if (ground.length === 0) return []
+
+  const floorAt = (i: number): ClearanceFloor => ({ station: ground[i]!.s, minimumElevation })
+
+  const first = ground[0]!
+  const last = ground[ground.length - 1]!
+  if (station <= first.s + STATION_TOLERANCE) return [floorAt(0)]
+  if (station >= last.s - STATION_TOLERANCE) return [floorAt(ground.length - 1)]
+
+  for (let i = 1; i < ground.length; i++) {
+    const previous = ground[i - 1]!
+    const current = ground[i]!
+    if (station > current.s) continue
+    // Exactly on a station: one floor, not two. Flooring its neighbour as
+    // well would hold the road up for a further station in one direction for
+    // no reason at all.
+    if (Math.abs(station - current.s) <= STATION_TOLERANCE) return [floorAt(i)]
+    if (Math.abs(station - previous.s) <= STATION_TOLERANCE) return [floorAt(i - 1)]
+    return [floorAt(i - 1), floorAt(i)]
+  }
+
+  return [floorAt(ground.length - 1)]
 }
 
 /**
@@ -258,6 +353,40 @@ const solveFor = (alignment: Alignment, terrain: Heightmap): GradeSolution => {
  * Known limitation: this redoes work for roads the edit did not touch.
  * Correct, and slow once the network is large — measure before making it
  * incremental.
+ *
+ * ## Grade separation
+ *
+ * Two roads that cross in plan without sharing a node are not a junction —
+ * the player never clicked where they meet — so they must not be built
+ * through each other. The road drawn LATER is raised over the earlier one,
+ * always, and the earlier one's profile is never touched. That direction is
+ * not a preference:
+ *
+ * - Mutating an existing road's vertical profile would invalidate its
+ *   structures, its mesh and every road tied to its endpoints — a far larger
+ *   blast radius, and one whose result would depend on the order roads
+ *   happened to be drawn in.
+ * - Lifting only the new road keeps the dependency a strict order: a road is
+ *   solved against the FINAL profiles of every road older than it and against
+ *   nothing else, so there is no cycle to iterate and no fixed point to
+ *   converge on. Roads are re-solved in ascending id here for exactly that
+ *   reason.
+ * - It is predictable for the player: the road you are drawing is the road
+ *   that goes over.
+ *
+ * The lift is a constraint on the grade solve, not a lift applied to its
+ * answer — see the phase 1 comment in `gradeSolver.ts`. An overpass that
+ * cannot be climbed to within the grade limit therefore comes back as an
+ * infeasible solve and lands in `infeasibleCrossings`, rather than as a
+ * profile that reaches the clearance by way of a grade the class forbids.
+ *
+ * Known limitation: `splitRoad` gives both halves of a split road NEW ids, so
+ * a half of an older road is "newer" than the road that split it. If that
+ * same pair also crosses somewhere else, the half is the one lifted. Rare
+ * (it needs two roads to both meet at a placed point and cross away from it)
+ * and still deterministic, but it is the one case where the road that moves
+ * is not the road most recently drawn. Fixing it wants creation provenance on
+ * `Road`, which is a graph change rather than a scene one.
  */
 export const solveNetwork = (
   terrain: Heightmap,
@@ -267,15 +396,135 @@ export const solveNetwork = (
   editLayer: TerrainEditLayer
   built: NetworkMesh
   infeasibleRoads: Map<RoadId, number>
+  infeasibleCrossings: InfeasibleCrossing[]
 } => {
-  const designs = new Map<RoadId, ProfilePoint[]>()
+  // --- Pass 1: grade every road on its own, ignoring the others ------------
+  //
+  // Provisional, because a road that crosses an older one is about to be
+  // re-solved with a clearance floor on it. Needed first all the same:
+  // `findCrossings` will not report a pair unless both roads have a design
+  // profile to measure a gap between.
+  const provisional = new Map<RoadId, ProfilePoint[]>()
   const infeasibleRoads = new Map<RoadId, number>()
   for (const road of network.roads) {
     const solution = solveFor(road.alignment, terrain)
     if (solution.feasible) {
-      designs.set(road.id, solution.profile)
+      provisional.set(road.id, solution.profile)
     } else {
       infeasibleRoads.set(road.id, solution.failedAtStation)
+    }
+  }
+
+  // --- Pass 2: which crossings are junctions and which are overpasses ------
+  //
+  // The placed points a crossing is classified against are the network's own
+  // node positions. After `DrawTool.commit` that is exactly what a placed
+  // point has become: a point clicked on an existing road splits it and
+  // becomes a node shared by both, and a point clicked anywhere else becomes
+  // a node of the new road alone. Nothing else survives a commit, and nothing
+  // else needs to — the scene does not have to be handed the tool's gesture
+  // state to know where the player clicked, because the graph already
+  // records it.
+  //
+  // `NODE_SNAP_DISTANCE` is the tolerance for the same reason `findCrossings`
+  // already uses it for its own shared-node exclusion: a crossing position is
+  // found by intersecting 5m-sampled polylines, so it carries that sampling's
+  // error and cannot be compared to a click position at millimetre precision.
+  //
+  // Crossings that classify as intersections are left entirely alone. Those
+  // are either junctions that already work — `findCrossings` drops crossings
+  // at a SHARED node before this ever sees them — or a road terminating on
+  // another one that `commit` did not split, which wants a junction and
+  // certainly does not want to be raised five metres into the air. The latter
+  // stays visible: it is a genuine at-grade collision, and it is what
+  // `built.tightCrossings` now exists to report.
+  const nodePositions = network.nodes.map((node) => node.position)
+
+  /** Per road, what it must clear: always roads older than itself. */
+  const overpasses = new Map<
+    RoadId,
+    { under: RoadId; station: number; underStation: number }[]
+  >()
+
+  for (const crossing of findCrossings(network, provisional)) {
+    if (classifyCrossing(crossing, nodePositions, NODE_SNAP_DISTANCE) === 'intersection') continue
+
+    // Newer road over older, by id — NOT by `findCrossings`' own upper/lower,
+    // which only says which design line happens to sit higher at grade and
+    // would hand the lift to whichever road the terrain favoured.
+    const newer = Math.max(crossing.upper, crossing.lower)
+    const older = Math.min(crossing.upper, crossing.lower)
+    const newerStation = newer === crossing.upper ? crossing.upperStation : crossing.lowerStation
+    const olderStation = older === crossing.upper ? crossing.upperStation : crossing.lowerStation
+
+    const list = overpasses.get(newer) ?? []
+    list.push({ under: older, station: newerStation, underStation: olderStation })
+    overpasses.set(newer, list)
+  }
+
+  // --- Pass 3: re-solve, oldest first, with the clearances owed ------------
+  //
+  // Ascending id, so by the time a road is solved every road it has to clear
+  // already holds its final profile. Nothing here is iterated to a fixed
+  // point because nothing needs to be: lifting a road never moves anything
+  // older than it.
+  const designs = new Map<RoadId, ProfilePoint[]>()
+  const infeasibleCrossings: InfeasibleCrossing[] = []
+
+  for (const road of [...network.roads].sort((a, b) => a.id - b.id)) {
+    const unlifted = provisional.get(road.id)
+    if (!unlifted) continue // already in `infeasibleRoads`
+
+    const required = overpasses.get(road.id) ?? []
+    if (required.length === 0) {
+      designs.set(road.id, unlifted)
+      continue
+    }
+
+    const ground = sampleGroundProfile(road.alignment, terrain, GRADE_STATION_SPACING)
+    const structureDepth = overpassStructureDepth(road.className)
+    const floors: ClearanceFloor[] = []
+    const wanted: { under: RoadId; station: number; requiredElevation: number }[] = []
+
+    for (const crossing of required) {
+      const under = designs.get(crossing.under)
+      // The road below never graded, so it has no design line to clear. It is
+      // already reported in `infeasibleRoads`; inventing a clearance against
+      // `designElevationAtStation`'s zero-for-empty answer would fabricate a
+      // requirement out of missing information.
+      if (!under) continue
+
+      // Top of the wearing course of the road above = the road below, plus
+      // the clearance a lorry needs, plus everything hanging under this
+      // road's own design line to hold it up.
+      const requiredElevation =
+        designElevationAtStation(under, crossing.underStation) +
+        MIN_OVERPASS_CLEARANCE +
+        structureDepth
+
+      floors.push(...clearanceFloorsAt(ground, crossing.station, requiredElevation))
+      wanted.push({ under: crossing.under, station: crossing.station, requiredElevation })
+    }
+
+    const solution = solveGround(ground, floors)
+    if (solution.feasible) {
+      designs.set(road.id, solution.profile)
+      continue
+    }
+
+    // No design profile, deliberately. Falling back to the unlifted solve
+    // would build this road straight through the one underneath it, which is
+    // the whole defect; every crossing the solve was carrying is reported
+    // instead, because a single failed solve does not say which of them was
+    // the impossible one.
+    for (const w of wanted) {
+      infeasibleCrossings.push({
+        road: road.id,
+        crosses: w.under,
+        station: w.station,
+        requiredElevation: w.requiredElevation,
+        failedAtStation: solution.failedAtStation,
+      })
     }
   }
 
@@ -344,7 +593,7 @@ export const solveNetwork = (
     structureSpans: spans,
   })
 
-  return { designs, editLayer, built, infeasibleRoads }
+  return { designs, editLayer, built, infeasibleRoads, infeasibleCrossings }
 }
 
 /**
@@ -397,8 +646,11 @@ export const buildSceneContent = (): SceneContent => {
     network.addRoad(alignment, className)
   }
 
-  const { designs, editLayer, built, infeasibleRoads } = solveNetwork(terrain, network)
-  return { terrain, network, designs, editLayer, built, infeasibleRoads }
+  const { designs, editLayer, built, infeasibleRoads, infeasibleCrossings } = solveNetwork(
+    terrain,
+    network,
+  )
+  return { terrain, network, designs, editLayer, built, infeasibleRoads, infeasibleCrossings }
 }
 
 /** A sphere in the project's own convention (`(x, y)` ground, `z` up) that
@@ -525,6 +777,7 @@ const addNetworkMeshes = (
   editLayer: TerrainEditLayer,
   built: NetworkMesh,
   infeasibleRoads: ReadonlyMap<RoadId, number>,
+  infeasibleCrossings: readonly InfeasibleCrossing[],
 ): THREE.Mesh[] => {
   const meshes: THREE.Mesh[] = []
 
@@ -539,6 +792,17 @@ const addNetworkMeshes = (
     console.warn(
       'roads with no feasible vertical alignment (committed to the graph, mesh flattened to z=0):',
       [...infeasibleRoads.entries()],
+    )
+  }
+
+  if (infeasibleCrossings.length > 0) {
+    // Distinct from the warning above: these roads grade fine on their own
+    // and only fail once they have to climb over something. They have no
+    // design profile either — see `SceneContent.infeasibleCrossings` for why
+    // building them at grade instead is not an option.
+    console.warn(
+      'crossings that could not be raised clear of the road below (no design profile built):',
+      infeasibleCrossings,
     )
   }
 
@@ -618,7 +882,20 @@ const addNetworkMeshes = (
   }
 
   if (built.tightCrossings.size > 0) {
-    console.warn('crossings below minimum clearance', [...built.tightCrossings.entries()])
+    // This used to be routine noise: crossings were detected, logged, and
+    // built through each other anyway. Now `solveNetwork` raises every
+    // crossing it classifies as an overpass, and refuses to build a road
+    // whose lift it cannot solve, so anything still arriving here is one of
+    // exactly two things — a road terminating on another that `commit` did
+    // not split into a junction (classified `'intersection'`, so deliberately
+    // not lifted, and genuinely colliding), or a crossing the lift was
+    // applied to and failed to separate. Both are defects rather than
+    // observations, which is why this is an error and not a warning.
+    console.error(
+      'crossings still below minimum clearance after grade separation — ' +
+        'either a road terminates on another without a junction, or a lift did not take:',
+      [...built.tightCrossings.entries()],
+    )
   }
 
   // Vertex-coloured rather than a flat tint: the excavated corridor (see
@@ -768,6 +1045,7 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   let editLayer = content.editLayer
   let built = content.built
   let infeasibleRoads = content.infeasibleRoads
+  let infeasibleCrossings = content.infeasibleCrossings
   let terrainSampler: TerrainSampler = editLayer
 
   // --- Sun and fill light ---------------------------------------------------
@@ -971,7 +1249,9 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   let toolMode: ToolMode = 'draw'
   setMessage('')
 
-  let networkMeshes = addNetworkMeshes(scene, terrain, editLayer, built, infeasibleRoads)
+  let networkMeshes = addNetworkMeshes(
+    scene, terrain, editLayer, built, infeasibleRoads, infeasibleCrossings,
+  )
 
   /**
    * Regrade, re-excavate and rebuild every mesh from the network's current
@@ -986,13 +1266,16 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     editLayer = result.editLayer
     built = result.built
     infeasibleRoads = result.infeasibleRoads
+    infeasibleCrossings = result.infeasibleCrossings
     terrainSampler = editLayer
 
     for (const mesh of networkMeshes) {
       scene.remove(mesh)
       disposeMesh(mesh)
     }
-    networkMeshes = addNetworkMeshes(scene, terrain, editLayer, built, infeasibleRoads)
+    networkMeshes = addNetworkMeshes(
+      scene, terrain, editLayer, built, infeasibleRoads, infeasibleCrossings,
+    )
 
     // A road with no feasible vertical alignment used to reach only the
     // console (see `SceneContent.infeasibleRoads`) — surfaced here so it is
@@ -1000,7 +1283,13 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     // priority over whatever message the caller already set: an infeasible
     // road is a standing problem with the network, not a transient result of
     // the action that happened to trigger this rebuild.
-    const infeasibleMessage = describeInfeasibleRoads(infeasibleRoads)
+    // Two standing problems, reported in the order a player can act on them:
+    // a road that cannot be graded at all wants a different alignment, and
+    // only once it has one is there any point telling them a crossing on it
+    // could not be raised. Both take priority over whatever message the
+    // caller already set, for the reason above.
+    const infeasibleMessage =
+      describeInfeasibleRoads(infeasibleRoads) || describeInfeasibleCrossings(infeasibleCrossings)
     if (infeasibleMessage) setMessage(infeasibleMessage, 'refusal')
   }
 
