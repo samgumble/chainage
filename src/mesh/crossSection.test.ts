@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { layerTopProfile, layerDepthBelowSurface } from './crossSection'
-import { ROAD_CLASSES, formationHalfWidth } from './roadClass'
+import { ROAD_CLASSES, formationHalfWidth } from '../network/roadClass'
 
 const rural = ROAD_CLASSES.rural
 

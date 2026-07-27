@@ -1,7 +1,7 @@
 import type { Alignment } from '../geometry/alignment'
 import { splitAlignment } from '../geometry/split'
 import type { Vec2 } from '../geometry/vec2'
-import type { RoadClassName } from '../mesh/roadClass'
+import type { RoadClassName } from './roadClass'
 import { NodeIndex } from './nodeIndex'
 
 export type NodeId = number

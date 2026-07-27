@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { buildRoadMesh } from './roadMesh'
-import { ROAD_CLASSES, type LayerName } from './roadClass'
+import { ROAD_CLASSES, type LayerName } from '../network/roadClass'
 import { layerTopProfile } from './crossSection'
 import type { MeshData } from './ribbon'
 import { Alignment } from '../geometry/alignment'
