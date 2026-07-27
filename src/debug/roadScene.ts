@@ -975,6 +975,24 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     canvas.removeEventListener('contextmenu', onContextMenu)
     window.removeEventListener('keydown', onKeyDown)
     cancelPendingClick()
+
+    // Every road/terrain/junction/structure mesh built by `addNetworkMeshes`
+    // (including the terrain surface itself, last in that array), plus the
+    // preview line, both preview materials and the snap marker — everything
+    // this function allocated on the GPU, not just the renderer. Without
+    // this, every road drawn and every rebuild leaks its geometries and
+    // materials for as long as the page stays open.
+    for (const mesh of networkMeshes) {
+      scene.remove(mesh)
+      disposeMesh(mesh)
+    }
+    clearPreviewLine()
+    previewOkMaterial.dispose()
+    previewWarnMaterial.dispose()
+    scene.remove(marker)
+    marker.geometry.dispose()
+    ;(marker.material as THREE.MeshBasicMaterial).dispose()
+
     renderer.dispose()
   }
 }
