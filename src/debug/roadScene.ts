@@ -8,12 +8,12 @@ import { sampleGroundProfile, designElevationAtStation, type ProfilePoint } from
 import { solveGradeProfile, type GradeSolution } from '../terrain/gradeSolver'
 import { TerrainEditLayer } from '../terrain/editLayer'
 import { designSurfaceAtOffset, type CorridorTemplate, type CorridorBatters } from '../terrain/corridor'
-import { rayTerrainIntersection, type Ray3 } from '../terrain/rayCast'
+import { rayTerrainIntersection, type Ray3, type Vec3 as GroundVec3 } from '../terrain/rayCast'
 import type { Heightmap, TerrainSampler } from '../terrain/heightmap'
 import { ROAD_CLASSES, formationHalfWidth, totalPavementThickness, type RoadClassName } from '../network/roadClass'
 import { toBufferGeometry } from '../render/meshAdapter'
 import { terrainGeometry } from '../render/terrainMesh'
-import { CameraRig } from '../render/cameraRig'
+import { CameraRig, type Vec3 as RigVec3 } from '../render/cameraRig'
 import { RoadNetwork, type RoadId } from '../network/graph'
 import { buildNetworkMesh, type NetworkMesh } from '../mesh/networkMesh'
 import { DrawTool, SNAP_RADIUS } from '../tool/drawTool'
@@ -556,19 +556,20 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   // starts at the distance the old fixed radius/height implied, so the
   // initial framing is unchanged even though the motion is now pointer-driven
   // instead of automatic.
-  const RIG_TARGET = { x: 1300, y: 1300, z: 105 }
+  const RIG_TARGET: RigVec3 = { x: 1300, y: 1300, z: 105 }
   const RIG_INITIAL_DISTANCE = Math.hypot(1400, 700)
   const rig = new CameraRig(RIG_TARGET, RIG_INITIAL_DISTANCE)
 
   /** Project convention `(x, y, z)`, `z` up, to three.js's `(x, z, -y)`. Must
-   * stay the exact inverse of `threeToProject` below. */
-  const toThreePosition = (p: { x: number; y: number; z: number }): THREE.Vector3 =>
-    new THREE.Vector3(p.x, p.z, -p.y)
+   * stay the exact inverse of `threeToProject` below. Takes the camera rig's
+   * own `Vec3` — this is only ever called with `rig.position`/`rig.target`. */
+  const toThreePosition = (p: RigVec3): THREE.Vector3 => new THREE.Vector3(p.x, p.z, -p.y)
 
   /** three.js's `(x, y, z)` back to the project's `(x, y, z)`, `z` up. The
    * inverse of `meshAdapter.ts`'s `(x, y, z) -> (x, z, -y)`: three.x = x,
-   * three.y = z, three.z = -y, so x = three.x, z = three.y, y = -three.z. */
-  const threeToProject = (v: THREE.Vector3): { x: number; y: number; z: number } => ({
+   * three.y = z, three.z = -y, so x = three.x, z = three.y, y = -three.z.
+   * Returns the ground-cast's own `Vec3` — this only ever feeds `Ray3`. */
+  const threeToProject = (v: THREE.Vector3): GroundVec3 => ({
     x: v.x,
     y: -v.z,
     z: v.y,
