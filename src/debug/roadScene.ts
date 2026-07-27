@@ -14,7 +14,13 @@ import { TerrainEditLayer } from '../terrain/editLayer'
 import { designSurfaceAtOffset, type CorridorTemplate, type CorridorBatters } from '../terrain/corridor'
 import { rayTerrainIntersection, type Ray3, type Vec3 as GroundVec3 } from '../terrain/rayCast'
 import { clampNumber, type Heightmap, type TerrainSampler } from '../terrain/heightmap'
-import { ROAD_CLASSES, formationHalfWidth, totalPavementThickness, type RoadClassName } from '../network/roadClass'
+import {
+  ROAD_CLASSES,
+  ROAD_CLASS_ORDER,
+  formationHalfWidth,
+  totalPavementThickness,
+  type RoadClassName,
+} from '../network/roadClass'
 import { toBufferGeometry } from '../render/meshAdapter'
 import { terrainGeometry } from '../render/terrainMesh'
 import { CameraRig, type Vec3 as RigVec3 } from '../render/cameraRig'
@@ -862,10 +868,34 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
 
   scene.add(sun)
 
-  // The tool draws in whatever class the player picked; there is no class
-  // picker yet, so it draws rural roads until the selection UI exists.
-  const tool = new DrawTool(network, 'rural')
+  // Gravel by default: its 43m minimum radius is the only class drawable
+  // within the ~300m the camera frames, so any other default rejects the
+  // player's first road outright. Faster classes are drawn zoomed out,
+  // which is honest — a 252m-radius rural road genuinely is a larger
+  // object than a farm track.
+  let drawClassIndex = ROAD_CLASS_ORDER.indexOf('gravel')
+  let tool = new DrawTool(network, ROAD_CLASS_ORDER[drawClassIndex]!)
   const selectTool = new SelectTool(network)
+
+  /**
+   * Switch the draw tool's class, discarding whatever gesture was in
+   * progress. `DrawTool` computes `cornerRadius` in its constructor, so
+   * changing class means constructing a new tool — a half-drawn gravel
+   * road is not a valid half-drawn highway, so nothing carries over.
+   */
+  const setDrawClass = (index: number): void => {
+    const wrapped = (index + ROAD_CLASS_ORDER.length) % ROAD_CLASS_ORDER.length
+    if (wrapped === drawClassIndex) return
+    // A gesture in progress belongs to the class it was started in; the
+    // corner radius that validated its points no longer applies.
+    tool.cancel()
+    drawClassIndex = wrapped
+    tool = new DrawTool(network, ROAD_CLASS_ORDER[wrapped]!)
+    // `setMessage` already prefixes every message with the current mode
+    // label (see its docstring) — prefixing "Draw — " here too would
+    // duplicate it, so this names only the class and radius.
+    setMessage(`${ROAD_CLASS_ORDER[wrapped]!} (radius ${tool.cornerRadius.toFixed(0)}m)`, 'info')
+  }
 
   /** Which of the two modes the player is currently in. Defaults to draw so
    * the scene opens exactly as it always has. */
@@ -1467,6 +1497,14 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
           event.preventDefault()
           cancelPendingClick()
           tool.undoLastPoint()
+          break
+        case '1':
+        case '2':
+        case '3':
+        case '4':
+          event.preventDefault()
+          cancelPendingClick()
+          setDrawClass(Number(event.key) - 1)
           break
         default:
           break

@@ -455,3 +455,33 @@ describe('DrawTool', () => {
     expect(net.roads).toHaveLength(0)
   })
 })
+
+describe('DrawTool corner radius by class', () => {
+  // The defect this guards: a class whose minimum radius exceeds the
+  // distance a player can click within the camera frame rejects every
+  // road. Gravel must be drawable at diorama scale; rural must not
+  // silently become drawable by having its radius quietly reduced.
+  it('accepts a 90-degree corner with 60m legs on gravel', () => {
+    const tool = new DrawTool(new RoadNetwork(), 'gravel')
+    tool.place({ x: 0, y: 0 })
+    tool.place({ x: 60, y: 0 })
+    tool.place({ x: 60, y: 60 })
+    const result = tool.commit()
+    expect(result.ok).toBe(true)
+  })
+
+  it('rejects the same corner on rural rather than shrinking the radius', () => {
+    const tool = new DrawTool(new RoadNetwork(), 'rural')
+    tool.place({ x: 0, y: 0 })
+    tool.place({ x: 60, y: 0 })
+    tool.place({ x: 60, y: 60 })
+    const result = tool.commit()
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.rejection.reason).toBe('curves-overlap')
+  })
+
+  it('gives each class the radius its design speed requires', () => {
+    expect(new DrawTool(new RoadNetwork(), 'gravel').cornerRadius).toBeCloseTo(43.4, 0)
+    expect(new DrawTool(new RoadNetwork(), 'rural').cornerRadius).toBeCloseTo(252.0, 0)
+  })
+})
