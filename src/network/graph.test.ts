@@ -471,6 +471,41 @@ describe('splitRoad', () => {
     expect(() => net.splitRoad(id, 0.2)).toThrow(RangeError)
     expect(() => net.splitRoad(id, 99.8)).toThrow(RangeError)
   })
+
+  it('the lollipop case: cutting where a loop closes returns the pre-existing node, not a new one', () => {
+    // A "lollipop": a full circle back to the road's own start (the candy),
+    // then a further straight stretch (the stick). The guard above is
+    // stational — it only checks distance measured ALONG the road from each
+    // end — but the hazard here is spatial: the loop's own end sits right on
+    // top of the road's own start, far away in station but distance zero in
+    // space. Splitting exactly where the loop closes finds that existing
+    // node already there and snaps to it, exactly as any other road end
+    // would. Confirmed elsewhere that the graph stays fully consistent when
+    // this happens — no corruption, no stranded reference — so this test
+    // only documents the shape of it.
+    const net = new RoadNetwork()
+    const k = 1 / 50
+    const loopLength = (2 * Math.PI) / k
+    const loop = new Arc(vec2(0, 0), 0, loopLength, k)
+    const endOfLoop = loop.poseAt(loopLength)
+    const stick = new Line(endOfLoop.position, endOfLoop.heading, 40)
+    const id = net.addRoad(new Alignment([loop, stick]), 'rural')
+
+    const startNode = net.road(id).startNode
+
+    const { first, second, node } = net.splitRoad(id, loopLength)
+
+    // Not a fresh node: the pre-existing start node, handed back instead.
+    expect(node).toBe(startNode)
+    expect(net.road(first).endNode).toBe(node)
+    expect(net.road(second).startNode).toBe(node)
+
+    // Fully consistent: both halves resolve, the original is gone, and the
+    // shared node still has road ends recorded against it.
+    expect(net.roads).toHaveLength(2)
+    expect(() => net.road(id)).toThrow(RangeError)
+    expect(net.node(node).ends.length).toBeGreaterThan(0)
+  })
 })
 
 describe('setRoadClass', () => {

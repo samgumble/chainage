@@ -171,7 +171,17 @@ export class RoadNetwork {
   }
 
   /**
-   * Divide a road at a station into two roads meeting at a new node.
+   * Divide a road at a station into two roads meeting at the node they share.
+   *
+   * That shared node is usually new — but not always. If the cut position
+   * falls within `NODE_SNAP_DISTANCE` of an already-existing node, the halves
+   * snap to that node instead, the same as any other road end would. This is
+   * reachable without any error: a "lollipop" road that loops back to meet
+   * its own start and then keeps going, cut where the loop closes, hands
+   * back its own pre-existing start node rather than a fresh one (see
+   * `graph.test.ts` for a worked example). The graph stays fully consistent
+   * either way — this is a contract detail to know about, not a bug to guard
+   * against.
    *
    * Both halves are added before the original is removed. Removing first
    * would drop the original's last reference to its own end nodes, delete
