@@ -1,6 +1,6 @@
 import type { Alignment } from '../geometry/alignment'
 import { splitAlignment } from '../geometry/split'
-import type { Vec2 } from '../geometry/vec2'
+import { distance, type Vec2 } from '../geometry/vec2'
 import type { RoadClassName } from './roadClass'
 import { NodeIndex } from './nodeIndex'
 
@@ -100,6 +100,28 @@ export class RoadNetwork {
   /** Three or more road ends. Fewer is a dead end or a road passing through. */
   isJunction(id: NodeId): boolean {
     return this.node(id).ends.length >= 3
+  }
+
+  /**
+   * Every node within a radius, nearest first.
+   *
+   * Distinct from `nodeAt`, which answers a different question: whether a
+   * position *is* an existing node, at the half-metre threshold that defines
+   * topological identity, resolving ties to the earliest-created node. This
+   * answers what is nearby, at whatever radius the caller finds useful, and
+   * orders by distance because a caller asking this is choosing between
+   * candidates rather than establishing identity.
+   */
+  nodesWithin(position: Vec2, radius: number): NetworkNode[] {
+    return this.index
+      .nearby(position, radius)
+      .flatMap((id) => {
+        const found = this.nodeMap.get(id)
+        return found ? [{ ...found, ends: [...found.ends] }] : []
+      })
+      .sort(
+        (a, b) => distance(a.position, position) - distance(b.position, position),
+      )
   }
 
   addRoad(alignment: Alignment, className: RoadClassName): RoadId {

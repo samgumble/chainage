@@ -529,3 +529,26 @@ describe('setRoadClass', () => {
     expect(() => net.setRoadClass(999, 'rural')).toThrow(RangeError)
   })
 })
+
+describe('nodesWithin', () => {
+  it('returns every node inside the radius, nearest first', () => {
+    const net = new RoadNetwork()
+    net.addRoad(straight(0, 0, 0, 100), 'rural')
+    net.addRoad(straight(0, 30, 0, 100), 'rural')
+
+    const found = net.nodesWithin({ x: 0, y: 0 }, 50)
+    expect(found.map((n) => n.position.y)).toEqual([0, 30])
+  })
+
+  it('excludes nodes outside the radius', () => {
+    const net = new RoadNetwork()
+    net.addRoad(straight(0, 0, 0, 100), 'rural')
+    expect(net.nodesWithin({ x: 0, y: 0 }, 10).map((n) => n.position.y)).toEqual([0])
+  })
+
+  it('returns an empty array when nothing is near', () => {
+    const net = new RoadNetwork()
+    net.addRoad(straight(0, 0, 0, 100), 'rural')
+    expect(net.nodesWithin({ x: 5000, y: 5000 }, 50)).toEqual([])
+  })
+})

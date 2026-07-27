@@ -110,3 +110,33 @@ describe('NodeIndex', () => {
     expect(() => index.remove(42)).not.toThrow()
   })
 })
+
+describe('NodeIndex.nearby with a wider radius', () => {
+  it('finds a node further away than the default radius', () => {
+    const index = new NodeIndex(0.5)
+    index.insert(1, { x: 0, y: 0 })
+    expect(index.nearby({ x: 6, y: 0 })).toEqual([])
+    expect(index.nearby({ x: 6, y: 0 }, 10)).toEqual([1])
+  })
+
+  it('scans enough cells for a radius spanning several of them', () => {
+    const index = new NodeIndex(0.5)
+    // Three cells away on both axes; a one-ring scan would miss it.
+    index.insert(2, { x: CELL_SIZE * 3, y: CELL_SIZE * 3 })
+    const far = Math.hypot(CELL_SIZE * 3, CELL_SIZE * 3) + 1
+    expect(index.nearby({ x: 0, y: 0 }, far)).toEqual([2])
+  })
+
+  it('still excludes a node outside the given radius', () => {
+    const index = new NodeIndex(0.5)
+    index.insert(3, { x: 20, y: 0 })
+    expect(index.nearby({ x: 0, y: 0 }, 10)).toEqual([])
+  })
+
+  it('keeps ascending id order at a wider radius', () => {
+    const index = new NodeIndex(0.5)
+    index.insert(9, { x: 1, y: 0 })
+    index.insert(2, { x: 2, y: 0 })
+    expect(index.nearby({ x: 0, y: 0 }, 10)).toEqual([2, 9])
+  })
+})
