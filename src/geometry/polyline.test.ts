@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
+import { filletCorner } from './fillet'
 import { Arc, Line } from './primitives'
 import { type Vec2, distance } from './vec2'
-import { buildPolylineAlignment } from './polyline'
+import { OVERLAP_TOLERANCE, buildPolylineAlignment } from './polyline'
 
 const at = (x: number, y: number): Vec2 => ({ x, y })
 
@@ -172,6 +173,60 @@ describe('buildPolylineAlignment', () => {
     for (const p of result.alignment.primitives) {
       expect(p.length).toBeGreaterThan(0)
     }
+  })
+
+  it('rejects a straight shorter than the minimum segment length, naming the point and lengths', () => {
+    // Two points 5m apart, well under the 7m minimum, with no corner to
+    // confuse the picture.
+    const points = [at(0, 0), at(5, 0)]
+    const result = buildPolylineAlignment(points, 50)
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.rejection.reason).toBe('segment-too-short')
+    if (result.rejection.reason !== 'segment-too-short') return
+    expect(result.rejection.index).toBe(0)
+    expect(result.rejection.length).toBeCloseTo(5, 6)
+    expect(result.rejection.limit).toBeCloseTo(7, 6)
+  })
+
+  it('accepts a straight exactly at the minimum segment length', () => {
+    const result = buildPolylineAlignment([at(0, 0), at(7, 0)], 50)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.alignment.length).toBeCloseTo(7, 6)
+  })
+
+  it('rejects the second of two straights when only that one is too short', () => {
+    // First leg is fine (100m); the second leg is a 2m stub, well under
+    // the minimum. No corner turns here, so there is nothing to fillet —
+    // this isolates the length check from the corner logic entirely.
+    const points = [at(0, 0), at(100, 0), at(102, 0)]
+    const result = buildPolylineAlignment(points, 50)
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.rejection.reason).toBe('segment-too-short')
+    if (result.rejection.reason !== 'segment-too-short') return
+    expect(result.rejection.index).toBe(1)
+    expect(result.rejection.length).toBeCloseTo(2, 6)
+  })
+
+  it('pins OVERLAP_TOLERANCE: accepts a straight fractionally short of what its curve needs, by less than the tolerance', () => {
+    // The "exactly fill" test above does not discriminate OVERLAP_TOLERANCE:
+    // floating-point rounding on tan(pi/4) happens to put its own `required`
+    // a hair *under* `available` regardless of whether the tolerance is even
+    // applied, so deleting the constant still passes it. This test instead
+    // computes the corner's exact tangent distance and places the straight
+    // deliberately OVERLAP_TOLERANCE/2 short of it — short enough that,
+    // without the tolerance, `required > available` is unambiguously true.
+    const corner = at(100, 0)
+    const fillet = filletCorner(corner, { x: 1, y: 0 }, { x: 0, y: 1 }, 50)
+    expect(fillet).not.toBeNull()
+    if (!fillet) return
+
+    const shortfall = fillet.tangentDistance - OVERLAP_TOLERANCE / 2
+    const points = [at(100 - shortfall, 0), corner, at(100, 100)]
+    const result = buildPolylineAlignment(points, 50)
+    expect(result.ok).toBe(true)
   })
 
   it('rejects a non-positive radius', () => {

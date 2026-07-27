@@ -19,6 +19,15 @@ export type PolylineRejection =
       /** Length of the straight they have to share, metres. */
       readonly available: number
     }
+  | {
+      readonly reason: 'segment-too-short'
+      /** Index into the caller's array of the point the straight starts from. */
+      readonly index: number
+      /** Actual length of the straight, metres. */
+      readonly length: number
+      /** Minimum legal length, metres. */
+      readonly limit: number
+    }
 
 export type PolylineResult =
   | { readonly ok: true; readonly alignment: Alignment }
@@ -32,8 +41,46 @@ export type PolylineResult =
  */
 const MIN_SEGMENT_LENGTH = 1e-3
 
-/** Slack on the overlap comparison so exactly-touching curves are legal. */
-const OVERLAP_TOLERANCE = 1e-9
+/**
+ * Slack on the overlap comparison so exactly-touching curves are legal.
+ *
+ * Exported so a test can pin its value directly (construct a straight whose
+ * required tangent length exceeds what is available by less than this, and
+ * assert it is still accepted) rather than relying on an example where
+ * floating-point rounding happens to land on the accepting side regardless
+ * of whether this constant is even applied.
+ */
+export const OVERLAP_TOLERANCE = 1e-9
+
+/**
+ * Shortest legal straight, metres. From the design spec (§4.1): "minimum
+ * ~7m (reject shorter)" — tiny segments are a documented source of both
+ * visual artifacts and pathfinding failures.
+ *
+ * **Scope decision:** this bounds the *built* straight — the Line primitive
+ * actually emitted after fillets have consumed their share of each end —
+ * not the raw distance between two clicks. Two things make that the right
+ * layer to check, not just a convenient one:
+ *
+ * 1. A straight that two adjacent curves fully consume is already legal and
+ *    already never emitted (see the zero-length handling below, and "accepts
+ *    curves that exactly fill the straight between them" in the test file).
+ *    Checking the raw click distance instead would have no principled way to
+ *    exempt that case from a generic "click segment too short" rule without
+ *    re-deriving the same fillet math this check sits downstream of anyway.
+ * 2. What the spec is actually guarding against — a sliver that shows up as
+ *    a visual artifact or breaks pathfinding — is a property of the geometry
+ *    that gets built, not of where the player happened to click. A rural
+ *    road and a highway share a click distance but consume different tangent
+ *    lengths from it (different corner radii), so only the built length is
+ *    class-independent in the way the spec's warning is: it is either a real
+ *    sliver in the road that gets built, or it never existed at all. Reading
+ *    it off the raw clicks would flag some highways for a click distance a
+ *    gravel track would happily accept, which does not make sense to someone
+ *    drawing: the corner radius that consumed most of their segment is not
+ *    something they had control over at the moment they clicked.
+ */
+const MIN_ALIGNMENT_SEGMENT_LENGTH = 7
 
 /**
  * Turn a clicked polyline into a continuous alignment.
@@ -120,7 +167,8 @@ export const buildPolylineAlignment = (
   let cursor = kept[0]!.point
 
   for (let seg = 0; seg < kept.length - 1; seg++) {
-    const from = kept[seg]!.point
+    const fromEntry = kept[seg]!
+    const from = fromEntry.point
     const to = kept[seg + 1]!.point
     const endFillet = filletAt(seg + 1)
 
@@ -130,8 +178,21 @@ export const buildPolylineAlignment = (
     const lineLength = distance(cursor, lineEnd)
 
     // Two curves may exactly meet, leaving no straight at all. That is legal;
-    // a zero-length primitive is not.
+    // a zero-length primitive is not, and only a primitive that will actually
+    // be emitted is a "segment" the minimum-length rule below has any
+    // business judging (see MIN_ALIGNMENT_SEGMENT_LENGTH's docstring).
     if (lineLength > MIN_SEGMENT_LENGTH) {
+      if (lineLength < MIN_ALIGNMENT_SEGMENT_LENGTH) {
+        return {
+          ok: false,
+          rejection: {
+            reason: 'segment-too-short',
+            index: fromEntry.index,
+            length: lineLength,
+            limit: MIN_ALIGNMENT_SEGMENT_LENGTH,
+          },
+        }
+      }
       primitives.push(new Line(cursor, angleOf(sub(to, from)), lineLength))
     }
 
