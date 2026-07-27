@@ -17,7 +17,7 @@ import {
 } from '../terrain/gradeSolver'
 import { TerrainEditLayer } from '../terrain/editLayer'
 import { type CorridorTemplate, type CorridorBatters } from '../terrain/corridor'
-import { CorridorExcavation, sweepCorridor } from '../terrain/excavation'
+import { CorridorExcavation, sweepCorridor, type UnsupportedFill } from '../terrain/excavation'
 import { rayTerrainIntersection, type Ray3, type Vec3 as GroundVec3 } from '../terrain/rayCast'
 import { clampNumber, type Heightmap, type TerrainSampler } from '../terrain/heightmap'
 import {
@@ -259,6 +259,10 @@ const JUNCTION = vec2(900, 1280)
  * must not be spelled the same way at the call site. The caller passes the
  * same list it gives `buildNetworkMesh`, so the abutment stands exactly where
  * the earthwork stops.
+ *
+ * Returns the stations it embanked higher than `MAX_FILL_HEIGHT` with nothing
+ * carrying them — see `UnsupportedFill`. Empty for a road whose high runs all
+ * became spans, which is most of them.
  */
 const excavateCorridor = (
   into: CorridorExcavation,
@@ -267,8 +271,8 @@ const excavateCorridor = (
   profile: readonly ProfilePoint[],
   className: RoadClassName,
   spans: readonly StructureSpan[],
-): void => {
-  if (alignment.isEmpty || profile.length === 0) return
+): UnsupportedFill[] => {
+  if (alignment.isEmpty || profile.length === 0) return []
 
   const template = corridorTemplateFor(className)
   const maxSlope = Math.max(template.cutSlope, template.fillSlope)
@@ -281,7 +285,7 @@ const excavateCorridor = (
   // cut sections or leave it floating above the embankment in fill sections.
   const pavementDepth = totalPavementThickness(ROAD_CLASSES[className]) + EXCAVATION_ZFIGHT_MARGIN
 
-  sweepCorridor(
+  return sweepCorridor(
     {
       alignment,
       profile,
@@ -293,6 +297,7 @@ const excavateCorridor = (
       stationSpacing: EXCAVATION_STATION_SPACING,
       transverseSpacing: terrain.cellSize,
       structureRanges: spans,
+      maxFillHeight: MAX_FILL_HEIGHT,
     },
     into,
   )
@@ -447,6 +452,18 @@ export type SceneContent = {
    * be told rather than left to spot the embankment lying across their road.
    */
   readonly shallowCrossings: readonly ShallowCrossing[]
+  /**
+   * Per road, the stations embanked higher than the fill allowance with no
+   * structure carrying them.
+   *
+   * Console-only, like `built.tightCrossings` and `built.infeasibleJunctions`:
+   * it is a defect in what was built rather than a refusal the player can act
+   * on by drawing differently, and the message line is for the latter. What
+   * matters is that it is not silent — see `UnsupportedFill` for why neither
+   * building it nor the old skip is the right answer, and why the honest move
+   * is to build the continuous thing and say so.
+   */
+  readonly unsupportedFill: ReadonlyMap<RoadId, readonly UnsupportedFill[]>
 }
 
 /** How far apart, along the alignment, the grade solve takes stations. */
@@ -623,6 +640,7 @@ export const solveNetwork = (
   infeasibleRoads: Map<RoadId, number>
   infeasibleCrossings: InfeasibleCrossing[]
   shallowCrossings: ShallowCrossing[]
+  unsupportedFill: Map<RoadId, readonly UnsupportedFill[]>
 } => {
   // --- Pass 1: grade every road on its own, ignoring the others ------------
   //
@@ -863,6 +881,7 @@ export const solveNetwork = (
   // footprints overlapped.
   const editLayer = new TerrainEditLayer(terrain)
   const excavation = new CorridorExcavation(terrain.cols, terrain.rows)
+  const unsupportedFill = new Map<RoadId, readonly UnsupportedFill[]>()
   for (const road of network.roads) {
     const design = designs.get(road.id)
     // No design profile means the grade solve failed; that road is already
@@ -875,9 +894,10 @@ export const solveNetwork = (
     // map, not derived a second time. That is the whole point of `spans`
     // existing above rather than being computed at each of the two places it
     // is needed.
-    excavateCorridor(
+    const unsupported = excavateCorridor(
       excavation, terrain, road.alignment, design, road.className, spans.get(road.id) ?? [],
     )
+    if (unsupported.length > 0) unsupportedFill.set(road.id, unsupported)
   }
   excavation.applyTo(editLayer)
 
@@ -894,7 +914,8 @@ export const solveNetwork = (
   })
 
   return {
-    designs, editLayer, built, spans, infeasibleRoads, infeasibleCrossings, shallowCrossings,
+    designs, editLayer, built, spans,
+    infeasibleRoads, infeasibleCrossings, shallowCrossings, unsupportedFill,
   }
 }
 
@@ -949,11 +970,12 @@ export const buildSceneContent = (): SceneContent => {
   }
 
   const {
-    designs, editLayer, built, infeasibleRoads, infeasibleCrossings, shallowCrossings,
+    designs, editLayer, built,
+    infeasibleRoads, infeasibleCrossings, shallowCrossings, unsupportedFill,
   } = solveNetwork(terrain, network)
   return {
     terrain, network, designs, editLayer, built,
-    infeasibleRoads, infeasibleCrossings, shallowCrossings,
+    infeasibleRoads, infeasibleCrossings, shallowCrossings, unsupportedFill,
   }
 }
 
@@ -1083,6 +1105,7 @@ const addNetworkMeshes = (
   infeasibleRoads: ReadonlyMap<RoadId, number>,
   infeasibleCrossings: readonly InfeasibleCrossing[],
   shallowCrossings: readonly ShallowCrossing[],
+  unsupportedFill: ReadonlyMap<RoadId, readonly UnsupportedFill[]>,
 ): THREE.Mesh[] => {
   const meshes: THREE.Mesh[] = []
 
@@ -1122,6 +1145,19 @@ const addNetworkMeshes = (
       'crossings too shallow to deck honestly — the deck was clamped, so the lifted ' +
         "road's earthwork is no longer held clear of the road below's corridor:",
       shallowCrossings,
+    )
+  }
+
+  if (unsupportedFill.size > 0) {
+    // A high run too short to become a span leaves nothing to suppress the
+    // embankment, so the sweep builds one past the declared fill allowance —
+    // 16.40m of it against a 10m allowance on a 20m notch. The old code
+    // skipped those stations instead and left an unsupported hole in the
+    // road; neither is right, so the continuous one is built and reported
+    // rather than one of the two being chosen quietly. See `UnsupportedFill`.
+    console.error(
+      'earthwork embanked above the fill allowance with no structure under it:',
+      [...unsupportedFill.entries()],
     )
   }
 
@@ -1366,6 +1402,7 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   let infeasibleRoads = content.infeasibleRoads
   let infeasibleCrossings = content.infeasibleCrossings
   let shallowCrossings = content.shallowCrossings
+  let unsupportedFill = content.unsupportedFill
   let terrainSampler: TerrainSampler = editLayer
 
   // --- Sun and fill light ---------------------------------------------------
@@ -1568,7 +1605,8 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   setMessage('')
 
   let networkMeshes = addNetworkMeshes(
-    scene, terrain, editLayer, built, infeasibleRoads, infeasibleCrossings, shallowCrossings,
+    scene, terrain, editLayer, built,
+    infeasibleRoads, infeasibleCrossings, shallowCrossings, unsupportedFill,
   )
 
   /**
@@ -1586,6 +1624,7 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     infeasibleRoads = result.infeasibleRoads
     infeasibleCrossings = result.infeasibleCrossings
     shallowCrossings = result.shallowCrossings
+    unsupportedFill = result.unsupportedFill
     terrainSampler = editLayer
 
     for (const mesh of networkMeshes) {
@@ -1593,7 +1632,8 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
       disposeMesh(mesh)
     }
     networkMeshes = addNetworkMeshes(
-      scene, terrain, editLayer, built, infeasibleRoads, infeasibleCrossings, shallowCrossings,
+      scene, terrain, editLayer, built,
+      infeasibleRoads, infeasibleCrossings, shallowCrossings, unsupportedFill,
     )
 
     // A road with no feasible vertical alignment used to reach only the

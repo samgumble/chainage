@@ -881,3 +881,52 @@ describe('splitting a road under an existing overpass', () => {
     expect(designElevationAtStation(after.designs.get(c)!, 200)).toBeCloseTo(100, 6)
   })
 })
+
+/**
+ * A high run too short to become a bridge.
+ *
+ * The scene declares a 10m fill allowance. A run of stations standing higher
+ * than that used to be skipped by the corridor sweep outright, which left an
+ * unsupported hole in the road; that skip was replaced by the span list, which
+ * covers a high run long enough to become a span and does nothing at all for
+ * one that is not. A narrow notch therefore gets a full embankment, well past
+ * the allowance, with no structure under it.
+ *
+ * Neither the hole nor the silent embankment is right. The embankment is at
+ * least continuous, so that is what is built — and reported.
+ */
+describe('an embankment past the fill allowance', () => {
+  it('is reported rather than built silently', () => {
+    // Flat ground at 100m with a single grid column dropped 18m, a 10m-wide
+    // V across the road. Narrow on purpose: the structure classification
+    // samples at 4m, so only one station reads as needing a structure, the run
+    // is far short of `MIN_SPAN_LENGTH` and is discarded as terrain noise —
+    // which leaves nothing at all to stop the sweep embanking it.
+    const cols = 121, rows = 121
+    const elevations = new Float32Array(cols * rows).fill(100)
+    for (let row = 0; row < rows; row++) elevations[row * cols + 60] = 82
+    const notched = new Heightmap(0, 0, 5, cols, rows, elevations)
+
+    const network = new RoadNetwork()
+    const road = network.addRoad(new Alignment([new Line(vec2(100, 300), 0, 400)]), 'rural')
+
+    const { unsupportedFill } = solveNetwork(notched, network)
+
+    const reported = unsupportedFill.get(road)
+    expect(reported).toBeDefined()
+    expect(reported!.length).toBeGreaterThan(0)
+    for (const fill of reported!) {
+      // Every reported station really is over the allowance — the channel
+      // reports a measurement, not a suspicion.
+      expect(fill.height).toBeGreaterThan(fill.allowance)
+      expect(fill.allowance).toBe(10)
+    }
+  })
+
+  it('says nothing about the demo scene, whose high runs all became spans', () => {
+    // Not vacuous: the assertion above fires on a scene that has the problem,
+    // and this one is a scene that does not. A channel that reported every
+    // road would be no channel at all.
+    expect([...content.unsupportedFill.keys()]).toEqual([])
+  })
+})

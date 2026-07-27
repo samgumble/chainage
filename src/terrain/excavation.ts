@@ -125,13 +125,59 @@ export type SweepParams = {
    * terrain cliff at each bridge end.
    */
   readonly structureRanges: readonly { readonly fromStation: number; readonly toStation: number }[]
+  /**
+   * The fill allowance the design line was graded to, metres.
+   *
+   * Not used to change what is swept — it is used to REPORT. See
+   * `UnsupportedFill`. A number rather than anything from the mesh layer,
+   * deliberately: `terrain/` does not import `mesh/`, and the allowance is
+   * whatever the caller handed the grade solver anyway.
+   */
+  readonly maxFillHeight: number
 }
 
-/** Walk an alignment and offer every corridor sample into `into`. */
-export const sweepCorridor = (params: SweepParams, into: CorridorExcavation): void => {
+/**
+ * A station the sweep embanked higher than the fill allowance permits.
+ *
+ * Somebody has to notice this. The old code skipped any station where
+ * `roadZ - centreGroundZ > MAX_FILL_HEIGHT`, which stopped the embankment and
+ * left an unsupported notch in the road instead — wrong in a different
+ * direction, and silent about it too. That skip was replaced by the span list,
+ * which is right for a high run long enough to become a span and does nothing
+ * at all for one that is not: a run shorter than `MIN_SPAN_LENGTH` is
+ * discarded as terrain noise, and the sweep then builds whatever embankment
+ * the design line asks for. Measured on a 20m-wide, 18m-deep notch: a 16.40m
+ * embankment against a declared allowance of 10m, 48 grid nodes different from
+ * the old behaviour, worst case 0.00m before and +16.40m after.
+ *
+ * Neither answer is right, and picking between two wrong ones quietly is the
+ * thing this codebase does not do. So the embankment is built — it is at least
+ * continuous, which the notch was not — and every station that exceeded the
+ * allowance is handed back for the caller to report.
+ */
+export type UnsupportedFill = {
+  /** Station along the alignment, metres. */
+  readonly station: number
+  /** How far the design line stands above natural ground there, metres. */
+  readonly height: number
+  /** The allowance it exceeded, metres. */
+  readonly allowance: number
+}
+
+/**
+ * Walk an alignment and offer every corridor sample into `into`.
+ *
+ * Returns the stations it embanked above the fill allowance without a
+ * structure under them — see `UnsupportedFill`. An empty array is the common
+ * case and means what it says.
+ */
+export const sweepCorridor = (
+  params: SweepParams,
+  into: CorridorExcavation,
+): UnsupportedFill[] => {
   const {
     alignment, profile, terrain, template, pavementDepth,
-    maxSlope, margin, stationSpacing, transverseSpacing, structureRanges,
+    maxSlope, margin, stationSpacing, transverseSpacing, structureRanges, maxFillHeight,
   } = params
 
   if (stationSpacing <= 0) throw new RangeError('stationSpacing must be positive')
@@ -141,6 +187,7 @@ export const sweepCorridor = (params: SweepParams, into: CorridorExcavation): vo
     structureRanges.some((r) => s >= r.fromStation && s <= r.toStation)
 
   const steps = Math.max(1, Math.ceil(alignment.length / stationSpacing))
+  const unsupportedFill: UnsupportedFill[] = []
 
   for (let i = 0; i <= steps; i++) {
     const s = Math.min(i * stationSpacing, alignment.length)
@@ -151,6 +198,18 @@ export const sweepCorridor = (params: SweepParams, into: CorridorExcavation): vo
     const designZ = roadZ - pavementDepth
 
     const centreGroundZ = terrain.sample(pose.position.x, pose.position.y)
+
+    // Measured on the design line against natural ground, exactly as the old
+    // per-station skip measured it, so the report fires on precisely the
+    // stations that skip used to swallow.
+    if (roadZ - centreGroundZ > maxFillHeight) {
+      unsupportedFill.push({
+        station: s,
+        height: roadZ - centreGroundZ,
+        allowance: maxFillHeight,
+      })
+    }
+
     const depth = Math.abs(centreGroundZ - designZ)
     const half = template.formationHalfWidth + maxSlope * depth + margin
 
@@ -170,4 +229,6 @@ export const sweepCorridor = (params: SweepParams, into: CorridorExcavation): vo
       into.offer(col, row, designSurfaceAtOffset(offset, designZ, groundZ, template), offset)
     }
   }
+
+  return unsupportedFill
 }

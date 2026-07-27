@@ -114,6 +114,10 @@ describe('sweepCorridor', () => {
     margin: 2,
     stationSpacing: 10,
     transverseSpacing: 5,
+    // Design 4m below ground everywhere in this fixture, so nothing here is
+    // in fill at all and the allowance is never approached. The tests that
+    // are about the allowance build their own ground.
+    maxFillHeight: 10,
   }
 
   /** Station s lands on terrain column s / cellSize, since the alignment's
@@ -250,5 +254,105 @@ describe('sweepCorridor', () => {
     // otherwise this would pass even if the whole sweep were broken.
     expect(columnClaimed(x, columnForStation(20))).toBe(true)
     expect(columnClaimed(x, columnForStation(40))).toBe(true)
+  })
+
+  /**
+   * The stations the sweep embanks past the fill allowance with nothing under
+   * them.
+   *
+   * The old per-station skip (`roadZ - centreGroundZ > MAX_FILL_HEIGHT`,
+   * `continue`) stopped these being built and left an unsupported notch in the
+   * road instead. Replacing it with the span list is right for a high run long
+   * enough to become a span and does nothing whatever for one that is not —
+   * runs under `MIN_SPAN_LENGTH` are discarded as terrain noise, and the sweep
+   * then builds the whole embankment.
+   *
+   * Neither behaviour is correct. The one that is at least continuous is the
+   * one built, and this is the channel that stops it being silent.
+   */
+  describe('fill past the allowance', () => {
+    /**
+     * Flat ground at 100m with a 20m-wide, 18m-deep notch cut across it at
+     * stations 40-60 — narrower than `MIN_SPAN_LENGTH` once abutments are
+     * accounted for, so no span can form over it and nothing suppresses the
+     * embankment the design line asks for.
+     */
+    const notched = (): Heightmap => {
+      const cols = 21, rows = 21
+      const elevations = new Float32Array(cols * rows).fill(100)
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+          const x = col * 5
+          if (x >= 40 && x <= 60) elevations[row * cols + col] = 82
+        }
+      }
+      return new Heightmap(0, -50, 5, cols, rows, elevations)
+    }
+
+    const levelProfile: ProfilePoint[] = [{ s: 0, z: 100 }, { s: 100, z: 100 }]
+
+    it('reports every station embanked above the allowance', () => {
+      const terrain = notched()
+      const x = new CorridorExcavation(terrain.cols, terrain.rows)
+      const unsupported = sweepCorridor(
+        {
+          ...baseParams,
+          terrain,
+          profile: levelProfile,
+          maxFillHeight: 10,
+          structureRanges: [],
+        },
+        x,
+      )
+
+      // Stations 40, 50 and 60 sit over the notch floor at 82m, so the design
+      // line at 100m stands 18m over it against a 10m allowance.
+      expect(unsupported.map((f) => f.station)).toEqual([40, 50, 60])
+      for (const fill of unsupported) {
+        expect(fill.height).toBeCloseTo(18, 6)
+        expect(fill.allowance).toBe(10)
+      }
+    })
+
+    it('builds the embankment it reports rather than leaving a hole', () => {
+      // The old skip is NOT restored: a reported station is still swept, so
+      // the road has continuous ground under it. Reporting and refusing are
+      // different things and this is the reporting one.
+      const terrain = notched()
+      const x = new CorridorExcavation(terrain.cols, terrain.rows)
+      sweepCorridor(
+        { ...baseParams, terrain, profile: levelProfile, maxFillHeight: 10, structureRanges: [] },
+        x,
+      )
+      expect(columnClaimed(x, 10)).toBe(true) // station 50, mid-notch
+    })
+
+    it('says nothing where a structure carries the run', () => {
+      // Same notch, but this time it IS long enough to have become a span, so
+      // the sweep never reaches those stations and there is nothing to report.
+      const terrain = notched()
+      const x = new CorridorExcavation(terrain.cols, terrain.rows)
+      const unsupported = sweepCorridor(
+        {
+          ...baseParams,
+          terrain,
+          profile: levelProfile,
+          maxFillHeight: 10,
+          structureRanges: [{ fromStation: 35, toStation: 65 }],
+        },
+        x,
+      )
+      expect(unsupported).toEqual([])
+    })
+
+    it('says nothing about an embankment inside the allowance', () => {
+      const terrain = notched()
+      const x = new CorridorExcavation(terrain.cols, terrain.rows)
+      const unsupported = sweepCorridor(
+        { ...baseParams, terrain, profile: levelProfile, maxFillHeight: 20, structureRanges: [] },
+        x,
+      )
+      expect(unsupported).toEqual([])
+    })
   })
 })
