@@ -36,6 +36,20 @@ import { surfaceFor } from '../render/materials'
 import { TILT_SHIFT_FRAGMENT_SHADER, createTiltShiftUniforms } from '../render/tiltShift'
 import { RoadNetwork, NODE_SNAP_DISTANCE, type RoadId } from '../network/graph'
 import { findCrossings, MIN_OVERPASS_CLEARANCE } from '../network/crossings'
+
+/**
+ * How far past the formation edge of the road below an overpass deck runs,
+ * metres, measured each way from the crossing.
+ *
+ * The deck has to clear the corridor, not just the carriageway: the road
+ * underneath has batters and, where the ground allows, a retaining wall out at
+ * its own formation half-width plus its batter run. Ten metres beyond the
+ * formation edge covers that on every class in `ROAD_CLASSES` at the fill
+ * heights this terrain produces, and the cost of erring long is a slightly
+ * longer deck, while the cost of erring short is an abutment standing in the
+ * middle of the road it was supposed to bridge.
+ */
+const OVERPASS_DECK_MARGIN = 10
 import { classifyCrossing, type InfeasibleCrossing } from '../network/crossingKind'
 import { buildNetworkMesh, type NetworkMesh } from '../mesh/networkMesh'
 import { roadStructureSpans, type StructureSpan } from '../mesh/structures/spans'
@@ -470,6 +484,8 @@ export const solveNetwork = (
   // older than it.
   const designs = new Map<RoadId, ProfilePoint[]>()
   const infeasibleCrossings: InfeasibleCrossing[] = []
+  /** Station ranges each road must be decked over to clear another road. */
+  const liftedRanges = new Map<RoadId, { fromStation: number; toStation: number }[]>()
 
   for (const road of [...network.roads].sort((a, b) => a.id - b.id)) {
     const unlifted = provisional.get(road.id)
@@ -485,6 +501,7 @@ export const solveNetwork = (
     const structureDepth = overpassStructureDepth(road.className)
     const floors: ClearanceFloor[] = []
     const wanted: { under: RoadId; station: number; requiredElevation: number }[] = []
+    const deckRanges: { fromStation: number; toStation: number }[] = []
 
     for (const crossing of required) {
       const under = designs.get(crossing.under)
@@ -504,11 +521,32 @@ export const solveNetwork = (
 
       floors.push(...clearanceFloorsAt(ground, crossing.station, requiredElevation))
       wanted.push({ under: crossing.under, station: crossing.station, requiredElevation })
+
+      // How much of THIS road has to be on a deck, measured from how wide the
+      // road underneath is. A deck only as long as the clearance floors would
+      // be five or ten metres — narrower than the corridor it is bridging,
+      // and below `MIN_SPAN_LENGTH`, so it would be discarded and the
+      // embankment built anyway.
+      const half =
+        formationHalfWidth(ROAD_CLASSES[network.road(crossing.under).className]) +
+        OVERPASS_DECK_MARGIN
+      deckRanges.push({
+        fromStation: crossing.station - half,
+        toStation: crossing.station + half,
+      })
     }
 
     const solution = solveGround(ground, floors)
     if (solution.feasible) {
       designs.set(road.id, solution.profile)
+      // The stretches this road must be decked over, remembered so the span
+      // derivation can force them onto a structure. Without this the lift
+      // succeeds, the design lines separate correctly, and the corridor sweep
+      // then fills an embankment across the road underneath — because a lift
+      // of five metres' clearance plus the deck is still under
+      // `MAX_FILL_HEIGHT`, so height alone reads it as earthwork. See
+      // `RoadSpanInputs.requiredStructureStations`.
+      liftedRanges.set(road.id, deckRanges)
       continue
     }
 
@@ -575,6 +613,7 @@ export const solveNetwork = (
       terrain,
       maxFillHeight: MAX_FILL_HEIGHT,
       spacing: STRUCTURE_STATION_SPACING,
+      requiredStructureRanges: liftedRanges.get(road.id),
     })
     spans.set(road.id, roadSpans)
     excavateCorridor(excavation, terrain, road.alignment, design, road.className, roadSpans)

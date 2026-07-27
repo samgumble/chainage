@@ -7,6 +7,14 @@ import {
 } from '../../terrain/groundProfile'
 import { classifySupport, type StationSupport } from '../../terrain/gradeSolver'
 
+/**
+ * Floating-point slack when deciding whether a station falls within half a
+ * sample spacing of a required one. Guards the exact-half-spacing case, where
+ * the arithmetic that produced the required station and the arithmetic that
+ * produced the sample station agree mathematically and differ in the last bit.
+ */
+const STATION_EPSILON = 1e-9
+
 export type StructureSpan = {
   readonly fromStation: number
   readonly toStation: number
@@ -135,6 +143,29 @@ export type RoadSpanInputs = {
   readonly maxFillHeight: number
   /** Station spacing the ground and support profiles are sampled at. */
   readonly spacing: number
+  /**
+   * Station ranges that must be carried on a structure however low the design
+   * line runs there, because something other than height demands it.
+   *
+   * Height alone cannot decide this. An overpass lifted just enough to clear
+   * the road beneath it — five metres of clearance plus the depth of the deck,
+   * so six or seven on flat ground — sits comfortably under `maxFillHeight`,
+   * and `classifySupport` therefore calls it earthwork. The corridor sweep
+   * then does exactly what it is told and builds an embankment across the
+   * road below. The design lines are correctly separated and the graph is
+   * correct; what gets built is a dam.
+   *
+   * Ranges rather than single stations, because the thing being cleared has
+   * width. A deck forced onto the one or two samples nearest a crossing is
+   * five or ten metres long, which is both shorter than `MIN_SPAN_LENGTH` —
+   * so it would be discarded outright — and narrower than the corridor it is
+   * supposed to bridge. The caller knows how wide the road underneath is and
+   * says so; this function does not have to guess.
+   */
+  readonly requiredStructureRanges?: readonly {
+    readonly fromStation: number
+    readonly toStation: number
+  }[]
 }
 
 /**
@@ -170,5 +201,22 @@ export const roadStructureSpans = (inputs: RoadSpanInputs): StructureSpan[] => {
     z: designElevationAtStation(design, g.s),
   }))
 
-  return structureSpans(designAtGround, classifySupport(ground, designAtGround, maxFillHeight), ground)
+  const support = classifySupport(ground, designAtGround, maxFillHeight)
+
+  // Bounds are inclusive: a sample sitting exactly on the end of a required
+  // range is inside it, the same convention `structureRanges` uses in the
+  // corridor sweep, so earthwork and structures continue to agree about who
+  // owns a boundary station.
+  const required = inputs.requiredStructureRanges ?? []
+  if (required.length > 0) {
+    for (let i = 0; i < ground.length; i++) {
+      const s = ground[i]!.s
+      const inRange = required.some(
+        (r) => s >= r.fromStation - STATION_EPSILON && s <= r.toStation + STATION_EPSILON,
+      )
+      if (inRange) support[i] = 'structure'
+    }
+  }
+
+  return structureSpans(designAtGround, support, ground)
 }
