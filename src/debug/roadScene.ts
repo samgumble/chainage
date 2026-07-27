@@ -877,9 +877,30 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     endDrag(event)
   }
 
+  /** Approximate CSS pixels per "line" when a `WheelEvent` reports
+   * `DOM_DELTA_LINE` — Firefox's default unit for an ordinary mouse wheel,
+   * against Chrome/Safari's `DOM_DELTA_PIXEL`. Without normalising this,
+   * Firefox's deltaY of a few lines per notch reads as a few pixels, and
+   * zoom moves at roughly 0.45% of the speed it does elsewhere. 16px matches
+   * Firefox's own default wheel line height. */
+  const WHEEL_LINE_HEIGHT_PX = 16
+
+  /** `deltaY` normalised to the same "pixels" unit regardless of which mode
+   * the browser reported it in. */
+  const normalizedWheelDeltaY = (event: WheelEvent): number => {
+    switch (event.deltaMode) {
+      case WheelEvent.DOM_DELTA_LINE:
+        return event.deltaY * WHEEL_LINE_HEIGHT_PX
+      case WheelEvent.DOM_DELTA_PAGE:
+        return event.deltaY * Math.max(1, canvas.clientHeight)
+      default:
+        return event.deltaY
+    }
+  }
+
   const onWheel = (event: WheelEvent): void => {
     event.preventDefault()
-    rig.zoom(Math.exp(event.deltaY * ZOOM_SENSITIVITY))
+    rig.zoom(Math.exp(normalizedWheelDeltaY(event) * ZOOM_SENSITIVITY))
   }
 
   const onContextMenu = (event: MouseEvent): void => {
