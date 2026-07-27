@@ -18,6 +18,13 @@ import { RoadNetwork, type RoadId } from '../network/graph'
 import { buildNetworkMesh, type NetworkMesh } from '../mesh/networkMesh'
 import { DrawTool, SNAP_RADIUS } from '../tool/drawTool'
 import { resolveSnap, type SnapTarget } from '../tool/snap'
+import { SelectTool, type SplitOutcome } from '../tool/selectTool'
+import {
+  describePolylineRejection,
+  describeSplitOutcome,
+  describeUpgradeObstacles,
+  describeInfeasibleRoads,
+} from '../tool/messages'
 
 const MAX_GRADE = 0.07
 const MAX_CUT_DEPTH = 12
@@ -484,7 +491,49 @@ const disposeMesh = (mesh: THREE.Mesh): void => {
   }
 }
 
+/** The two things a player can be doing. Tab switches between them; see
+ * `switchToolMode`. */
+type ToolMode = 'draw' | 'select'
+
 export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
+  // --- Message line --------------------------------------------------------
+  //
+  // A single absolutely-positioned element next to the canvas — not the
+  // inspector panel (a later plan), just enough that the current mode and
+  // the outcome of the last action are never silent. Appended to the
+  // canvas's own parent so it sits over the same positioned box the canvas
+  // fills, rather than assuming anything about the page around it.
+  const messageHost = canvas.parentElement ?? document.body
+  const messageEl = document.createElement('div')
+  messageEl.style.position = 'absolute'
+  messageEl.style.left = '12px'
+  messageEl.style.top = '12px'
+  messageEl.style.padding = '4px 10px'
+  messageEl.style.borderRadius = '4px'
+  messageEl.style.font = '13px/1.4 ui-sans-serif, system-ui, sans-serif'
+  messageEl.style.pointerEvents = 'none'
+  messageEl.style.whiteSpace = 'pre'
+  messageHost.appendChild(messageEl)
+
+  const modeLabel = (toolMode: ToolMode): string => (toolMode === 'draw' ? 'Draw' : 'Select')
+
+  /**
+   * Set the message line's text, always prefixed with the current mode so the
+   * tool is never silently in a state the player did not choose (§Step 1/2).
+   * A refusal gets a visibly different look from a confirmation or the bare
+   * mode label.
+   */
+  const setMessage = (detail: string, kind: 'info' | 'refusal' = 'info'): void => {
+    messageEl.textContent = detail ? `${modeLabel(toolMode)} — ${detail}` : modeLabel(toolMode)
+    if (kind === 'refusal') {
+      messageEl.style.background = 'rgba(140, 30, 30, 0.85)'
+      messageEl.style.color = '#ffdede'
+    } else {
+      messageEl.style.background = 'rgba(20, 24, 29, 0.75)'
+      messageEl.style.color = '#e8e4dc'
+    }
+  }
+
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true })
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   renderer.setClearColor(0x14181d)
@@ -515,6 +564,12 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   // The tool draws in whatever class the player picked; there is no class
   // picker yet, so it draws rural roads until the selection UI exists.
   const tool = new DrawTool(network, 'rural')
+  const selectTool = new SelectTool(network)
+
+  /** Which of the two modes the player is currently in. Defaults to draw so
+   * the scene opens exactly as it always has. */
+  let toolMode: ToolMode = 'draw'
+  setMessage('')
 
   let networkMeshes = addNetworkMeshes(scene, terrain, editLayer, built, infeasibleRoads)
 
@@ -538,6 +593,15 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
       disposeMesh(mesh)
     }
     networkMeshes = addNetworkMeshes(scene, terrain, editLayer, built, infeasibleRoads)
+
+    // A road with no feasible vertical alignment used to reach only the
+    // console (see `SceneContent.infeasibleRoads`) — surfaced here so it is
+    // visible after every rebuild, whatever mutation triggered it. Takes
+    // priority over whatever message the caller already set: an infeasible
+    // road is a standing problem with the network, not a transient result of
+    // the action that happened to trigger this rebuild.
+    const infeasibleMessage = describeInfeasibleRoads(infeasibleRoads)
+    if (infeasibleMessage) setMessage(infeasibleMessage, 'refusal')
   }
 
   const attemptCommit = (): void => {
@@ -545,7 +609,11 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     if (result.ok) {
       rebuildNetworkMeshes()
     } else {
+      // Kept alongside the message line below (not replaced by it): the
+      // console gives the raw rejection object for debugging, the message
+      // line gives the player a sentence they can act on.
       console.warn('commit rejected:', result.rejection.reason, result.rejection)
+      setMessage(describePolylineRejection(result.rejection), 'refusal')
     }
   }
 
@@ -625,6 +693,11 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
    * pure function, so the marker can show its kind. */
   let hoverSnap: SnapTarget | undefined
 
+  /** The pointer's last known ground position, unsnapped — `undefined` when
+   * the pointer is over the sky or hasn't moved yet. Used by select mode's
+   * split verb, which needs the raw position rather than a snap target. */
+  let lastPointerWorldPosition: Vec2 | undefined
+
   let previewLine: THREE.Line | undefined
   const previewOkMaterial = new THREE.LineBasicMaterial({ color: 0xbfe3ff })
   const previewWarnMaterial = new THREE.LineBasicMaterial({ color: 0xff5533 })
@@ -641,7 +714,12 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     return new THREE.Vector3(p.x, z, -p.y)
   }
 
-  /** Log a rejection once per distinct cause, not once per frame. */
+  /**
+   * Report a rejection once per distinct cause, not once per frame — to the
+   * console, as before, and now to the message line too, so a corner too
+   * sharp to fillet or a segment short of the minimum shows up on screen
+   * while the player is still drawing it, not only at commit time.
+   */
   let lastLoggedRejectionKey: string | undefined
   const logRejection = (rejection: PolylineRejection | undefined): void => {
     if (!rejection) {
@@ -652,6 +730,7 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     if (key === lastLoggedRejectionKey) return
     lastLoggedRejectionKey = key
     console.warn('draw preview rejected:', rejection.reason, rejection)
+    setMessage(describePolylineRejection(rejection), 'refusal')
   }
 
   const setPreviewGeometry = (points: THREE.Vector3[], material: THREE.LineBasicMaterial): void => {
@@ -711,6 +790,50 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     }
   }
 
+  // --- Selection highlight ---------------------------------------------------
+  //
+  // The selected road's centreline, drawn the same way the draw preview is —
+  // a bright line lifted clear of the surface. Rebuilt every frame straight
+  // from `selectTool.selected`, the same pattern `updatePreview` already uses
+  // for the preview line, rather than cached against a remembered id: a
+  // selection can be invalidated by something this scene never routes back
+  // through the select tool (a road drawn onto the selected one splits it —
+  // see `SelectTool`'s docstring), and `selected` already re-checks existence
+  // on every read, so reading it fresh here is what makes that safe.
+  let highlightLine: THREE.Line | undefined
+  const highlightMaterial = new THREE.LineBasicMaterial({ color: 0x39ff8a })
+
+  const clearHighlight = (): void => {
+    if (!highlightLine) return
+    scene.remove(highlightLine)
+    highlightLine.geometry.dispose()
+    highlightLine = undefined
+  }
+
+  const updateHighlight = (): void => {
+    const roadId = selectTool.selected
+    if (roadId === undefined) {
+      clearHighlight()
+      return
+    }
+
+    const points = network
+      .road(roadId)
+      .alignment.sample(PREVIEW_SAMPLE_SPACING)
+      .map((pose) => projectToThree(pose.position))
+    const geometry = new THREE.BufferGeometry().setFromPoints(points)
+    if (highlightLine) {
+      // Disposed before every replacement, exactly like the preview line —
+      // this is the geometry-leak pattern the preview line already had to be
+      // fixed for once.
+      highlightLine.geometry.dispose()
+      highlightLine.geometry = geometry
+    } else {
+      highlightLine = new THREE.Line(geometry, highlightMaterial)
+      scene.add(highlightLine)
+    }
+  }
+
   // --- Pointer input: camera control, hover and placement -----------------
   const ORBIT_RADIANS_PER_PIXEL = 0.005
   /** Multiplicative per unit of wheel delta, so zoom feels the same at every
@@ -753,6 +876,10 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
 
   const updateHover = (event: PointerEvent): void => {
     const worldPosition = worldPositionAt(event.clientX, event.clientY)
+    // Tracked independent of mode/hover-snap so the split verb (select mode's
+    // "S") has the pointer's current ground position to hand to
+    // `splitSelectedAt`, the same position the player is looking at.
+    lastPointerWorldPosition = worldPosition
     if (!worldPosition) {
       hoverSnap = undefined
       return
@@ -856,6 +983,16 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     const worldPosition = worldPositionAt(event.clientX, event.clientY)
     if (!worldPosition) return
 
+    // Select mode's click is a single, immediate pick — no double-click
+    // deferral, and no second path to the ground: it reuses the exact same
+    // gesture (drag-vs-click already resolved above) and pointer-to-ground
+    // machinery draw mode's placement uses.
+    if (toolMode === 'select') {
+      const pickedRoadId = selectTool.select(worldPosition)
+      setMessage(pickedRoadId === undefined ? 'Nothing there to select.' : 'Selected a road.')
+      return
+    }
+
     const suppressSnap = suppressSnapModifier(event)
 
     if (pendingClickTimer !== undefined) {
@@ -908,22 +1045,161 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     event.preventDefault()
   }
 
+  /**
+   * Switch between draw and select mode, cancelling whatever is pending in
+   * the mode being left.
+   *
+   * Only draw mode has anything pending to cancel — a half-placed road and
+   * the timer waiting to see if the next click is a double click. Left
+   * running, that timer is exactly the "stale gesture survives a mode
+   * switch" hazard this file has hit before: it would fire up to 300ms after
+   * the player has already moved to select mode and silently feed a point to
+   * a draw tool nobody is looking at. Select mode's own actions (pick,
+   * delete, split, reclassify) are all immediate, so leaving it cancels
+   * nothing — in particular the selection itself survives the trip (see
+   * `updateHighlight`), so switching to draw and back does not lose it.
+   *
+   * A held drag is cleared here too, regardless of which mode is being left.
+   * `onPointerUp` resolves a drag by reading `toolMode` at release time, not
+   * at press time — so a drag started in one mode and released after a mode
+   * switch would otherwise resolve in the mode it did not start in (e.g. a
+   * held left-button placement release, in select mode, after Tab was
+   * pressed mid-drag). Ending it here, and releasing the pointer capture
+   * that goes with it, means `onPointerUp` finds no drag to resolve at all.
+   */
+  const switchToolMode = (next: ToolMode): void => {
+    if (next === toolMode) return
+    if (toolMode === 'draw') {
+      cancelPendingClick()
+      tool.cancel()
+    }
+    if (drag) {
+      if (canvas.hasPointerCapture(drag.pointerId)) {
+        canvas.releasePointerCapture(drag.pointerId)
+      }
+      drag = undefined
+    }
+    toolMode = next
+    setMessage('')
+  }
+
+  const handleDeleteSelected = (): void => {
+    const outcome = selectTool.deleteSelected()
+    if (outcome.ok) {
+      setMessage('Deleted the selected road.')
+      rebuildNetworkMeshes()
+    } else {
+      setMessage('Select a road before deleting it.', 'refusal')
+    }
+  }
+
+  const handleSplitSelected = (): void => {
+    // `splitSelectedAt` needs a ground position; without one (pointer over
+    // the sky, or never moved) there is nothing to split at, which is the
+    // same message as clicking somewhere off the selected road.
+    if (lastPointerWorldPosition === undefined) {
+      const outcome: SplitOutcome =
+        selectTool.selected === undefined
+          ? { ok: false, reason: 'nothing-selected' }
+          : { ok: false, reason: 'not-on-the-selected-road' }
+      setMessage(describeSplitOutcome(outcome), 'refusal')
+      return
+    }
+
+    const outcome = selectTool.splitSelectedAt(lastPointerWorldPosition)
+    setMessage(describeSplitOutcome(outcome), outcome.ok ? 'info' : 'refusal')
+    if (outcome.ok) rebuildNetworkMeshes()
+  }
+
+  /** `]` (direction 1) or `[` (direction -1). */
+  const handleReclassifySelected = (direction: 1 | -1): void => {
+    if (selectTool.selected === undefined) {
+      setMessage('Select a road before changing its class.', 'refusal')
+      return
+    }
+
+    const to = selectTool.classStep(direction)
+    if (to === undefined) {
+      // Nothing to reclassify to — already at the top or bottom of the
+      // ladder. Not a rejection `reclassifySelected` itself can report (there
+      // is no obstacle, no class to name), so it is never called.
+      setMessage(
+        direction === 1 ? 'Already at the highest road class.' : 'Already at the lowest road class.',
+        'refusal',
+      )
+      return
+    }
+
+    const outcome = selectTool.reclassifySelected(to)
+    if (outcome.ok) {
+      setMessage(`Reclassified from ${outcome.from} to ${outcome.to}.`)
+      rebuildNetworkMeshes()
+    } else if (outcome.reason === 'not-permitted') {
+      setMessage(describeUpgradeObstacles(outcome.obstacles), 'refusal')
+    } else {
+      setMessage('Select a road before changing its class.', 'refusal')
+    }
+  }
+
   const onKeyDown = (event: KeyboardEvent): void => {
+    if (event.key === 'Tab') {
+      // The browser's own default would move focus off the canvas.
+      event.preventDefault()
+      switchToolMode(toolMode === 'draw' ? 'select' : 'draw')
+      return
+    }
+
+    // Every other key is mode-specific. Draw mode already used Backspace for
+    // "undo the last point"; select mode uses the same key for "delete the
+    // selected road". Branching on mode up front, rather than trying to fold
+    // both into one switch, is what keeps a key from firing in the mode it
+    // does not belong to.
+    if (toolMode === 'draw') {
+      switch (event.key) {
+        case 'Enter':
+          event.preventDefault()
+          cancelPendingClick()
+          attemptCommit()
+          break
+        case 'Escape':
+          event.preventDefault()
+          cancelPendingClick()
+          tool.cancel()
+          break
+        case 'Backspace':
+          event.preventDefault()
+          cancelPendingClick()
+          tool.undoLastPoint()
+          break
+        default:
+          break
+      }
+      return
+    }
+
     switch (event.key) {
-      case 'Enter':
-        event.preventDefault()
-        cancelPendingClick()
-        attemptCommit()
-        break
       case 'Escape':
         event.preventDefault()
-        cancelPendingClick()
-        tool.cancel()
+        selectTool.clear()
+        setMessage('')
         break
+      case 'Delete':
       case 'Backspace':
         event.preventDefault()
-        cancelPendingClick()
-        tool.undoLastPoint()
+        handleDeleteSelected()
+        break
+      case 's':
+      case 'S':
+        event.preventDefault()
+        handleSplitSelected()
+        break
+      case ']':
+        event.preventDefault()
+        handleReclassifySelected(1)
+        break
+      case '[':
+        event.preventDefault()
+        handleReclassifySelected(-1)
         break
       default:
         break
@@ -982,6 +1258,7 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     resize(canvas.clientWidth, canvas.clientHeight)
     updateCameraFromRig()
     updatePreview()
+    updateHighlight()
     renderer.render(scene, camera)
   }
   tick()
@@ -1000,10 +1277,10 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
 
     // Every road/terrain/junction/structure mesh built by `addNetworkMeshes`
     // (including the terrain surface itself, last in that array), plus the
-    // preview line, both preview materials and the snap marker — everything
-    // this function allocated on the GPU, not just the renderer. Without
-    // this, every road drawn and every rebuild leaks its geometries and
-    // materials for as long as the page stays open.
+    // preview line, both preview materials, the selection highlight and the
+    // snap marker — everything this function allocated on the GPU, not just
+    // the renderer. Without this, every road drawn and every rebuild leaks
+    // its geometries and materials for as long as the page stays open.
     for (const mesh of networkMeshes) {
       scene.remove(mesh)
       disposeMesh(mesh)
@@ -1011,10 +1288,13 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     clearPreviewLine()
     previewOkMaterial.dispose()
     previewWarnMaterial.dispose()
+    clearHighlight()
+    highlightMaterial.dispose()
     scene.remove(marker)
     marker.geometry.dispose()
     ;(marker.material as THREE.MeshBasicMaterial).dispose()
 
     renderer.dispose()
+    messageEl.remove()
   }
 }

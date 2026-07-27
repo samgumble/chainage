@@ -83,6 +83,18 @@ export class RoadNetwork {
     return { ...found }
   }
 
+  /**
+   * Whether a road with this id still exists.
+   *
+   * An O(1) map lookup — the question a caller that only needs a yes/no
+   * answer should ask, rather than either `road()` (throws, and copies the
+   * road) or scanning `roads` (copies every road in the network just to
+   * check membership).
+   */
+  hasRoad(id: RoadId): boolean {
+    return this.roadMap.has(id)
+  }
+
   node(id: NodeId): NetworkNode {
     const found = this.nodeMap.get(id)
     if (!found) throw new RangeError(`no node with id ${id}`)

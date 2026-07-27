@@ -60,6 +60,10 @@ describe('checkUpgrade', () => {
     if (result.ok) return
     const junction = result.obstacles.find((o) => o.kind === 'junction')
     expect(junction).toBeDefined()
+    // All three roads (and so the shared junction) meet at road `a`'s own
+    // start — where it was drawn from.
+    if (junction?.kind !== 'junction') return
+    expect(junction.roadEnd).toBe('start')
   })
 
   it('says why a junction obstacle cannot be built when the reason is trim-too-long', () => {
@@ -108,6 +112,8 @@ describe('checkUpgrade', () => {
     expect(junction).toBeDefined()
     if (junction?.kind !== 'junction') return
     expect(junction.nodeId).toBe(net.road(spine).endNode)
+    // The fan is at the spine's far end, not where it was drawn from.
+    expect(junction.roadEnd).toBe('end')
   })
 
   it('ignores nodes that are not junctions', () => {

@@ -139,6 +139,27 @@ describe('RoadNetwork lookups', () => {
   })
 })
 
+describe('RoadNetwork hasRoad', () => {
+  it('is true for a road that exists', () => {
+    const net = new RoadNetwork()
+    const id = net.addRoad(straight(0, 0, 0, 100), 'rural')
+    expect(net.hasRoad(id)).toBe(true)
+  })
+
+  it('is false once the road has been removed', () => {
+    const net = new RoadNetwork()
+    const id = net.addRoad(straight(0, 0, 0, 100), 'rural')
+    net.removeRoad(id)
+    expect(net.hasRoad(id)).toBe(false)
+  })
+
+  it('is false for an id that never existed', () => {
+    const net = new RoadNetwork()
+    net.addRoad(straight(0, 0, 0, 100), 'rural')
+    expect(net.hasRoad(999)).toBe(false)
+  })
+})
+
 describe('RoadNetwork nodeAt robustness', () => {
   it('skips a stale index entry and still finds the real node', () => {
     const net = new RoadNetwork()

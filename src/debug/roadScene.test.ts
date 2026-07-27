@@ -1,13 +1,16 @@
 import { describe, it, expect } from 'vitest'
 import { buildSceneContent, solveNetwork } from './roadScene'
 import { buildNetworkMesh } from '../mesh/networkMesh'
-import { RoadNetwork } from '../network/graph'
+import type { RoadMesh } from '../mesh/roadMesh'
+import { RoadNetwork, type RoadId } from '../network/graph'
 import { Alignment } from '../geometry/alignment'
 import { Line } from '../geometry/primitives'
 import { vec2 } from '../geometry/vec2'
 import { sampleGroundProfile } from '../terrain/groundProfile'
 import { solveGradeProfile } from '../terrain/gradeSolver'
 import { Heightmap } from '../terrain/heightmap'
+import { SelectTool } from '../tool/selectTool'
+import { ROAD_CLASSES, formationHalfWidth } from '../network/roadClass'
 
 /**
  * The demo scene is the only end-to-end evidence the structures pipeline
@@ -173,5 +176,121 @@ describe('a road with no feasible vertical alignment', () => {
     expect(designs.has(roadId)).toBe(false)
     expect(infeasibleRoads.has(roadId)).toBe(true)
     expect(infeasibleRoads.get(roadId)).toBeGreaterThanOrEqual(0)
+  })
+})
+
+/**
+ * `roadScene.ts`'s select-mode key handlers (delete, split, upgrade/downgrade)
+ * all do the same two things: call one `SelectTool` method, then call
+ * `rebuildNetworkMeshes` — which is exactly `solveNetwork` followed by
+ * `buildNetworkMesh`, both already exercised above. The event handlers
+ * themselves need a canvas and a GPU and are covered by using the app; what is
+ * genuinely new and testable here, without a renderer, is that a network
+ * `SelectTool` has actually mutated re-solves and remeshes without error, and
+ * that a class change shows up in the rebuilt mesh rather than silently
+ * keeping the old cross-section.
+ */
+describe('select mode mutations re-solve and rebuild', () => {
+  /** Flat and empty: every leg below grades trivially, so these tests are
+   * about the network mutation and remesh, not the grade solver. */
+  const flatTerrain = (): Heightmap => {
+    const cols = 41
+    const rows = 41
+    return new Heightmap(-50, -50, 10, cols, rows, new Float32Array(cols * rows))
+  }
+
+  /** A T junction like the demo scene's, small enough for a 41x41 flat
+   * terrain: two rural arms east-west, one gravel arm north — a genuine
+   * 3-leg junction, so deleting or reclassifying a leg exercises the
+   * junction re-solve the visual checklist asks about, not just a lone road. */
+  const buildTJunction = (): { network: RoadNetwork; westId: RoadId; eastId: RoadId; northId: RoadId } => {
+    const junction = vec2(100, 100)
+    const network = new RoadNetwork()
+    const westId = network.addRoad(new Alignment([new Line(junction, Math.PI, 100)]), 'rural')
+    const eastId = network.addRoad(new Alignment([new Line(junction, 0, 100)]), 'rural')
+    const northId = network.addRoad(new Alignment([new Line(junction, Math.PI / 2, 100)]), 'gravel')
+    return { network, westId, eastId, northId }
+  }
+
+  /** Every vertex of a road's mesh sits at a fixed offset from a dead-straight
+   * centreline, and offset is carried entirely in one world axis for a leg
+   * that runs exactly along the other — for the north leg here (heading
+   * π/2), offset is carried in x, chainage in y. So the full x-extent across
+   * every layer's vertices is exactly twice the widest layer's half-width:
+   * a direct read of "how wide did this road actually get built" out of the
+   * mesh, not an assumption about it. */
+  const lateralSpread = (mesh: RoadMesh): number => {
+    let min = Infinity
+    let max = -Infinity
+    for (const layer of mesh.layers) {
+      for (let i = 0; i < layer.mesh.vertexCount; i++) {
+        const x = layer.mesh.positions[i * 3]!
+        if (x < min) min = x
+        if (x > max) max = x
+      }
+    }
+    return max - min
+  }
+
+  it('deleting the selected road leaves the remaining junction solvable and re-meshed', () => {
+    const terrain = flatTerrain()
+    const { network, westId, eastId, northId } = buildTJunction()
+
+    const selectTool = new SelectTool(network)
+    selectTool.select(vec2(100, 150)) // partway up the north (gravel) leg
+    expect(selectTool.selected).toBe(northId)
+
+    const outcome = selectTool.deleteSelected()
+    expect(outcome).toEqual({ ok: true, roadId: northId })
+    expect(network.roads.length).toBe(2)
+    expect(selectTool.selected).toBeUndefined()
+
+    // The same rebuild `roadScene.ts`'s handlers perform after every
+    // mutation — must not throw, and the two remaining legs (now a plain
+    // east-west pass-through, the junction resolved away) must still both
+    // grade and mesh with their ends intact.
+    const { designs, built } = solveNetwork(terrain, network)
+    expect(designs.size).toBe(2)
+    for (const roadId of [westId, eastId]) {
+      const mesh = built.roads.get(roadId)
+      expect(mesh).toBeDefined()
+      const totalVertices = mesh!.layers.reduce((sum, l) => sum + l.mesh.vertexCount, 0)
+      expect(totalVertices).toBeGreaterThan(0)
+    }
+  })
+
+  it("reclassifying the selected road changes its class and the rebuilt mesh's width", () => {
+    const terrain = flatTerrain()
+    const { network, northId } = buildTJunction()
+
+    const selectTool = new SelectTool(network)
+    selectTool.select(vec2(100, 150))
+    expect(selectTool.selected).toBe(northId)
+
+    const before = solveNetwork(terrain, network)
+    const widthBefore = lateralSpread(before.built.roads.get(northId)!)
+
+    const outcome = selectTool.reclassifySelected('highway')
+    expect(outcome).toEqual({ ok: true, roadId: northId, from: 'gravel', to: 'highway' })
+    expect(network.road(northId).className).toBe('highway')
+    // Reclassifying does not clear the selection the way delete and split do.
+    expect(selectTool.selected).toBe(northId)
+
+    const after = solveNetwork(terrain, network)
+    const widthAfter = lateralSpread(after.built.roads.get(northId)!)
+
+    expect(widthAfter).toBeGreaterThan(widthBefore)
+    // Matches the formation width the two classes are actually built from,
+    // not just "got bigger by some amount" — the widest layer (subgrade)
+    // extends `widthExtension` beyond the formation edge on each side.
+    const gravelSubgrade = ROAD_CLASSES.gravel.layers.find((l) => l.name === 'subgrade')!
+    const highwaySubgrade = ROAD_CLASSES.highway.layers.find((l) => l.name === 'subgrade')!
+    const expectedBefore = 2 * (formationHalfWidth(ROAD_CLASSES.gravel) + gravelSubgrade.widthExtension)
+    const expectedAfter = 2 * (formationHalfWidth(ROAD_CLASSES.highway) + highwaySubgrade.widthExtension)
+    // Precision 4 (not tighter): vertex positions are `Float32Array`, whose
+    // ~7-digit precision on values around 100 (the junction's x) already
+    // costs several decimal places before any road-width arithmetic starts.
+    expect(widthBefore).toBeCloseTo(expectedBefore, 4)
+    expect(widthAfter).toBeCloseTo(expectedAfter, 4)
   })
 })
