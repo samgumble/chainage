@@ -15,8 +15,16 @@ export type Fillet = {
   readonly deflection: number
 }
 
-/** Below this deflection the corner is treated as straight and needs no curve. */
-const MIN_DEFLECTION = 1e-6
+/**
+ * Below this deflection the corner is treated as straight and needs no curve.
+ *
+ * Exported because `buildPolylineAlignment` must distinguish `filletCorner`'s
+ * two `null` results — "straight, no curve needed" from "too sharp to fillet"
+ * — by measuring the deflection itself before calling. Two thresholds that
+ * drifted apart would produce corners that are straight to one and turning to
+ * the other.
+ */
+export const MIN_DEFLECTION = 1e-6
 
 /**
  * Default bound on tangent distance, as a multiple of radius.

@@ -529,3 +529,46 @@ describe('setRoadClass', () => {
     expect(() => net.setRoadClass(999, 'rural')).toThrow(RangeError)
   })
 })
+
+describe('nodesWithin', () => {
+  it('returns every node inside the radius, nearest first', () => {
+    const net = new RoadNetwork()
+    net.addRoad(straight(0, 0, 0, 100), 'rural')
+    net.addRoad(straight(0, 30, 0, 100), 'rural')
+
+    const found = net.nodesWithin({ x: 0, y: 0 }, 50)
+    expect(found.map((n) => n.position.y)).toEqual([0, 30])
+  })
+
+  it('orders by distance even when that disagrees with creation (ascending id) order', () => {
+    // NodeIndex.nearby returns candidates in ascending id order (see the
+    // "skips a stale index entry" test above); a `nodesWithin` that forgot
+    // to sort by distance would pass this straight through unchanged. The
+    // fixture above doesn't catch that: its farther node also happens to
+    // have been created second, so ascending-id order and nearest-first
+    // order agree by coincidence. Here the farther node is created *first*
+    // (lower id) and the nearer one second (higher id), so the two orderings
+    // disagree — only a genuine distance sort produces the expected result.
+    const net = new RoadNetwork()
+    net.addRoad(straight(0, 30, 0, 100), 'rural') // id 0 at (0,30) — far, created first
+    net.addRoad(straight(0, 0, 0, 100), 'rural') // id 2 at (0,0) — near, created second
+
+    const found = net.nodesWithin({ x: 0, y: 0 }, 50)
+    expect(found.map((n) => n.position)).toEqual([
+      { x: 0, y: 0 },
+      { x: 0, y: 30 },
+    ])
+  })
+
+  it('excludes nodes outside the radius', () => {
+    const net = new RoadNetwork()
+    net.addRoad(straight(0, 0, 0, 100), 'rural')
+    expect(net.nodesWithin({ x: 0, y: 0 }, 10).map((n) => n.position.y)).toEqual([0])
+  })
+
+  it('returns an empty array when nothing is near', () => {
+    const net = new RoadNetwork()
+    net.addRoad(straight(0, 0, 0, 100), 'rural')
+    expect(net.nodesWithin({ x: 5000, y: 5000 }, 50)).toEqual([])
+  })
+})

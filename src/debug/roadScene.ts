@@ -1,18 +1,23 @@
 import * as THREE from 'three'
 import { Alignment } from '../geometry/alignment'
 import { Line } from '../geometry/primitives'
-import { vec2, fromAngle } from '../geometry/vec2'
+import { vec2, fromAngle, type Vec2 } from '../geometry/vec2'
+import type { PolylineRejection } from '../geometry/polyline'
 import { generateValley } from '../terrain/generate'
 import { sampleGroundProfile, designElevationAtStation, type ProfilePoint } from '../terrain/groundProfile'
-import { solveGradeProfile } from '../terrain/gradeSolver'
+import { solveGradeProfile, type GradeSolution } from '../terrain/gradeSolver'
 import { TerrainEditLayer } from '../terrain/editLayer'
 import { designSurfaceAtOffset, type CorridorTemplate, type CorridorBatters } from '../terrain/corridor'
+import { rayTerrainIntersection, type Ray3, type Vec3 as GroundVec3 } from '../terrain/rayCast'
+import type { Heightmap, TerrainSampler } from '../terrain/heightmap'
 import { ROAD_CLASSES, formationHalfWidth, totalPavementThickness, type RoadClassName } from '../network/roadClass'
 import { toBufferGeometry } from '../render/meshAdapter'
 import { terrainGeometry } from '../render/terrainMesh'
+import { CameraRig, type Vec3 as RigVec3 } from '../render/cameraRig'
 import { RoadNetwork, type RoadId } from '../network/graph'
 import { buildNetworkMesh, type NetworkMesh } from '../mesh/networkMesh'
-import type { Heightmap } from '../terrain/heightmap'
+import { DrawTool, SNAP_RADIUS } from '../tool/drawTool'
+import { resolveSnap, type SnapTarget } from '../tool/snap'
 
 const MAX_GRADE = 0.07
 const MAX_CUT_DEPTH = 12
@@ -105,12 +110,10 @@ const LAYER_COLOURS: Record<string, number> = {
   wearing: 0x35383d,
 }
 
-/** Orbit camera: one revolution every ORBIT_PERIOD_S seconds, looking down
- * at the road's plan midpoint from a raised angle. */
-const ORBIT_CENTER = new THREE.Vector3(1300, 105, -1300)
-const ORBIT_RADIUS = 1400
-const ORBIT_HEIGHT = 700
-const ORBIT_PERIOD_S = 40
+/** Structure (bridge/wall) colour — a neutral stone tone distinct from every
+ * pavement layer, so a structure reads as a different kind of thing rather
+ * than an odd-coloured road. */
+const STRUCTURE_COLOUR = 0x9a958c
 
 /**
  * Cut and fill the terrain down to the design surface along the corridor.
@@ -217,6 +220,96 @@ export type SceneContent = {
   /** Natural ground plus every corridor's cut and fill. What gets drawn. */
   readonly editLayer: TerrainEditLayer
   readonly built: NetworkMesh
+  /**
+   * Roads in the network with no feasible vertical alignment, keyed to the
+   * station along the alignment where the grade solve ran out of room.
+   *
+   * Such a road still exists in the graph — `commit` only validates
+   * horizontal geometry, so it is already snappable, splittable and part of
+   * every future junction solve — but has no entry in `designs`. Without a
+   * design profile, `designElevationAtStation` (see `groundProfile.ts`)
+   * treats it as flat at z=0, so `built.roads` still gets a mesh for it, just
+   * a degenerate one sitting at absolute elevation zero — buried tens of
+   * metres underground on terrain like this scene's, not because the road
+   * has genuinely no geometry, but because nothing upstream noticed the
+   * grade solve failed. Recorded here rather than left to that coincidence:
+   * see `drawRoadScene`'s use of this for the console warning that
+   * accompanies it.
+   */
+  readonly infeasibleRoads: ReadonlyMap<RoadId, number>
+}
+
+/** Grade a single alignment against natural ground: the full solver result,
+ * feasible or not, so a caller that needs to know why can see the station
+ * where the solve ran out of room. */
+const solveFor = (alignment: Alignment, terrain: Heightmap): GradeSolution => {
+  const ground = sampleGroundProfile(alignment, terrain, 10)
+  return solveGradeProfile(ground, {
+    maxGrade: MAX_GRADE,
+    maxCutDepth: MAX_CUT_DEPTH,
+    maxFillHeight: MAX_FILL_HEIGHT,
+    maxStructureHeight: MAX_STRUCTURE_HEIGHT,
+  })
+}
+
+/**
+ * Regrade every road in a network, excavate every corridor onto a fresh edit
+ * layer, and rebuild every mesh.
+ *
+ * Used both to build the initial demo scene and to rebuild after the drawing
+ * tool commits a road: the least-risk way to keep a mutated network's meshes
+ * in sync with it is to regenerate everything from scratch rather than patch
+ * around the edges.
+ *
+ * Known limitation: this redoes work for roads the edit did not touch.
+ * Correct, and slow once the network is large — measure before making it
+ * incremental.
+ */
+export const solveNetwork = (
+  terrain: Heightmap,
+  network: RoadNetwork,
+): {
+  designs: Map<RoadId, ProfilePoint[]>
+  editLayer: TerrainEditLayer
+  built: NetworkMesh
+  infeasibleRoads: Map<RoadId, number>
+} => {
+  const designs = new Map<RoadId, ProfilePoint[]>()
+  const infeasibleRoads = new Map<RoadId, number>()
+  for (const road of network.roads) {
+    const solution = solveFor(road.alignment, terrain)
+    if (solution.feasible) {
+      designs.set(road.id, solution.profile)
+    } else {
+      infeasibleRoads.set(road.id, solution.failedAtStation)
+    }
+  }
+
+  // Excavate the terrain down to every road's design line before anything is
+  // rendered, so each road sits in a real cutting/embankment rather than
+  // buried inside (or floating above) untouched ground. All roads accumulate
+  // onto the same edit layer so overlapping corridor footprints (junctions)
+  // are carved consistently.
+  const editLayer = new TerrainEditLayer(terrain)
+  for (const road of network.roads) {
+    const design = designs.get(road.id)
+    if (!design || design.length === 0) continue
+    excavateCorridor(editLayer, road.alignment, design, road.className)
+  }
+
+  // Structures are measured against NATURAL ground, not the edit layer. The
+  // edit layer has already been cut and filled to the design surface, so
+  // under the road it sits at the design line by construction: every station
+  // would read as level, no station could exceed the fill allowance, and
+  // neither the bridge nor the wall trigger could fire at all.
+  const built = buildNetworkMesh(network, designs, {
+    spacing: 4,
+    terrain,
+    maxFillHeight: MAX_FILL_HEIGHT,
+    corridorBatters: CORRIDOR_BATTERS,
+  })
+
+  return { designs, editLayer, built, infeasibleRoads }
 }
 
 /**
@@ -252,18 +345,6 @@ export const buildSceneContent = (): SceneContent => {
   const JUNCTION = vec2(900, 1280)
 
   const network = new RoadNetwork()
-  const designs = new Map<RoadId, ProfilePoint[]>()
-
-  const solveFor = (alignment: Alignment): ProfilePoint[] | null => {
-    const ground = sampleGroundProfile(alignment, terrain, 10)
-    const solution = solveGradeProfile(ground, {
-      maxGrade: MAX_GRADE,
-      maxCutDepth: MAX_CUT_DEPTH,
-      maxFillHeight: MAX_FILL_HEIGHT,
-      maxStructureHeight: MAX_STRUCTURE_HEIGHT,
-    })
-    return solution.feasible ? solution.profile : null
-  }
 
   // West and east arms both start at the junction, heading opposite ways
   // along the valley; the branch starts there too, heading north.
@@ -275,37 +356,132 @@ export const buildSceneContent = (): SceneContent => {
     [westArm, 'rural'], [eastArm, 'rural'], [branch, 'gravel'],
   ]
 
+  // Only roads that grade feasibly join the demo network — an infeasible arm
+  // would otherwise sit in the network with no design profile and an empty
+  // mesh, which is not what this fixed demo layout wants.
   for (const [alignment, className] of arms) {
-    const design = solveFor(alignment)
-    if (!design) continue
-    designs.set(network.addRoad(alignment, className), design)
+    if (!solveFor(alignment, terrain).feasible) continue
+    network.addRoad(alignment, className)
   }
 
-  // Excavate the terrain down to every road's design line before anything is
-  // rendered, so each road sits in a real cutting/embankment rather than
-  // buried inside (or floating above) untouched ground. All three roads
-  // accumulate onto the same edit layer so the junction area — where more
-  // than one corridor's footprint overlaps — is carved consistently.
-  const editLayer = new TerrainEditLayer(terrain)
-  for (const road of network.roads) {
-    const design = designs.get(road.id)
-    if (!design || design.length === 0) continue
-    excavateCorridor(editLayer, road.alignment, design, road.className)
+  const { designs, editLayer, built, infeasibleRoads } = solveNetwork(terrain, network)
+  return { terrain, network, designs, editLayer, built, infeasibleRoads }
+}
+
+/**
+ * Add every mesh for a built network — pavement layers, junctions,
+ * structures and the terrain surface — to a scene, and return them so the
+ * caller can remove and dispose them later (see `disposeMesh`).
+ *
+ * Also logs the same warnings the scene has always logged: infeasible
+ * junctions, elevation mismatches and tight crossings — plus, now, roads
+ * with no feasible vertical alignment at all (see `SceneContent.infeasibleRoads`).
+ */
+const addNetworkMeshes = (
+  scene: THREE.Scene,
+  terrain: Heightmap,
+  editLayer: TerrainEditLayer,
+  built: NetworkMesh,
+  infeasibleRoads: ReadonlyMap<RoadId, number>,
+): THREE.Mesh[] => {
+  const meshes: THREE.Mesh[] = []
+
+  if (infeasibleRoads.size > 0) {
+    // A road that fails to grade still commits — `DrawTool.commit` validates
+    // only horizontal geometry — so without this it sits in the network,
+    // snappable and splittable, its mesh flattened to elevation zero (see
+    // `SceneContent.infeasibleRoads`) and buried out of sight with nothing
+    // said about it anywhere. Reported here rather than refused at commit
+    // time: see the fix-wave report for why (the commit path would
+    // otherwise need terrain).
+    console.warn(
+      'roads with no feasible vertical alignment (committed to the graph, mesh flattened to z=0):',
+      [...infeasibleRoads.entries()],
+    )
   }
 
-  // Structures are measured against NATURAL ground, not `editLayer`. The edit
-  // layer has already been cut and filled to the design surface, so under the
-  // road it sits at the design line by construction: every station would read
-  // as level, no station could exceed the fill allowance, and neither the
-  // bridge nor the wall trigger could fire at all.
-  const built = buildNetworkMesh(network, designs, {
-    spacing: 4,
-    terrain,
-    maxFillHeight: MAX_FILL_HEIGHT,
-    corridorBatters: CORRIDOR_BATTERS,
-  })
+  for (const [, roadMesh] of built.roads) {
+    for (const layer of roadMesh.layers) {
+      if (layer.mesh.vertexCount === 0) continue
+      const mesh = new THREE.Mesh(
+        toBufferGeometry(layer.mesh),
+        new THREE.MeshStandardMaterial({
+          color: LAYER_COLOURS[layer.name] ?? 0x888888,
+          roughness: 0.9,
+          side: THREE.DoubleSide,
+        }),
+      )
+      scene.add(mesh)
+      meshes.push(mesh)
+    }
+  }
 
-  return { terrain, network, designs, editLayer, built }
+  for (const [, junctionMesh] of built.junctions) {
+    if (junctionMesh.vertexCount === 0) continue
+    const mesh = new THREE.Mesh(
+      toBufferGeometry(junctionMesh),
+      new THREE.MeshStandardMaterial({
+        color: LAYER_COLOURS.wearing ?? 0x2e3033,
+        roughness: 0.9,
+        side: THREE.DoubleSide,
+      }),
+    )
+    scene.add(mesh)
+    meshes.push(mesh)
+  }
+
+  if (built.infeasibleJunctions.size > 0) {
+    console.warn('infeasible junctions', [...built.infeasibleJunctions.entries()])
+  }
+  if (built.elevationMismatches.size > 0) {
+    console.warn('junction elevation mismatches', [...built.elevationMismatches.entries()])
+  }
+
+  for (const [, structureMesh] of built.structures) {
+    if (structureMesh.vertexCount === 0) continue
+    const mesh = new THREE.Mesh(
+      toBufferGeometry(structureMesh),
+      new THREE.MeshStandardMaterial({
+        color: STRUCTURE_COLOUR, roughness: 0.85, side: THREE.DoubleSide,
+      }),
+    )
+    scene.add(mesh)
+    meshes.push(mesh)
+  }
+
+  if (built.tightCrossings.size > 0) {
+    console.warn('crossings below minimum clearance', [...built.tightCrossings.entries()])
+  }
+
+  const terrainMesh = new THREE.Mesh(
+    terrainGeometry(terrain, 1, editLayer),
+    // DoubleSide: the raised camera can look down on the terrain from angles
+    // a near-level fixed camera never reached, and the grid winding culls as
+    // back-facing from directly above without this.
+    new THREE.MeshStandardMaterial({
+      color: 0x7a8a63, roughness: 0.95, flatShading: false, side: THREE.DoubleSide,
+    }),
+  )
+  scene.add(terrainMesh)
+  meshes.push(terrainMesh)
+
+  return meshes
+}
+
+/**
+ * Dispose a mesh's geometry and material(s).
+ *
+ * Called before removing a stale mesh from the scene, so rebuilding on every
+ * commit does not leak GPU memory for as long as the player keeps drawing
+ * roads.
+ */
+const disposeMesh = (mesh: THREE.Mesh): void => {
+  mesh.geometry.dispose()
+  if (Array.isArray(mesh.material)) {
+    for (const material of mesh.material) material.dispose()
+  } else {
+    mesh.material.dispose()
+  }
 }
 
 export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
@@ -314,8 +490,9 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   renderer.setClearColor(0x14181d)
 
   const scene = new THREE.Scene()
-  // Pushed well past the orbit radius (~1400m) so it no longer greys out
-  // the terrain and road; kept as gentle depth cueing near the far clip.
+  // Pushed well past the camera's usual working distance so it no longer
+  // greys out the terrain and road; kept as gentle depth cueing near the far
+  // clip.
   scene.fog = new THREE.Fog(0x14181d, 3800, 6000)
 
   const camera = new THREE.PerspectiveCamera(45, 1, 1, 6000)
@@ -328,67 +505,438 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   sun.position.set(-600, 900, 400)
   scene.add(sun)
 
-  const { terrain, editLayer, built } = buildSceneContent()
-  const terrainSource: { sample(x: number, y: number): number } = editLayer
+  const content = buildSceneContent()
+  const { terrain, network } = content
+  let editLayer = content.editLayer
+  let built = content.built
+  let infeasibleRoads = content.infeasibleRoads
+  let terrainSampler: TerrainSampler = editLayer
 
-  for (const [, roadMesh] of built.roads) {
-    for (const layer of roadMesh.layers) {
-      if (layer.mesh.vertexCount === 0) continue
-      scene.add(new THREE.Mesh(
-        toBufferGeometry(layer.mesh),
-        new THREE.MeshStandardMaterial({
-          color: LAYER_COLOURS[layer.name] ?? 0x888888,
-          roughness: 0.9,
-          side: THREE.DoubleSide,
-        }),
-      ))
+  // The tool draws in whatever class the player picked; there is no class
+  // picker yet, so it draws rural roads until the selection UI exists.
+  const tool = new DrawTool(network, 'rural')
+
+  let networkMeshes = addNetworkMeshes(scene, terrain, editLayer, built, infeasibleRoads)
+
+  /**
+   * Regrade, re-excavate and rebuild every mesh from the network's current
+   * state, and swap the scene's meshes for the result.
+   *
+   * Called after a successful commit. Everything is rebuilt, not just the
+   * roads the commit touched — see `solveNetwork`'s docstring for why that is
+   * an accepted, known limitation rather than a bug.
+   */
+  const rebuildNetworkMeshes = (): void => {
+    const result = solveNetwork(terrain, network)
+    editLayer = result.editLayer
+    built = result.built
+    infeasibleRoads = result.infeasibleRoads
+    terrainSampler = editLayer
+
+    for (const mesh of networkMeshes) {
+      scene.remove(mesh)
+      disposeMesh(mesh)
+    }
+    networkMeshes = addNetworkMeshes(scene, terrain, editLayer, built, infeasibleRoads)
+  }
+
+  const attemptCommit = (): void => {
+    const result = tool.commit()
+    if (result.ok) {
+      rebuildNetworkMeshes()
+    } else {
+      console.warn('commit rejected:', result.rejection.reason, result.rejection)
     }
   }
 
-  for (const [, junctionMesh] of built.junctions) {
-    if (junctionMesh.vertexCount === 0) continue
-    scene.add(new THREE.Mesh(
-      toBufferGeometry(junctionMesh),
-      new THREE.MeshStandardMaterial({
-        color: LAYER_COLOURS.wearing ?? 0x2e3033,
-        roughness: 0.9,
-        side: THREE.DoubleSide,
-      }),
-    ))
+  // --- Camera rig ---------------------------------------------------------
+  //
+  // Targets the same place the old automatic orbit circled — ORBIT_CENTER
+  // converted from three.js's (x, z, -y) back to the project's (x, y, z) — and
+  // starts at the distance the old fixed radius/height implied, so the
+  // initial framing is unchanged even though the motion is now pointer-driven
+  // instead of automatic.
+  const RIG_TARGET: RigVec3 = { x: 1300, y: 1300, z: 105 }
+  const RIG_INITIAL_DISTANCE = Math.hypot(1400, 700)
+  const rig = new CameraRig(RIG_TARGET, RIG_INITIAL_DISTANCE)
+
+  /** Project convention `(x, y, z)`, `z` up, to three.js's `(x, z, -y)`. Must
+   * stay the exact inverse of `threeToProject` below. Takes the camera rig's
+   * own `Vec3` — this is only ever called with `rig.position`/`rig.target`. */
+  const toThreePosition = (p: RigVec3): THREE.Vector3 => new THREE.Vector3(p.x, p.z, -p.y)
+
+  /** three.js's `(x, y, z)` back to the project's `(x, y, z)`, `z` up. The
+   * inverse of `meshAdapter.ts`'s `(x, y, z) -> (x, z, -y)`: three.x = x,
+   * three.y = z, three.z = -y, so x = three.x, z = three.y, y = -three.z.
+   * Returns the ground-cast's own `Vec3` — this only ever feeds `Ray3`. */
+  const threeToProject = (v: THREE.Vector3): GroundVec3 => ({
+    x: v.x,
+    y: -v.z,
+    z: v.y,
+  })
+
+  const updateCameraFromRig = (): void => {
+    camera.position.copy(toThreePosition(rig.position))
+    camera.lookAt(toThreePosition(rig.target))
   }
 
-  if (built.infeasibleJunctions.size > 0) {
-    console.warn('infeasible junctions', [...built.infeasibleJunctions.entries()])
-  }
-  if (built.elevationMismatches.size > 0) {
-    console.warn('junction elevation mismatches', [...built.elevationMismatches.entries()])
+  // --- Pointer -> world ray ------------------------------------------------
+  const raycaster = new THREE.Raycaster()
+
+  /**
+   * Where a pointer at client coordinates hits the ground, in the project's
+   * convention — or `undefined` if it points at the sky.
+   *
+   * Marches the heightfield (`rayTerrainIntersection`), not the rendered
+   * terrain mesh: the whole reason the ray-march exists is that the picked
+   * position must not depend on the mesh's tessellation.
+   */
+  const worldPositionAt = (clientX: number, clientY: number): Vec2 | undefined => {
+    const rect = canvas.getBoundingClientRect()
+    if (rect.width === 0 || rect.height === 0) return undefined
+
+    const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1
+    const ndcY = -((clientY - rect.top) / rect.height) * 2 + 1
+    raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera)
+
+    const ray: Ray3 = {
+      origin: threeToProject(raycaster.ray.origin),
+      direction: threeToProject(raycaster.ray.direction),
+    }
+    return rayTerrainIntersection(ray, terrainSampler)
   }
 
-  const STRUCTURE_COLOUR = 0x9a958c
+  // --- Draw preview --------------------------------------------------------
+  /** How far apart, along the previewed alignment, the curve is sampled for
+   * the provisional line — well inside "a few metres". */
+  const PREVIEW_SAMPLE_SPACING = 5
+  /** Height above terrain the preview and marker are lifted, so they never
+   * z-fight the ground they are drawn over. */
+  const PREVIEW_MARGIN = 0.3
 
-  for (const [, structureMesh] of built.structures) {
-    if (structureMesh.vertexCount === 0) continue
-    scene.add(new THREE.Mesh(
-      toBufferGeometry(structureMesh),
-      new THREE.MeshStandardMaterial({
-        color: STRUCTURE_COLOUR, roughness: 0.85, side: THREE.DoubleSide,
-      }),
-    ))
+  const SNAP_COLOURS: Record<SnapTarget['kind'], number> = {
+    free: 0xffffff,
+    node: 0xffcc00,
+    road: 0x33ccff,
   }
 
-  if (built.tightCrossings.size > 0) {
-    console.warn('crossings below minimum clearance', [...built.tightCrossings.entries()])
+  /** What the pointer last resolved to, independent of the tool's own
+   * (private) hover state — recomputed alongside `tool.hover()` from the same
+   * pure function, so the marker can show its kind. */
+  let hoverSnap: SnapTarget | undefined
+
+  let previewLine: THREE.Line | undefined
+  const previewOkMaterial = new THREE.LineBasicMaterial({ color: 0xbfe3ff })
+  const previewWarnMaterial = new THREE.LineBasicMaterial({ color: 0xff5533 })
+
+  const marker = new THREE.Mesh(
+    new THREE.SphereGeometry(2.5, 12, 8),
+    new THREE.MeshBasicMaterial({ color: SNAP_COLOURS.free }),
+  )
+  marker.visible = false
+  scene.add(marker)
+
+  const projectToThree = (p: Vec2, extraMargin = 0): THREE.Vector3 => {
+    const z = terrainSampler.sample(p.x, p.y) + PREVIEW_MARGIN + extraMargin
+    return new THREE.Vector3(p.x, z, -p.y)
   }
 
-  scene.add(new THREE.Mesh(
-    terrainGeometry(terrain, 1, terrainSource),
-    // DoubleSide: the raised orbit camera looks down on the terrain from
-    // angles the old near-level fixed camera never reached, and the grid
-    // winding culls as back-facing from directly above without this.
-    new THREE.MeshStandardMaterial({
-      color: 0x7a8a63, roughness: 0.95, flatShading: false, side: THREE.DoubleSide,
-    }),
-  ))
+  /** Log a rejection once per distinct cause, not once per frame. */
+  let lastLoggedRejectionKey: string | undefined
+  const logRejection = (rejection: PolylineRejection | undefined): void => {
+    if (!rejection) {
+      lastLoggedRejectionKey = undefined
+      return
+    }
+    const key = JSON.stringify(rejection)
+    if (key === lastLoggedRejectionKey) return
+    lastLoggedRejectionKey = key
+    console.warn('draw preview rejected:', rejection.reason, rejection)
+  }
+
+  const setPreviewGeometry = (points: THREE.Vector3[], material: THREE.LineBasicMaterial): void => {
+    const geometry = new THREE.BufferGeometry().setFromPoints(points)
+    if (previewLine) {
+      previewLine.geometry.dispose()
+      previewLine.geometry = geometry
+      previewLine.material = material
+    } else {
+      previewLine = new THREE.Line(geometry, material)
+      scene.add(previewLine)
+    }
+  }
+
+  const clearPreviewLine = (): void => {
+    if (!previewLine) return
+    scene.remove(previewLine)
+    previewLine.geometry.dispose()
+    previewLine = undefined
+  }
+
+  /**
+   * Rebuild the preview line and snap marker from the tool's current state.
+   *
+   * Runs every frame. The geometry is disposed before every replacement (via
+   * `setPreviewGeometry`/`clearPreviewLine`), so a preview rebuilt on every
+   * frame while drawing does not leak GPU memory.
+   */
+  const updatePreview = (): void => {
+    const preview = tool.preview
+
+    if (!preview) {
+      clearPreviewLine()
+      logRejection(undefined)
+    } else if (preview.ok) {
+      const points = preview.alignment
+        .sample(PREVIEW_SAMPLE_SPACING)
+        .map((pose) => projectToThree(pose.position))
+      setPreviewGeometry(points, previewOkMaterial)
+      logRejection(undefined)
+    } else {
+      // The shape the player asked for, straight between the points they
+      // placed (plus wherever they are hovering now) — not the curve
+      // builder, which is exactly what failed.
+      const rawPoints = hoverSnap ? [...tool.points, hoverSnap.position] : [...tool.points]
+      const points = rawPoints.map((p) => projectToThree(p))
+      setPreviewGeometry(points, previewWarnMaterial)
+      logRejection(preview.rejection)
+    }
+
+    if (hoverSnap) {
+      marker.position.copy(projectToThree(hoverSnap.position, 0.1))
+      ;(marker.material as THREE.MeshBasicMaterial).color.setHex(SNAP_COLOURS[hoverSnap.kind])
+      marker.visible = true
+    } else {
+      marker.visible = false
+    }
+  }
+
+  // --- Pointer input: camera control, hover and placement -----------------
+  const ORBIT_RADIANS_PER_PIXEL = 0.005
+  /** Multiplicative per unit of wheel delta, so zoom feels the same at every
+   * scale rather than shrinking to nothing far out or exploding up close. */
+  const ZOOM_SENSITIVITY = 0.0015
+  /** Pointer movement, in pixels, beyond which a left-button gesture is a
+   * drag rather than a click. */
+  const CLICK_MOVE_THRESHOLD_PX = 5
+  /** Window within which a second click is treated as a double click rather
+   * than two independent placements. */
+  const DOUBLE_CLICK_MS = 300
+
+  type DragMode = 'orbit' | 'pan' | 'place'
+  type DragState = {
+    readonly mode: DragMode
+    readonly pointerId: number
+    /** The button that started this drag (`PointerEvent.button`). A mouse
+     * reuses one `pointerId` for every button, so ending a drag has to check
+     * this too — otherwise releasing the right button while the left is
+     * still held is taken as ending the left-button drag. */
+    readonly button: number
+    lastX: number
+    lastY: number
+    readonly startX: number
+    readonly startY: number
+    moved: boolean
+  }
+
+  let drag: DragState | undefined
+  let pendingClickTimer: number | undefined
+
+  /**
+   * Suppress-snap modifier for §4.1's "a held modifier suppresses all
+   * snapping". Shift is already orbit's modifier (see `onPointerDown`), so
+   * this uses Alt/Option instead — the scene binds no other behaviour to it,
+   * and unlike Ctrl it carries no legacy "emulate a right click" meaning on
+   * any current platform.
+   */
+  const suppressSnapModifier = (event: MouseEvent): boolean => event.altKey
+
+  const updateHover = (event: PointerEvent): void => {
+    const worldPosition = worldPositionAt(event.clientX, event.clientY)
+    if (!worldPosition) {
+      hoverSnap = undefined
+      return
+    }
+    const suppressSnap = suppressSnapModifier(event)
+    tool.hover(worldPosition, suppressSnap)
+    hoverSnap = suppressSnap
+      ? { kind: 'free', position: worldPosition }
+      : resolveSnap(network, worldPosition, SNAP_RADIUS)
+  }
+
+  const onPointerDown = (event: PointerEvent): void => {
+    if (drag) return
+
+    let mode: DragMode
+    if (event.button === 2 || (event.button === 0 && event.shiftKey)) mode = 'orbit'
+    else if (event.button === 1) mode = 'pan'
+    else if (event.button === 0) mode = 'place'
+    else return
+
+    canvas.setPointerCapture(event.pointerId)
+    drag = {
+      mode,
+      pointerId: event.pointerId,
+      button: event.button,
+      lastX: event.clientX,
+      lastY: event.clientY,
+      startX: event.clientX,
+      startY: event.clientY,
+      moved: false,
+    }
+  }
+
+  const onPointerMove = (event: PointerEvent): void => {
+    if (drag && drag.pointerId === event.pointerId) {
+      const dx = event.clientX - drag.lastX
+      const dy = event.clientY - drag.lastY
+      drag.lastX = event.clientX
+      drag.lastY = event.clientY
+      if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > CLICK_MOVE_THRESHOLD_PX) {
+        drag.moved = true
+      }
+
+      if (drag.mode === 'orbit') {
+        // Dragging right turns the world left, as in every map: positive dx
+        // (pointer moving right) yaws the camera the opposite way round.
+        rig.orbit(-dx * ORBIT_RADIANS_PER_PIXEL, -dy * ORBIT_RADIANS_PER_PIXEL)
+      } else if (drag.mode === 'pan') {
+        // World-space size of one pixel at the target's distance, so the
+        // ground point under the pointer keeps pace with it whatever the
+        // zoom, rather than panning faster or slower far out than up close.
+        const verticalFovRadians = (camera.fov * Math.PI) / 180
+        const worldPerPixel =
+          (2 * rig.distance * Math.tan(verticalFovRadians / 2)) / Math.max(1, canvas.clientHeight)
+        rig.pan(-dx * worldPerPixel, dy * worldPerPixel)
+      }
+      // 'place' mode: no camera or hover update while a potential click is
+      // still being distinguished from a drag.
+      return
+    }
+
+    updateHover(event)
+  }
+
+  /**
+   * End the drag matching this pointer, regardless of which button the event
+   * reports — used by `pointercancel`, which is not tied to any one button
+   * and must always terminate whatever drag is in progress.
+   */
+  const endDrag = (event: PointerEvent): DragState | undefined => {
+    if (!drag || drag.pointerId !== event.pointerId) return undefined
+    const finished = drag
+    drag = undefined
+    if (canvas.hasPointerCapture(event.pointerId)) {
+      canvas.releasePointerCapture(event.pointerId)
+    }
+    return finished
+  }
+
+  /** Clear a pending single-click timer without running the deferred
+   * placement it guards — used wherever the pending gesture is resolved by
+   * some other action (a keyboard commit/cancel/undo) or superseded by a
+   * second click, so a click the player already moved on from cannot still
+   * land 300ms later as a phantom point. */
+  const cancelPendingClick = (): void => {
+    if (pendingClickTimer === undefined) return
+    window.clearTimeout(pendingClickTimer)
+    pendingClickTimer = undefined
+  }
+
+  const onPointerUp = (event: PointerEvent): void => {
+    // A mouse reuses one pointerId across every button, so a right-button-up
+    // while the left button still holds this drag must not be mistaken for
+    // ending it — only the button that started the drag can end it. Leave
+    // the drag (and its pointer capture) exactly as it was.
+    if (drag && drag.pointerId === event.pointerId && drag.button !== event.button) return
+
+    const finished = endDrag(event)
+    if (!finished || finished.mode !== 'place' || finished.moved) return
+
+    const worldPosition = worldPositionAt(event.clientX, event.clientY)
+    if (!worldPosition) return
+
+    const suppressSnap = suppressSnapModifier(event)
+
+    if (pendingClickTimer !== undefined) {
+      // Second click within the window: a double click. It keeps the point
+      // this click itself was given — the road being committed should
+      // include where the player just clicked, not silently end one point
+      // short — then commits rather than placing a third point.
+      cancelPendingClick()
+      tool.place(worldPosition, suppressSnap)
+      attemptCommit()
+    } else {
+      pendingClickTimer = window.setTimeout(() => {
+        pendingClickTimer = undefined
+        tool.place(worldPosition, suppressSnap)
+      }, DOUBLE_CLICK_MS)
+    }
+  }
+
+  const onPointerCancel = (event: PointerEvent): void => {
+    endDrag(event)
+  }
+
+  /** Approximate CSS pixels per "line" when a `WheelEvent` reports
+   * `DOM_DELTA_LINE` — Firefox's default unit for an ordinary mouse wheel,
+   * against Chrome/Safari's `DOM_DELTA_PIXEL`. Without normalising this,
+   * Firefox's deltaY of a few lines per notch reads as a few pixels, and
+   * zoom moves at roughly 0.45% of the speed it does elsewhere. 16px matches
+   * Firefox's own default wheel line height. */
+  const WHEEL_LINE_HEIGHT_PX = 16
+
+  /** `deltaY` normalised to the same "pixels" unit regardless of which mode
+   * the browser reported it in. */
+  const normalizedWheelDeltaY = (event: WheelEvent): number => {
+    switch (event.deltaMode) {
+      case WheelEvent.DOM_DELTA_LINE:
+        return event.deltaY * WHEEL_LINE_HEIGHT_PX
+      case WheelEvent.DOM_DELTA_PAGE:
+        return event.deltaY * Math.max(1, canvas.clientHeight)
+      default:
+        return event.deltaY
+    }
+  }
+
+  const onWheel = (event: WheelEvent): void => {
+    event.preventDefault()
+    rig.zoom(Math.exp(normalizedWheelDeltaY(event) * ZOOM_SENSITIVITY))
+  }
+
+  const onContextMenu = (event: MouseEvent): void => {
+    event.preventDefault()
+  }
+
+  const onKeyDown = (event: KeyboardEvent): void => {
+    switch (event.key) {
+      case 'Enter':
+        event.preventDefault()
+        cancelPendingClick()
+        attemptCommit()
+        break
+      case 'Escape':
+        event.preventDefault()
+        cancelPendingClick()
+        tool.cancel()
+        break
+      case 'Backspace':
+        event.preventDefault()
+        cancelPendingClick()
+        tool.undoLastPoint()
+        break
+      default:
+        break
+    }
+  }
+
+  canvas.addEventListener('pointerdown', onPointerDown)
+  canvas.addEventListener('pointermove', onPointerMove)
+  canvas.addEventListener('pointerup', onPointerUp)
+  canvas.addEventListener('pointercancel', onPointerCancel)
+  canvas.addEventListener('wheel', onWheel, { passive: false })
+  canvas.addEventListener('contextmenu', onContextMenu)
+  window.addEventListener('keydown', onKeyDown)
 
   // A window `resize` event alone isn't enough: it fires only for the
   // window's own dimensions, not for every reason the canvas's box can
@@ -422,11 +970,8 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   })
   resizeObserver.observe(canvas)
 
-  // Slow automatic orbit around the road's midpoint, at a raised angle
-  // looking down, so every side of the terrain and the layer stepping is
-  // eventually visible without manual input.
   let frame = 0
-  const tick = (timeMs: number) => {
+  const tick = (): void => {
     frame = requestAnimationFrame(tick)
     // Belt and suspenders alongside the ResizeObserver above: cheap enough
     // to check every frame, and it catches the box changing size for any
@@ -435,20 +980,41 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     // callback at all), rather than leaving the canvas stuck at a stale
     // resolution until something else happens to touch it.
     resize(canvas.clientWidth, canvas.clientHeight)
-    const angle = (timeMs / 1000 / ORBIT_PERIOD_S) * Math.PI * 2
-    camera.position.set(
-      ORBIT_CENTER.x + Math.cos(angle) * ORBIT_RADIUS,
-      ORBIT_CENTER.y + ORBIT_HEIGHT,
-      ORBIT_CENTER.z + Math.sin(angle) * ORBIT_RADIUS,
-    )
-    camera.lookAt(ORBIT_CENTER)
+    updateCameraFromRig()
+    updatePreview()
     renderer.render(scene, camera)
   }
-  tick(0)
+  tick()
 
   return () => {
     cancelAnimationFrame(frame)
     resizeObserver.disconnect()
+    canvas.removeEventListener('pointerdown', onPointerDown)
+    canvas.removeEventListener('pointermove', onPointerMove)
+    canvas.removeEventListener('pointerup', onPointerUp)
+    canvas.removeEventListener('pointercancel', onPointerCancel)
+    canvas.removeEventListener('wheel', onWheel)
+    canvas.removeEventListener('contextmenu', onContextMenu)
+    window.removeEventListener('keydown', onKeyDown)
+    cancelPendingClick()
+
+    // Every road/terrain/junction/structure mesh built by `addNetworkMeshes`
+    // (including the terrain surface itself, last in that array), plus the
+    // preview line, both preview materials and the snap marker — everything
+    // this function allocated on the GPU, not just the renderer. Without
+    // this, every road drawn and every rebuild leaks its geometries and
+    // materials for as long as the page stays open.
+    for (const mesh of networkMeshes) {
+      scene.remove(mesh)
+      disposeMesh(mesh)
+    }
+    clearPreviewLine()
+    previewOkMaterial.dispose()
+    previewWarnMaterial.dispose()
+    scene.remove(marker)
+    marker.geometry.dispose()
+    ;(marker.material as THREE.MeshBasicMaterial).dispose()
+
     renderer.dispose()
   }
 }

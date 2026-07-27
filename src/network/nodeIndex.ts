@@ -24,7 +24,7 @@ export class NodeIndex {
   constructor(private readonly radius: number) {
     if (radius > CELL_SIZE) {
       throw new RangeError(
-        `search radius ${radius} exceeds cell size ${CELL_SIZE}; the neighbourhood scan would miss nodes`,
+        `default search radius ${radius} exceeds cell size ${CELL_SIZE}; the default one-ring scan would miss nodes`,
       )
     }
   }
@@ -62,25 +62,31 @@ export class NodeIndex {
   }
 
   /**
-   * Every indexed id within the radius of a position, ascending.
+   * Every indexed id within a radius of a position, ascending.
+   *
+   * The scan covers as many rings of cells as the radius spans, so a caller
+   * may search wider than the index's default radius — the drawing tool's
+   * snap distance is metres of usability, not the half-metre at which two
+   * road ends are the same node.
    *
    * Ascending order is not cosmetic. Ids are allocated from a counter, so
    * ascending id is creation order, and the graph's documented snapping rule
    * is that the first node created at a location wins. A grid scan visits
    * cells in an order that has nothing to do with creation, so the sort is
-   * what keeps the answer identical to the linear scan it replaces.
+   * what keeps the answer identical to the linear scan it replaced.
    */
-  nearby(position: Vec2): number[] {
+  nearby(position: Vec2, radius: number = this.radius): number[] {
     const [cx, cy] = NodeIndex.cellOf(position)
+    const rings = Math.max(1, Math.ceil(radius / CELL_SIZE))
     const found: number[] = []
 
-    for (let dx = -1; dx <= 1; dx++) {
-      for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -rings; dx <= rings; dx++) {
+      for (let dy = -rings; dy <= rings; dy++) {
         const bucket = this.cells.get(NodeIndex.key(cx + dx, cy + dy))
         if (!bucket) continue
         for (const id of bucket) {
           const p = this.positions.get(id)
-          if (p && distance(p, position) <= this.radius) found.push(id)
+          if (p && distance(p, position) <= radius) found.push(id)
         }
       }
     }
