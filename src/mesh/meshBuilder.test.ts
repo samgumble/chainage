@@ -123,4 +123,75 @@ describe('MeshBuilder geometry', () => {
       expect(Number.isFinite(m.normals[i])).toBe(true)
     }
   })
+
+  it('projects UV from the dominant normal axis so a vertical face varies across its height', () => {
+    const b = new MeshBuilder()
+    // A tall retaining-wall panel in the x=0 plane, facing +x: 1m wide (y),
+    // 3m tall (z). A plain (x, y) projection would pin every vertex's U to
+    // x/4 = 0 and leave V depending only on y — moving straight up the wall
+    // (constant x, constant y) would not move the UV at all, collapsing the
+    // whole height to one texture point.
+    b.addQuad(
+      { x: 0, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }, { x: 0, y: 1, z: 3 }, { x: 0, y: 0, z: 3 },
+    )
+    const m = b.build()
+    const uvAt = (i: number): [number, number] => [m.uvs[i * 2]!, m.uvs[i * 2 + 1]!]
+    const bottom = uvAt(0) // (x=0, y=0, z=0)
+    const top = uvAt(3) // (x=0, y=0, z=3) — directly above `bottom`
+    // Moving straight up the wall must move the UV: the normal is mostly
+    // +x, so U/V come from (y, z), and z changed even though x and y did not.
+    expect(Math.abs(top[0] - bottom[0]) + Math.abs(top[1] - bottom[1])).toBeGreaterThan(0.1)
+    expect(bottom).toEqual([0, 0])
+    expect(top[1]).toBeCloseTo(3 / 4, 6)
+  })
+
+  it('averages both triangle normals for a non-planar quad, and keeps both triangles winding to agree with it', () => {
+    const b = new MeshBuilder()
+    // a, b, c lie in z=0; d is lifted well out of that plane. On a curve,
+    // consecutive wall posts are exactly this: the two triangles making up
+    // the panel are not coplanar, so (a,b,c)'s normal and (a,c,d)'s normal
+    // genuinely diverge.
+    b.addQuad(
+      { x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }, { x: 1, y: 1, z: 0 }, { x: 0, y: 1, z: 3 },
+    )
+    const m = b.build()
+    // Every vertex of the quad must carry the same (averaged) normal.
+    const n0 = [m.normals[0]!, m.normals[1]!, m.normals[2]!]
+    for (let i = 1; i < m.vertexCount; i++) {
+      expect(m.normals[i * 3]).toBeCloseTo(n0[0]!, 6)
+      expect(m.normals[i * 3 + 1]).toBeCloseTo(n0[1]!, 6)
+      expect(m.normals[i * 3 + 2]).toBeCloseTo(n0[2]!, 6)
+    }
+    // Both triangles' true (actual-geometry) normals must still agree in
+    // direction with the stored, averaged normal.
+    for (let t = 0; t < m.indices.length; t += 3) {
+      const [i, j, k] = [m.indices[t]!, m.indices[t + 1]!, m.indices[t + 2]!]
+      const ax = m.positions[i * 3]!, ay = m.positions[i * 3 + 1]!, az = m.positions[i * 3 + 2]!
+      const ux = m.positions[j * 3]! - ax, uy = m.positions[j * 3 + 1]! - ay, uz = m.positions[j * 3 + 2]! - az
+      const vx = m.positions[k * 3]! - ax, vy = m.positions[k * 3 + 1]! - ay, vz = m.positions[k * 3 + 2]! - az
+      const fx = uy * vz - uz * vy, fy = uz * vx - ux * vz, fz = ux * vy - uy * vx
+      const dot = fx * m.normals[i * 3]! + fy * m.normals[i * 3 + 1]! + fz * m.normals[i * 3 + 2]!
+      expect(dot).toBeGreaterThan(0)
+    }
+  })
+
+  it('tessellates a concave quad as a fan, not a strip', () => {
+    const b = new MeshBuilder()
+    // A concave ("dart") planar quad, CCW: c is pulled in near the a-d edge,
+    // making it a reflex vertex. For a convex quad, fan tessellation
+    // (a,b,c),(a,c,d) and strip tessellation (a,b,c),(b,c,d) give identical
+    // winding, counts and total area — indistinguishable by any test that
+    // only checks those. Only a concave quad tells them apart: the fan
+    // covers the whole quad; the strip's second triangle (b,c,d) does not,
+    // and even winds the opposite way.
+    b.addQuad(
+      { x: 0, y: 0, z: 0 }, { x: 4, y: 0, z: 0 }, { x: 1, y: 1, z: 0 }, { x: 0, y: 4, z: 0 },
+    )
+    const m = b.build()
+    // First triangle is always (a, b, c).
+    expect(Array.from(m.indices.slice(0, 3))).toEqual([0, 1, 2])
+    // Second triangle must be the fan diagonal (a, c, d) = (base, base+2,
+    // base+3), not the strip diagonal (b, c, d) = (base+1, base+2, base+3).
+    expect(Array.from(m.indices.slice(3, 6))).toEqual([0, 2, 3])
+  })
 })

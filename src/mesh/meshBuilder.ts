@@ -46,9 +46,15 @@ export class MeshBuilder {
 
   addQuad(a: Point3, b: Point3, c: Point3, d: Point3): void {
     const base = this.vertexCount
-    // The normal comes from the first three corners; a quad is assumed planar
-    // enough that the fourth agrees, which is true for every box face here.
-    const normal = faceNormal(a, b, c)
+    // A planar quad's two triangles, (a, b, c) and (a, c, d), share one true
+    // normal. A non-planar quad's do not — that happens for real on curves,
+    // where consecutive wall posts along an alignment are not coplanar. We
+    // average the two triangle normals and store that on all four vertices,
+    // splitting the error between them instead of loading it all onto the
+    // second triangle.
+    const n1 = faceNormal(a, b, c)
+    const n2 = faceNormal(a, c, d)
+    const normal = averageNormal(n1, n2)
     for (const point of [a, b, c, d]) this.push(point, normal)
     this.indices.push(base, base + 1, base + 2)
     this.indices.push(base, base + 2, base + 3)
@@ -68,7 +74,8 @@ export class MeshBuilder {
   private push(point: Point3, normal: Point3): void {
     this.positions.push(point.x, point.y, point.z)
     this.normals.push(normal.x, normal.y, normal.z)
-    this.uvs.push(point.x / UV_METRES_PER_TILE, point.y / UV_METRES_PER_TILE)
+    const [u, v] = projectUV(point, normal)
+    this.uvs.push(u, v)
   }
 }
 
@@ -84,4 +91,34 @@ const faceNormal = (a: Point3, b: Point3, c: Point3): Point3 => {
   const len = Math.hypot(nx, ny, nz)
   if (len === 0) return { x: 0, y: 0, z: 0 }
   return { x: nx / len, y: ny / len, z: nz / len }
+}
+
+/** Average of two face normals, re-normalized. Zero if they cancel exactly. */
+const averageNormal = (a: Point3, b: Point3): Point3 => {
+  const x = a.x + b.x, y = a.y + b.y, z = a.z + b.z
+  const len = Math.hypot(x, y, z)
+  if (len === 0) return { x: 0, y: 0, z: 0 }
+  return { x: x / len, y: y / len, z: z / len }
+}
+
+/**
+ * Dominant-axis planar UV projection.
+ *
+ * A single (x, y) projection collapses vertical faces — retaining wall
+ * panels, bridge piers, abutments — to a near-constant UV down their whole
+ * height, since x and y barely change as you move up a vertical face. Instead
+ * we pick the two world axes to project from whichever component of the
+ * face's normal is largest in magnitude, so the projection always spans the
+ * two axes the face actually varies across:
+ *  - normal mostly ±x (a face looking along x) → project (y, z)
+ *  - normal mostly ±y → project (x, z)
+ *  - normal mostly ±z (a horizontal face, e.g. a deck top) → project (x, y)
+ */
+const projectUV = (point: Point3, normal: Point3): readonly [number, number] => {
+  const ax = Math.abs(normal.x)
+  const ay = Math.abs(normal.y)
+  const az = Math.abs(normal.z)
+  if (ax >= ay && ax >= az) return [point.y / UV_METRES_PER_TILE, point.z / UV_METRES_PER_TILE]
+  if (ay >= ax && ay >= az) return [point.x / UV_METRES_PER_TILE, point.z / UV_METRES_PER_TILE]
+  return [point.x / UV_METRES_PER_TILE, point.y / UV_METRES_PER_TILE]
 }
