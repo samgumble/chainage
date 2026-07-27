@@ -1,7 +1,7 @@
 import type { JunctionLeg } from './junctionLegs'
 import type { JunctionGeometry } from './junctionCorners'
 import type { MeshData } from './ribbon'
-import { type Vec2, add, scale, fromAngle } from '../geometry/vec2'
+import { type Vec2, add, scale, leftNormal } from '../geometry/vec2'
 
 const EMPTY: MeshData = {
   positions: new Float32Array(0),
@@ -60,7 +60,7 @@ export const buildJunctionMesh = (
   for (let i = 0; i < n; i++) {
     const leg = legs[i]!
     const trim = geometry.trims[i]!
-    const left = fromAngle(leg.bearing + Math.PI / 2)
+    const left = leftNormal(leg.bearing)
     const along = scale(leg.direction, trim)
 
     // Right edge first, then left, so the boundary runs counter-clockwise.

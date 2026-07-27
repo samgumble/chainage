@@ -1,5 +1,5 @@
 import type { Alignment } from '../geometry/alignment'
-import { fromAngle, add, scale } from '../geometry/vec2'
+import { add, scale, leftNormal } from '../geometry/vec2'
 import { designElevationAtStation, type ProfilePoint } from '../terrain/groundProfile'
 import type { SectionPoint } from './crossSection'
 
@@ -129,7 +129,7 @@ export const sweepRibbon = (
   for (const s of stations) {
     const pose = alignment.poseAt(s)
     // Left of the direction of travel.
-    const normal = fromAngle(pose.heading + Math.PI / 2)
+    const normal = leftNormal(pose.heading)
     const designZ = designElevationAtStation(design, s)
 
     for (let j = 0; j < across; j++) {

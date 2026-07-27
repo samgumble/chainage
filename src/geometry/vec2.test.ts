@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   vec2, add, sub, scale, dot, cross, length, distance, normalize,
-  fromAngle, angleOf, normalizeAngle, signedAngleBetween,
+  fromAngle, angleOf, normalizeAngle, signedAngleBetween, leftNormal,
 } from './vec2'
 
 describe('vec2 arithmetic', () => {
@@ -76,5 +76,22 @@ describe('vec2 angles', () => {
     expect(signedAngleBetween(v45, v135)).toBeCloseTo(Math.PI / 2, 9)
     // Reverse should give −π/2
     expect(signedAngleBetween(v135, v45)).toBeCloseTo(-Math.PI / 2, 9)
+  })
+
+  it('leftNormal is heading rotated +90 degrees', () => {
+    // Facing east (+x), left is north (+y).
+    const left = leftNormal(0)
+    expect(left.x).toBeCloseTo(0, 9)
+    expect(left.y).toBeCloseTo(1, 9)
+    // Facing north (+y), left is west (-x).
+    const leftOfNorth = leftNormal(Math.PI / 2)
+    expect(leftOfNorth.x).toBeCloseTo(-1, 9)
+    expect(leftOfNorth.y).toBeCloseTo(0, 9)
+    // Agrees exactly with fromAngle(heading + PI/2) for an arbitrary heading.
+    const heading = 0.73
+    const expected = fromAngle(heading + Math.PI / 2)
+    const actual = leftNormal(heading)
+    expect(actual.x).toBeCloseTo(expected.x, 12)
+    expect(actual.y).toBeCloseTo(expected.y, 12)
   })
 })

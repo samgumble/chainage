@@ -1,5 +1,5 @@
 import type { JunctionLeg } from './junctionLegs'
-import { type Vec2, add, sub, scale, dot, cross, fromAngle } from '../geometry/vec2'
+import { type Vec2, add, sub, scale, dot, cross, leftNormal } from '../geometry/vec2'
 
 /** Where two adjacent legs' facing edges cross. */
 export type JunctionCorner = {
@@ -91,9 +91,8 @@ export const solveJunction = (
     const legI = legs[i]!
     const legJ = legs[j]!
 
-    // Left of a direction is that direction rotated +90 degrees.
-    const leftI = fromAngle(legI.bearing + Math.PI / 2)
-    const leftJ = fromAngle(legJ.bearing + Math.PI / 2)
+    const leftI = leftNormal(legI.bearing)
+    const leftJ = leftNormal(legJ.bearing)
 
     // Leg i's left edge, and leg j's right edge, both offset from the node.
     const originI = scale(leftI, legI.halfWidth)
