@@ -64,6 +64,39 @@ const nearestStation = (
 }
 
 /**
+ * The road whose centreline currently passes within `tolerance` of a
+ * position, and the station there — or `undefined` if no road does.
+ *
+ * Unlike `resolveSnap`, this expresses no preference for nodes: it answers
+ * "which road passes through this exact position", not "what is the player
+ * pointing at". That distinction matters for re-deriving containment after a
+ * mutation — for instance at commit time, once an earlier split may have
+ * replaced the road a point was originally snapped to. `resolveSnap`'s wide,
+ * node-first radius would resolve a position near a node an earlier split
+ * just created back to that node, skipping the very split it is being asked
+ * to determine.
+ *
+ * A tight tolerance — a tenth of a metre or so — is right: a position
+ * reaching this function came from a snap onto a centreline, so it already
+ * sits on the road to within floating-point noise. A loose tolerance would
+ * start claiming a road the point merely passes near.
+ */
+export const roadAt = (
+  network: RoadNetwork,
+  position: Vec2,
+  tolerance: number,
+): { readonly roadId: RoadId; readonly station: number } | undefined => {
+  let best: { roadId: RoadId; station: number; distance: number } | undefined
+  for (const road of network.roads) {
+    const candidate = nearestStation(network, road.id, position)
+    if (candidate.distance <= tolerance && (!best || candidate.distance < best.distance)) {
+      best = { roadId: road.id, station: candidate.station, distance: candidate.distance }
+    }
+  }
+  return best ? { roadId: best.roadId, station: best.station } : undefined
+}
+
+/**
  * What a pointer position means.
  *
  * Nodes beat roads: a node is itself a point on a road, and a player pointing
