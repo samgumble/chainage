@@ -7,7 +7,7 @@ import { sampleGroundProfile, designElevationAtStation, type ProfilePoint } from
 import { solveGradeProfile } from '../terrain/gradeSolver'
 import { TerrainEditLayer } from '../terrain/editLayer'
 import { designSurfaceAtOffset, type CorridorTemplate, type CorridorBatters } from '../terrain/corridor'
-import { ROAD_CLASSES, formationHalfWidth, totalPavementThickness, type RoadClassName } from '../mesh/roadClass'
+import { ROAD_CLASSES, formationHalfWidth, totalPavementThickness, type RoadClassName } from '../network/roadClass'
 import { toBufferGeometry } from '../render/meshAdapter'
 import { terrainGeometry } from '../render/terrainMesh'
 import { RoadNetwork, type RoadId } from '../network/graph'

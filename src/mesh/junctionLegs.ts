@@ -1,6 +1,6 @@
 import type { RoadNetwork, NodeId, RoadId } from '../network/graph'
 import { type Vec2, fromAngle, normalizeAngle } from '../geometry/vec2'
-import { ROAD_CLASSES, formationHalfWidth } from './roadClass'
+import { ROAD_CLASSES, formationHalfWidth } from '../network/roadClass'
 
 /**
  * One road end arriving at a junction node.

@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { RoadNetwork, NODE_SNAP_DISTANCE, type Road, type NetworkNode, type RoadEnd } from './graph'
 import { Alignment } from '../geometry/alignment'
-import { Line } from '../geometry/primitives'
-import { vec2 } from '../geometry/vec2'
+import { Arc, Line } from '../geometry/primitives'
+import { vec2, type Vec2 } from '../geometry/vec2'
 
 const straight = (fromX: number, fromY: number, heading: number, length: number) =>
   new Alignment([new Line(vec2(fromX, fromY), heading, length)])
@@ -139,6 +139,29 @@ describe('RoadNetwork lookups', () => {
   })
 })
 
+describe('RoadNetwork nodeAt robustness', () => {
+  it('skips a stale index entry and still finds the real node', () => {
+    const net = new RoadNetwork()
+    const id = net.addRoad(straight(0, 0, 0, 100), 'rural')
+    const realNode = net.road(id).startNode
+
+    // Plant a stale index entry at the same position, with an id lower than
+    // the real node's — NodeIndex.nearby returns candidates in ascending id
+    // order, so this stale entry sorts first. Nothing but the index knows
+    // about it: it is not in nodeMap, exactly the shape a removed-but-not-
+    // reindexed node would leave behind. Reached via the private field
+    // directly (TS `private` is not enforced at runtime) rather than adding
+    // a production-only hook for this one test.
+    const internals = net as unknown as {
+      index: { insert(id: number, position: Vec2): void }
+    }
+    internals.index.insert(realNode - 1, vec2(0, 0))
+
+    const found = net.nodeAt(vec2(0, 0))
+    expect(found?.id).toBe(realNode)
+  })
+})
+
 describe('RoadNetwork internal state protection', () => {
   it('does not leak mutable state through node()', () => {
     const net = new RoadNetwork()
@@ -265,5 +288,244 @@ describe('RoadNetwork snapping order dependency', () => {
     // but the specific connections differ based on order
     expect(order1NodeCount).toBeGreaterThanOrEqual(2)
     expect(order2NodeCount).toBeGreaterThanOrEqual(2)
+  })
+})
+
+describe('removeRoad', () => {
+  it('leaves the ids of surviving roads untouched', () => {
+    const net = new RoadNetwork()
+    const a = net.addRoad(straight(0, 0, 0, 100), 'rural')
+    const b = net.addRoad(straight(0, 50, 0, 100), 'rural')
+    const c = net.addRoad(straight(0, 100, 0, 100), 'rural')
+
+    net.removeRoad(b)
+
+    expect(net.road(c).id).toBe(c)
+    expect(net.road(a).id).toBe(a)
+    expect(net.roads.map((r) => r.id)).toEqual([a, c])
+    expect(() => net.road(b)).toThrow(RangeError)
+  })
+
+  it('never reuses the id of a removed road', () => {
+    const net = new RoadNetwork()
+    const a = net.addRoad(straight(0, 0, 0, 100), 'rural')
+    net.removeRoad(a)
+    const b = net.addRoad(straight(0, 0, 0, 100), 'rural')
+
+    expect(b).not.toBe(a)
+  })
+
+  it('deletes a node once nothing references it', () => {
+    const net = new RoadNetwork()
+    const a = net.addRoad(straight(0, 0, 0, 100), 'rural')
+    const nodeIds = net.nodes.map((n) => n.id)
+    expect(nodeIds).toHaveLength(2)
+
+    net.removeRoad(a)
+
+    expect(net.nodes).toHaveLength(0)
+    for (const id of nodeIds) {
+      expect(() => net.node(id)).toThrow(RangeError)
+    }
+  })
+
+  it('removes the node from the spatial index, not only from the node map', () => {
+    // A direct check of the index/nodeMap invariant, reached past the public
+    // API the same way as the nodeAt robustness test above. A behavioural
+    // proxy — "does a new road end here get a new node id?" — no longer
+    // discriminates this on its own: nodeAt now tolerates a stale index
+    // entry by skipping it (see "skips a stale index entry" above), so even
+    // a RoadNetwork that forgot to call index.remove would still hand out a
+    // fresh node id here. The leak itself — the dangling entry never being
+    // cleared — is what this test pins directly.
+    const net = new RoadNetwork()
+    const a = net.addRoad(straight(0, 0, 0, 100), 'rural')
+    const removedNode = net.road(a).startNode
+
+    net.removeRoad(a)
+
+    const internals = net as unknown as {
+      index: { nearby(position: Vec2): number[] }
+    }
+    expect(internals.index.nearby(vec2(0, 0))).not.toContain(removedNode)
+  })
+
+  it('does not let a new road end snap to a node removed from the network', () => {
+    // The behavioural companion to the index check above: even though it no
+    // longer discriminates a dropped index.remove call by itself (see the
+    // comment there), it is still the actual player-facing guarantee this
+    // invariant protects, so it stays as a test in its own right.
+    const net = new RoadNetwork()
+    const a = net.addRoad(straight(0, 0, 0, 100), 'rural')
+    const removedNode = net.road(a).startNode
+
+    net.removeRoad(a)
+    const b = net.addRoad(straight(0, 0, 0, 100), 'rural')
+
+    expect(net.road(b).startNode).not.toBe(removedNode)
+  })
+
+  it('keeps a node that another road still uses, and detaches only the removed end', () => {
+    const net = new RoadNetwork()
+    // Two roads meeting at the origin.
+    const a = net.addRoad(straight(0, 0, 0, 100), 'rural')
+    const b = net.addRoad(straight(0, 0, Math.PI / 2, 100), 'rural')
+
+    const shared = net.nodeAt(vec2(0, 0))
+    expect(shared?.ends).toHaveLength(2)
+
+    net.removeRoad(a)
+
+    const after = net.nodeAt(vec2(0, 0))
+    expect(after?.id).toBe(shared?.id)
+    expect(after?.ends).toEqual([{ roadId: b, end: 'start' }])
+  })
+
+  it('detaches both ends of a road that loops back to its own node', () => {
+    const net = new RoadNetwork()
+    // A full circle: curvature 1/50, length 2*pi*50, so the end lands on the start.
+    const k = 1 / 50
+    const loop = new Alignment([new Arc(vec2(0, 0), 0, (2 * Math.PI) / k, k)])
+    const id = net.addRoad(loop, 'rural')
+
+    const node = net.nodeAt(vec2(0, 0))
+    expect(node?.ends).toHaveLength(2)
+
+    net.removeRoad(id)
+
+    expect(net.nodes).toHaveLength(0)
+  })
+
+  it('rejects an unknown road id', () => {
+    const net = new RoadNetwork()
+    expect(() => net.removeRoad(999)).toThrow(RangeError)
+  })
+})
+
+describe('splitRoad', () => {
+  it('produces two roads meeting at a new node', () => {
+    const net = new RoadNetwork()
+    const id = net.addRoad(straight(0, 0, 0, 100), 'rural')
+
+    const { first, second, node } = net.splitRoad(id, 40)
+
+    expect(net.roads).toHaveLength(2)
+    expect(() => net.road(id)).toThrow(RangeError)
+    expect(net.road(first).alignment.length).toBeCloseTo(40, 9)
+    expect(net.road(second).alignment.length).toBeCloseTo(60, 9)
+    expect(net.road(first).endNode).toBe(node)
+    expect(net.road(second).startNode).toBe(node)
+    expect(net.node(node).ends).toHaveLength(2)
+  })
+
+  it('preserves the identifiers of the untouched end nodes', () => {
+    const net = new RoadNetwork()
+    const id = net.addRoad(straight(0, 0, 0, 100), 'rural')
+    const startNode = net.road(id).startNode
+    const endNode = net.road(id).endNode
+
+    const { first, second } = net.splitRoad(id, 40)
+
+    expect(net.road(first).startNode).toBe(startNode)
+    expect(net.road(second).endNode).toBe(endNode)
+  })
+
+  it('leaves a junction at an end intact', () => {
+    const net = new RoadNetwork()
+    const main = net.addRoad(straight(0, 0, 0, 100), 'rural')
+    net.addRoad(straight(0, 0, Math.PI / 2, 50), 'rural')
+    net.addRoad(straight(0, 0, -Math.PI / 2, 50), 'rural')
+
+    const junction = net.road(main).startNode
+    expect(net.isJunction(junction)).toBe(true)
+
+    const { first } = net.splitRoad(main, 40)
+
+    expect(net.road(first).startNode).toBe(junction)
+    expect(net.isJunction(junction)).toBe(true)
+    expect(net.node(junction).ends).toHaveLength(3)
+  })
+
+  it('carries the class onto both halves', () => {
+    const net = new RoadNetwork()
+    const id = net.addRoad(straight(0, 0, 0, 100), 'gravel')
+    const { first, second } = net.splitRoad(id, 40)
+    expect(net.road(first).className).toBe('gravel')
+    expect(net.road(second).className).toBe('gravel')
+  })
+
+  it('rejects a split at either end or on an unknown road', () => {
+    const net = new RoadNetwork()
+    const id = net.addRoad(straight(0, 0, 0, 100), 'rural')
+    expect(() => net.splitRoad(id, 0)).toThrow(RangeError)
+    expect(() => net.splitRoad(id, 100)).toThrow(RangeError)
+    expect(() => net.splitRoad(999, 40)).toThrow(RangeError)
+  })
+
+  it('rejects a split that would leave a piece shorter than the snap distance', () => {
+    const net = new RoadNetwork()
+    const id = net.addRoad(straight(0, 0, 0, 100), 'rural')
+    // Both halves' ends would fall inside NODE_SNAP_DISTANCE of each other,
+    // so the new node would snap onto an existing one and the two halves
+    // would share both endpoints.
+    expect(() => net.splitRoad(id, 0.2)).toThrow(RangeError)
+    expect(() => net.splitRoad(id, 99.8)).toThrow(RangeError)
+  })
+
+  it('the lollipop case: cutting where a loop closes returns the pre-existing node, not a new one', () => {
+    // A "lollipop": a full circle back to the road's own start (the candy),
+    // then a further straight stretch (the stick). The guard above is
+    // stational — it only checks distance measured ALONG the road from each
+    // end — but the hazard here is spatial: the loop's own end sits right on
+    // top of the road's own start, far away in station but distance zero in
+    // space. Splitting exactly where the loop closes finds that existing
+    // node already there and snaps to it, exactly as any other road end
+    // would. Confirmed elsewhere that the graph stays fully consistent when
+    // this happens — no corruption, no stranded reference — so this test
+    // only documents the shape of it.
+    const net = new RoadNetwork()
+    const k = 1 / 50
+    const loopLength = (2 * Math.PI) / k
+    const loop = new Arc(vec2(0, 0), 0, loopLength, k)
+    const endOfLoop = loop.poseAt(loopLength)
+    const stick = new Line(endOfLoop.position, endOfLoop.heading, 40)
+    const id = net.addRoad(new Alignment([loop, stick]), 'rural')
+
+    const startNode = net.road(id).startNode
+
+    const { first, second, node } = net.splitRoad(id, loopLength)
+
+    // Not a fresh node: the pre-existing start node, handed back instead.
+    expect(node).toBe(startNode)
+    expect(net.road(first).endNode).toBe(node)
+    expect(net.road(second).startNode).toBe(node)
+
+    // Fully consistent: both halves resolve, the original is gone, and the
+    // shared node still has road ends recorded against it.
+    expect(net.roads).toHaveLength(2)
+    expect(() => net.road(id)).toThrow(RangeError)
+    expect(net.node(node).ends.length).toBeGreaterThan(0)
+  })
+})
+
+describe('setRoadClass', () => {
+  it('changes the class and keeps the id and topology', () => {
+    const net = new RoadNetwork()
+    const id = net.addRoad(straight(0, 0, 0, 100), 'gravel')
+    const before = net.road(id)
+
+    net.setRoadClass(id, 'highway')
+
+    const after = net.road(id)
+    expect(after.className).toBe('highway')
+    expect(after.id).toBe(id)
+    expect(after.startNode).toBe(before.startNode)
+    expect(after.endNode).toBe(before.endNode)
+    expect(after.alignment).toBe(before.alignment)
+  })
+
+  it('rejects an unknown road id', () => {
+    const net = new RoadNetwork()
+    expect(() => net.setRoadClass(999, 'rural')).toThrow(RangeError)
   })
 })

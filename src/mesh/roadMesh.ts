@@ -1,6 +1,6 @@
 import type { Alignment } from '../geometry/alignment'
 import type { ProfilePoint } from '../terrain/groundProfile'
-import type { RoadClass, LayerName } from './roadClass'
+import type { RoadClass, LayerName } from '../network/roadClass'
 import { layerTopProfile } from './crossSection'
 import { sweepRibbon, type MeshData, type RibbonOptions } from './ribbon'
 

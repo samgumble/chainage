@@ -4,7 +4,7 @@ import { RoadNetwork } from '../network/graph'
 import { Alignment } from '../geometry/alignment'
 import { Line, Arc } from '../geometry/primitives'
 import { vec2 } from '../geometry/vec2'
-import { ROAD_CLASSES, formationHalfWidth } from './roadClass'
+import { ROAD_CLASSES, formationHalfWidth } from '../network/roadClass'
 import type { ProfilePoint } from '../terrain/groundProfile'
 import type { RoadId } from '../network/graph'
 

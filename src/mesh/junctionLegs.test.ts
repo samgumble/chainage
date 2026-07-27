@@ -4,7 +4,7 @@ import { RoadNetwork } from '../network/graph'
 import { Alignment } from '../geometry/alignment'
 import { Arc, Line } from '../geometry/primitives'
 import { vec2 } from '../geometry/vec2'
-import { ROAD_CLASSES, formationHalfWidth } from './roadClass'
+import { ROAD_CLASSES, formationHalfWidth } from '../network/roadClass'
 
 /** Three roads radiating from (100, 0): west, north, south. */
 const tJunction = () => {

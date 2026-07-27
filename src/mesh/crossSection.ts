@@ -1,7 +1,7 @@
 import {
   type RoadClass, type LayerName,
   carriagewayHalfWidth, formationHalfWidth,
-} from './roadClass'
+} from '../network/roadClass'
 
 /**
  * One point across the road.

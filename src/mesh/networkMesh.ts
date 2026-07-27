@@ -5,7 +5,7 @@ import { buildJunctionMesh } from './junctionMesh'
 import {
   buildRoadMesh, type RoadMesh, type RoadExtent, type LayerStations,
 } from './roadMesh'
-import { ROAD_CLASSES, formationHalfWidth } from './roadClass'
+import { ROAD_CLASSES, formationHalfWidth } from '../network/roadClass'
 import { type ProfilePoint, designElevationAtStation } from '../terrain/groundProfile'
 import type { MeshData } from './ribbon'
 import type { TerrainSampler } from '../terrain/heightmap'
