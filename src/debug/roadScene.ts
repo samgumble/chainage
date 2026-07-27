@@ -1,4 +1,7 @@
 import * as THREE from 'three'
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js'
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 import { Alignment } from '../geometry/alignment'
 import { Line } from '../geometry/primitives'
 import { vec2, fromAngle, type Vec2 } from '../geometry/vec2'
@@ -16,6 +19,7 @@ import { terrainGeometry } from '../render/terrainMesh'
 import { CameraRig, type Vec3 as RigVec3 } from '../render/cameraRig'
 import { sunAt } from '../render/sunlight'
 import { surfaceFor } from '../render/materials'
+import { TILT_SHIFT_FRAGMENT_SHADER } from '../render/tiltShift'
 import { RoadNetwork, type RoadId } from '../network/graph'
 import { buildNetworkMesh, type NetworkMesh } from '../mesh/networkMesh'
 import { DrawTool, SNAP_RADIUS } from '../tool/drawTool'
@@ -1427,6 +1431,77 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   canvas.addEventListener('contextmenu', onContextMenu)
   window.addEventListener('keydown', onKeyDown)
 
+  // --- Post-processing: tilt-shift depth of field --------------------------
+  //
+  // A shallow depth of field, sharp only around what the camera is orbiting
+  // and blurring both nearer and farther, is what reads as a miniature rather
+  // than a smeared screenshot — see `tiltShift.ts`.
+  const initialWidth = Math.max(1, canvas.clientWidth)
+  const initialHeight = Math.max(1, canvas.clientHeight)
+  // Captured once: this renderer's own pixel ratio never changes after
+  // construction, and `EffectComposer` itself captures it the same way at
+  // construction time, so recomputing it later would only ever repeat this
+  // value.
+  const composerPixelRatio = renderer.getPixelRatio()
+
+  // The pass reads depth (see `TILT_SHIFT_FRAGMENT_SHADER`), so the render
+  // target it draws into needs a real depth *texture* — a composer's default
+  // target has only a depth *buffer*, which the shader cannot sample, and the
+  // effect would silently do nothing. `EffectComposer` uses this target (and
+  // a clone of it, which clones the depth texture along with it) as its two
+  // internal buffers, so both ends up with one.
+  const composerRenderTarget = new THREE.WebGLRenderTarget(
+    initialWidth * composerPixelRatio,
+    initialHeight * composerPixelRatio,
+    { depthTexture: new THREE.DepthTexture(initialWidth * composerPixelRatio, initialHeight * composerPixelRatio) },
+  )
+
+  const composer = new EffectComposer(renderer, composerRenderTarget)
+  composer.addPass(new RenderPass(scene, camera))
+
+  /** Standard full-screen-pass vertex shader — three's own `CopyShader` uses
+   * exactly this, and `TILT_SHIFT_FRAGMENT_SHADER` supplies only the
+   * fragment stage and expects this same `vUv`. */
+  const TILT_SHIFT_VERTEX_SHADER = `
+varying vec2 vUv;
+void main() {
+  vUv = uv;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`
+
+  // How much depth around the focal distance stays sharp, and how far beyond
+  // that band the blur takes to reach full strength, metres. Tuned by eye
+  // (Step 8) at the rig's default framing: narrow enough that the junction is
+  // unmistakably the one sharp thing in the frame, wide enough that the whole
+  // junction — not just the single point the rig orbits — stays in focus
+  // together.
+  const FOCUS_RANGE_METRES = 60
+  const FOCUS_FALLOFF_METRES = 220
+
+  const tiltShiftUniforms = {
+    tDiffuse: { value: null as THREE.Texture | null },
+    tDepth: { value: null as THREE.Texture | null },
+    uFocusDistance: { value: rig.distance },
+    uFocusRange: { value: FOCUS_RANGE_METRES },
+    uFocusFalloff: { value: FOCUS_FALLOFF_METRES },
+    uNear: { value: camera.near },
+    uFar: { value: camera.far },
+    uTexelSize: {
+      value: new THREE.Vector2(
+        1 / (initialWidth * composerPixelRatio),
+        1 / (initialHeight * composerPixelRatio),
+      ),
+    },
+  }
+
+  const tiltShiftPass = new ShaderPass({
+    uniforms: tiltShiftUniforms,
+    vertexShader: TILT_SHIFT_VERTEX_SHADER,
+    fragmentShader: TILT_SHIFT_FRAGMENT_SHADER,
+  })
+  composer.addPass(tiltShiftPass)
+
   // A window `resize` event alone isn't enough: it fires only for the
   // window's own dimensions, not for every reason the canvas's box can
   // change size (layout, container changes, fractional-pixel rounding
@@ -1445,6 +1520,17 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     renderer.setSize(width, height, false)
     camera.aspect = width / height
     camera.updateProjectionMatrix()
+
+    // The composer owns render targets sized to the canvas — resizing the
+    // renderer alone leaves them (and the blur) at the old resolution.
+    // `EffectComposer.setSize` resizes both of its internal buffers (and,
+    // with them, the depth texture attached to each), so no separate
+    // render-target recreation is needed here.
+    composer.setSize(width, height)
+    tiltShiftUniforms.uTexelSize.value.set(
+      1 / (width * composerPixelRatio),
+      1 / (height * composerPixelRatio),
+    )
   }
 
   const resizeObserver = new ResizeObserver((entries) => {
@@ -1472,7 +1558,18 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     updateCameraFromRig()
     updatePreview()
     updateHighlight()
-    renderer.render(scene, camera)
+
+    // What the player is orbiting around is what stays sharp: the focal
+    // distance follows the rig every frame, not a value fixed at scene
+    // creation, so zooming changes what is in focus instead of leaving the
+    // blur exactly where it started.
+    tiltShiftUniforms.uFocusDistance.value = rig.distance
+    // Read fresh every frame rather than cached once: the render target this
+    // points at is whichever buffer `RenderPass` just wrote the scene's depth
+    // into, and re-reading it here (rather than assuming which buffer that
+    // is) is what stays correct across a resize without extra bookkeeping.
+    tiltShiftUniforms.tDepth.value = composer.readBuffer.depthTexture
+    composer.render()
   }
   tick()
 
@@ -1507,10 +1604,21 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     marker.geometry.dispose()
     ;(marker.material as THREE.MeshBasicMaterial).dispose()
 
+    // The post-processing chain's own GPU resources: `EffectComposer` has no
+    // `dispose` of its own, so its two render targets (one supplied here, one
+    // its own clone — each carrying a depth texture) are freed directly, and
+    // the tilt-shift pass's shader material and full-screen quad go with
+    // `tiltShiftPass.dispose()`. Left undone, every mount of this scene would
+    // leak a pair of full-resolution colour+depth render targets.
+    composer.renderTarget1.dispose()
+    composer.renderTarget2.dispose()
+    tiltShiftPass.dispose()
+
     // The sun's shadow map is a render target the renderer allocates lazily
     // on first use, once shadows are enabled — not created by this function
     // directly, but still this function's responsibility to free.
     sun.shadow.dispose()
+
     renderer.dispose()
     messageEl.remove()
   }
