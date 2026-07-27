@@ -342,3 +342,74 @@ describe('removeRoad', () => {
     expect(() => net.removeRoad(999)).toThrow(RangeError)
   })
 })
+
+describe('splitRoad', () => {
+  it('produces two roads meeting at a new node', () => {
+    const net = new RoadNetwork()
+    const id = net.addRoad(straight(0, 0, 0, 100), 'rural')
+
+    const { first, second, node } = net.splitRoad(id, 40)
+
+    expect(net.roads).toHaveLength(2)
+    expect(() => net.road(id)).toThrow(RangeError)
+    expect(net.road(first).alignment.length).toBeCloseTo(40, 9)
+    expect(net.road(second).alignment.length).toBeCloseTo(60, 9)
+    expect(net.road(first).endNode).toBe(node)
+    expect(net.road(second).startNode).toBe(node)
+    expect(net.node(node).ends).toHaveLength(2)
+  })
+
+  it('preserves the identifiers of the untouched end nodes', () => {
+    const net = new RoadNetwork()
+    const id = net.addRoad(straight(0, 0, 0, 100), 'rural')
+    const startNode = net.road(id).startNode
+    const endNode = net.road(id).endNode
+
+    const { first, second } = net.splitRoad(id, 40)
+
+    expect(net.road(first).startNode).toBe(startNode)
+    expect(net.road(second).endNode).toBe(endNode)
+  })
+
+  it('leaves a junction at an end intact', () => {
+    const net = new RoadNetwork()
+    const main = net.addRoad(straight(0, 0, 0, 100), 'rural')
+    net.addRoad(straight(0, 0, Math.PI / 2, 50), 'rural')
+    net.addRoad(straight(0, 0, -Math.PI / 2, 50), 'rural')
+
+    const junction = net.road(main).startNode
+    expect(net.isJunction(junction)).toBe(true)
+
+    const { first } = net.splitRoad(main, 40)
+
+    expect(net.road(first).startNode).toBe(junction)
+    expect(net.isJunction(junction)).toBe(true)
+    expect(net.node(junction).ends).toHaveLength(3)
+  })
+
+  it('carries the class onto both halves', () => {
+    const net = new RoadNetwork()
+    const id = net.addRoad(straight(0, 0, 0, 100), 'gravel')
+    const { first, second } = net.splitRoad(id, 40)
+    expect(net.road(first).className).toBe('gravel')
+    expect(net.road(second).className).toBe('gravel')
+  })
+
+  it('rejects a split at either end or on an unknown road', () => {
+    const net = new RoadNetwork()
+    const id = net.addRoad(straight(0, 0, 0, 100), 'rural')
+    expect(() => net.splitRoad(id, 0)).toThrow(RangeError)
+    expect(() => net.splitRoad(id, 100)).toThrow(RangeError)
+    expect(() => net.splitRoad(999, 40)).toThrow(RangeError)
+  })
+
+  it('rejects a split that would leave a piece shorter than the snap distance', () => {
+    const net = new RoadNetwork()
+    const id = net.addRoad(straight(0, 0, 0, 100), 'rural')
+    // Both halves' ends would fall inside NODE_SNAP_DISTANCE of each other,
+    // so the new node would snap onto an existing one and the two halves
+    // would share both endpoints.
+    expect(() => net.splitRoad(id, 0.2)).toThrow(RangeError)
+    expect(() => net.splitRoad(id, 99.8)).toThrow(RangeError)
+  })
+})

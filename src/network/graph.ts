@@ -1,4 +1,5 @@
 import type { Alignment } from '../geometry/alignment'
+import { splitAlignment } from '../geometry/split'
 import type { Vec2 } from '../geometry/vec2'
 import type { RoadClassName } from '../mesh/roadClass'
 import { NodeIndex } from './nodeIndex'
@@ -168,5 +169,36 @@ export class RoadNetwork {
         node.ends = remaining
       }
     }
+  }
+
+  /**
+   * Divide a road at a station into two roads meeting at a new node.
+   *
+   * Both halves are added before the original is removed. Removing first
+   * would drop the original's last reference to its own end nodes, delete
+   * them as orphans, and hand the halves freshly allocated ids for junctions
+   * the split never touched — silently repointing every `NodeId` the mesh
+   * layer holds for those junctions.
+   */
+  splitRoad(
+    id: RoadId,
+    s: number,
+  ): { readonly first: RoadId; readonly second: RoadId; readonly node: NodeId } {
+    const road = this.roadMap.get(id)
+    if (!road) throw new RangeError(`no road with id ${id}`)
+
+    if (s <= NODE_SNAP_DISTANCE || s >= road.alignment.length - NODE_SNAP_DISTANCE) {
+      throw new RangeError(
+        `split station ${s} must leave at least ${NODE_SNAP_DISTANCE}m on each side of a road ${road.alignment.length}m long`,
+      )
+    }
+
+    const [head, tail] = splitAlignment(road.alignment, s)
+
+    const first = this.addRoad(head, road.className)
+    const second = this.addRoad(tail, road.className)
+    this.removeRoad(id)
+
+    return { first, second, node: this.road(first).endNode }
   }
 }
