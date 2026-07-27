@@ -10,6 +10,9 @@ export type JunctionCorner = {
   readonly afterLeg: number
 }
 
+/** Why a junction's geometry could not be solved. */
+export type JunctionInfeasibility = 'too-few-legs' | 'near-parallel-legs' | 'trim-too-long'
+
 export type JunctionGeometry =
   | {
       readonly feasible: true
@@ -19,7 +22,7 @@ export type JunctionGeometry =
     }
   | {
       readonly feasible: false
-      readonly reason: 'too-few-legs' | 'near-parallel-legs' | 'trim-too-long'
+      readonly reason: JunctionInfeasibility
     }
 
 /**

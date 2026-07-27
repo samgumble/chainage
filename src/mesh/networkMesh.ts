@@ -1,6 +1,6 @@
 import type { RoadNetwork, RoadId, NodeId } from '../network/graph'
 import { junctionLegs } from './junctionLegs'
-import { solveJunction, type JunctionGeometry } from './junctionCorners'
+import { solveJunction, type JunctionGeometry, type JunctionInfeasibility } from './junctionCorners'
 import { buildJunctionMesh } from './junctionMesh'
 import {
   buildRoadMesh, type RoadMesh, type RoadExtent, type LayerStations,
@@ -19,7 +19,7 @@ export type NetworkMesh = {
   readonly roads: ReadonlyMap<RoadId, RoadMesh>
   readonly junctions: ReadonlyMap<NodeId, MeshData>
   /** Nodes whose junction could not be solved, and why. */
-  readonly infeasibleJunctions: ReadonlyMap<NodeId, string>
+  readonly infeasibleJunctions: ReadonlyMap<NodeId, JunctionInfeasibility>
   /** Nodes whose legs disagree about elevation, and by how much (metres). */
   readonly elevationMismatches: ReadonlyMap<NodeId, number>
 }
@@ -54,7 +54,7 @@ export const buildNetworkMesh = (
   const { spacing = 4, stations } = options
 
   const junctions = new Map<NodeId, MeshData>()
-  const infeasibleJunctions = new Map<NodeId, string>()
+  const infeasibleJunctions = new Map<NodeId, JunctionInfeasibility>()
   const elevationMismatches = new Map<NodeId, number>()
   /** roadId -> { from, to } accumulated from both its end nodes. */
   const trims = new Map<RoadId, { from: number; to: number }>()
