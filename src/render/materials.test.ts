@@ -54,11 +54,20 @@ describe('SURFACES', () => {
     expect(SURFACES.wearing.roughness).toBeLessThan(SURFACES.subgrade.roughness)
   })
 
-  it('makes concrete lighter and smoother than asphalt', () => {
+  it('makes concrete lighter than asphalt, and keeps its roughness nearer the sealed wearing course than the granular base', () => {
     expect(luminance(SURFACES.concrete.colour)).toBeGreaterThan(
       luminance(SURFACES.wearing.colour),
     )
-    expect(SURFACES.concrete.roughness).toBeLessThan(SURFACES.base.roughness)
+    // Concrete reads as a structural, semi-sealed surface — rougher than the
+    // wearing course it is not, but nowhere near as coarse as an unsealed
+    // granular base either. Comparing only against `base` (as this test used
+    // to) is nearly no check at all: `base` is the roughest surface in the
+    // table, so almost any value short of it passes, including one rough
+    // enough to read as granular — the midpoint between `wearing` and `base`
+    // is the actual claim this test's name makes, and the one the mutation
+    // sweep found this test wasn't making.
+    const midpoint = (SURFACES.wearing.roughness + SURFACES.base.roughness) / 2
+    expect(SURFACES.concrete.roughness).toBeLessThan(midpoint)
   })
 
   it('never makes a surface a perfect mirror or perfectly matte', () => {

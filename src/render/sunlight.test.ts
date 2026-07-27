@@ -90,7 +90,19 @@ describe('sunAt', () => {
   })
 
   it('treats the hour cyclically rather than throwing', () => {
+    // `direction.z` alone does not pin the wrap: a day is exactly half of
+    // `sin(pi * t)`'s period in `t`, so 24 hours is exactly two full periods,
+    // and an *unwrapped* `hour` reaches the same `sin(pi * t)` — and so the
+    // same `direction.z` — purely by that coincidence, whether or not the
+    // hour was ever actually taken modulo 24. `isDay` (and so `intensity`)
+    // has no such coincidence: without the wrap, `t` for `24 + NOON` and
+    // `-24 + NOON` falls outside `[0, 1]` and the function takes its
+    // night-time branch, dropping intensity to zero even though the wrapped
+    // hour is midday. Asserting on `intensity` too is what actually exercises
+    // the wrap rather than an arithmetic accident that survives without it.
     expect(sunAt(24 + NOON).direction.z).toBeCloseTo(sunAt(NOON).direction.z, 9)
+    expect(sunAt(24 + NOON).intensity).toBeCloseTo(sunAt(NOON).intensity, 9)
     expect(sunAt(-24 + NOON).direction.z).toBeCloseTo(sunAt(NOON).direction.z, 9)
+    expect(sunAt(-24 + NOON).intensity).toBeCloseTo(sunAt(NOON).intensity, 9)
   })
 })
