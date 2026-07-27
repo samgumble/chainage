@@ -1472,10 +1472,22 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   // effect would silently do nothing. `EffectComposer` uses this target (and
   // a clone of it, which clones the depth texture along with it) as its two
   // internal buffers, so both ends up with one.
+  //
+  // `type: THREE.HalfFloatType` matters as much as the depth texture does:
+  // left at the default (`UnsignedByteType`), the whole scene is quantised to
+  // 8-bit linear *before* `OutputPass` ever runs ACES tone mapping on it, so
+  // the tone curve stretches already-banded shadow and cut-face darks instead
+  // of smooth linear values. `EffectComposer`'s own default target uses
+  // `HalfFloatType` for exactly this reason (see `EffectComposer.js`); this
+  // target is supplied explicitly (for the depth texture, above) and so has
+  // to restate it rather than inherit it.
   const composerRenderTarget = new THREE.WebGLRenderTarget(
     initialWidth * composerPixelRatio,
     initialHeight * composerPixelRatio,
-    { depthTexture: new THREE.DepthTexture(initialWidth * composerPixelRatio, initialHeight * composerPixelRatio) },
+    {
+      depthTexture: new THREE.DepthTexture(initialWidth * composerPixelRatio, initialHeight * composerPixelRatio),
+      type: THREE.HalfFloatType,
+    },
   )
 
   const composer = new EffectComposer(renderer, composerRenderTarget)
