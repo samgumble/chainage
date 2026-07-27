@@ -48,6 +48,12 @@ export const describePolylineRejection = (rejection: PolylineRejection): string 
  * a corner with no unique position has no trim to measure — so their
  * sentences stay purely qualitative rather than reaching for something to
  * print.
+ *
+ * Every junction sentence names which end of the road it is about (`start`
+ * or `end`, from `UpgradeObstacle.roadEnd`) rather than the raw `nodeId` —
+ * an internal counter with no meaning to a player — so a road with obstacles
+ * at both its ends produces two sentences a player can actually tell apart,
+ * not two copies of the same wording.
  */
 export const describeUpgradeObstacle = (obstacle: UpgradeObstacle): string => {
   if (obstacle.kind === 'alignment') {
@@ -58,14 +64,16 @@ export const describeUpgradeObstacle = (obstacle: UpgradeObstacle): string => {
     )
   }
 
+  const end = obstacle.roadEnd
+
   switch (obstacle.reason) {
     case 'too-few-legs':
-      return 'This junction does not have enough legs to widen safely.'
+      return `The junction at the road's ${end} does not have enough legs to widen safely.`
     case 'near-parallel-legs':
-      return "This junction's legs are too close to parallel to find a stable corner."
+      return `The junction at the road's ${end} has legs too close to parallel to find a stable corner.`
     case 'trim-too-long':
       return (
-        `A leg at this junction would need to pull back ${fmt(obstacle.worstTrim)}m, ` +
+        `A leg at the junction at the road's ${end} would need to pull back ${fmt(obstacle.worstTrim)}m, ` +
         `beyond the ${fmt(obstacle.maxTrim)}m limit.`
       )
   }

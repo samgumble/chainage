@@ -48,7 +48,22 @@ export type JunctionObstacleReason =
 
 export type UpgradeObstacle =
   | { readonly kind: 'alignment'; readonly rejection: ClassChangeRejection }
-  | ({ readonly kind: 'junction'; readonly nodeId: NodeId } & JunctionObstacleReason)
+  | ({
+      readonly kind: 'junction'
+      readonly nodeId: NodeId
+      /**
+       * Which end of the road being upgraded this junction sits at.
+       *
+       * `nodeId` is an internal counter, meaningless to a player looking at
+       * their own drawing — this is what a message can actually say instead,
+       * and what tells two obstacles at the two different ends of the same
+       * road apart in a sentence (see `describeUpgradeObstacle`). A road that
+       * loops back to meet its own start reports `'start'` here for that
+       * shared node: true (that is one of the two ends it names), if
+       * incomplete for that rare case.
+       */
+      readonly roadEnd: 'start' | 'end'
+    } & JunctionObstacleReason)
 
 export type UpgradeCheck =
   | { readonly ok: true }
@@ -136,7 +151,13 @@ export const checkUpgrade = (
 
     const solved = solveJunction(widened)
     if (!solved.feasible) {
-      obstacles.push({ kind: 'junction', nodeId, ...describeJunctionFailure(solved.reason, widened) })
+      const roadEnd = nodeId === road.startNode ? 'start' : 'end'
+      obstacles.push({
+        kind: 'junction',
+        nodeId,
+        roadEnd,
+        ...describeJunctionFailure(solved.reason, widened),
+      })
     }
   }
 

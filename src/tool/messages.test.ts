@@ -26,8 +26,12 @@ describe('describePolylineRejection', () => {
       required: 100,
       available: 60,
     })
-    expect(message).toContain('100')
-    expect(message).toContain('60')
+    // Pinned to the phrase each number plays a role in, not just its
+    // presence — `required` and `available` swapped still passes a bare
+    // `toContain('100')`/`toContain('60')` pair, since both numbers are
+    // still somewhere in the sentence either way.
+    expect(message).toMatch(/needs 100\.0m/)
+    expect(message).toMatch(/only 60\.0m/)
   })
 
   it('gives the length and the limit when a segment is too short', () => {
@@ -37,8 +41,10 @@ describe('describePolylineRejection', () => {
       length: 4.2,
       limit: 7,
     })
-    expect(message).toContain('4.2')
-    expect(message).toContain('7')
+    // As above: pinned to which number is the actual length and which is
+    // the minimum, not merely that both appear.
+    expect(message).toMatch(/only 4\.2m long/)
+    expect(message).toMatch(/the 7\.0m minimum/)
   })
 })
 
@@ -53,28 +59,58 @@ describe('describeUpgradeObstacle', () => {
         requiredRadius: 394.2,
       },
     })
-    expect(message).toContain('240')
-    expect(message).toContain('85.5')
-    expect(message).toContain('394')
+    // Pinned to role, not presence: `actualRadius`/`requiredRadius` swapped
+    // reads as "radius of 394.2m, tighter than the 85.5m this class
+    // requires" — nonsense, since 394.2 is not tighter than 85.5 — and a
+    // bare `toContain` pair for both numbers would not catch that.
+    expect(message).toMatch(/station 240\.0/)
+    expect(message).toMatch(/radius of 85\.5m/)
+    expect(message).toMatch(/tighter than the 394\.2m/)
   })
 
   it('gives the trim and the limit for a junction that cannot be pulled back far enough', () => {
     const message = describeUpgradeObstacle({
       kind: 'junction',
       nodeId: 7,
+      roadEnd: 'end',
       reason: 'trim-too-long',
       worstTrim: 91.3,
       maxTrim: 60,
       worstLegs: [],
     })
-    expect(message).toContain('91.3')
-    expect(message).toContain('60')
+    // Pinned to role: `worstTrim`/`maxTrim` swapped would still contain both
+    // numbers, just with which one is the actual trim and which is the
+    // limit reversed.
+    expect(message).toMatch(/pull back 91\.3m/)
+    expect(message).toMatch(/beyond the 60\.0m limit/)
+  })
+
+  it('names which end of the road a junction obstacle is at', () => {
+    const start = describeUpgradeObstacle({
+      kind: 'junction',
+      nodeId: 2,
+      roadEnd: 'start',
+      reason: 'near-parallel-legs',
+    })
+    const end = describeUpgradeObstacle({
+      kind: 'junction',
+      nodeId: 9,
+      roadEnd: 'end',
+      reason: 'near-parallel-legs',
+    })
+    expect(start).toMatch(/start/)
+    expect(end).toMatch(/\bend\b/)
+    // The raw node id is an internal counter with no meaning to a player —
+    // it must not leak into the sentence.
+    expect(start).not.toMatch(/\b2\b/)
+    expect(end).not.toMatch(/\b9\b/)
   })
 
   it('explains near-parallel legs without inventing numbers', () => {
     const message = describeUpgradeObstacle({
       kind: 'junction',
       nodeId: 2,
+      roadEnd: 'start',
       reason: 'near-parallel-legs',
     })
     expect(message).toMatch(/parallel/i)
@@ -85,6 +121,7 @@ describe('describeUpgradeObstacle', () => {
     const message = describeUpgradeObstacle({
       kind: 'junction',
       nodeId: 2,
+      roadEnd: 'start',
       reason: 'too-few-legs',
     })
     expect(message).not.toMatch(/NaN|undefined/)
@@ -103,10 +140,23 @@ describe('describeUpgradeObstacles', () => {
           requiredRadius: 400,
         },
       },
-      { kind: 'junction', nodeId: 3, reason: 'near-parallel-legs' },
+      { kind: 'junction', nodeId: 3, roadEnd: 'start', reason: 'near-parallel-legs' },
     ])
     expect(message).toMatch(/curve/i)
     expect(message).toMatch(/parallel/i)
+  })
+
+  it('distinguishes two obstacles at different ends of the same road', () => {
+    // The bug this guards against: `checkUpgrade` can emit one obstacle per
+    // end of a road, and two `near-parallel-legs` (or two `trim-too-long`)
+    // obstacles used to produce two copies of the exact same sentence, with
+    // nothing to tell a player which end either one was about.
+    const message = describeUpgradeObstacles([
+      { kind: 'junction', nodeId: 3, roadEnd: 'start', reason: 'near-parallel-legs' },
+      { kind: 'junction', nodeId: 9, roadEnd: 'end', reason: 'near-parallel-legs' },
+    ])
+    expect(message).toMatch(/start/)
+    expect(message).toMatch(/\bend\b/)
   })
 
   it('says nothing useful is wrong for an empty list', () => {
