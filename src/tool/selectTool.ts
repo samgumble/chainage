@@ -60,9 +60,10 @@ export class SelectTool {
   /** The selected road, if it still exists. */
   get selected(): RoadId | undefined {
     if (this.selectedId === undefined) return undefined
-    // Cheaper and clearer than catching what `road()` throws.
-    const exists = this.network.roads.some((r) => r.id === this.selectedId)
-    if (!exists) this.selectedId = undefined
+    // `hasRoad` is an O(1) map lookup; this runs at the top of every verb and
+    // from `updateHighlight` on every frame, so an O(roads) scan here would
+    // be the wrong shape however cheap any one call looks.
+    if (!this.network.hasRoad(this.selectedId)) this.selectedId = undefined
     return this.selectedId
   }
 
