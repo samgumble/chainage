@@ -22,6 +22,17 @@ export const fromAngle = (radians: number): Vec2 => ({
   y: Math.sin(radians),
 })
 
+/**
+ * The transverse direction, left of travel, for a heading.
+ *
+ * "Left" is that heading rotated +90 degrees (counter-clockwise), matching
+ * this codebase's y-north, counter-clockwise-positive angle convention.
+ * Used everywhere a cross-section or junction edge needs to step sideways
+ * off a centreline: ribbon sweeps, junction corner solving, and junction
+ * plate edges all offset along this same direction.
+ */
+export const leftNormal = (heading: number): Vec2 => fromAngle(heading + Math.PI / 2)
+
 export const angleOf = (a: Vec2): number => Math.atan2(a.y, a.x)
 
 /** Normalize into (-PI, PI]. Exactly -PI maps to +PI. */

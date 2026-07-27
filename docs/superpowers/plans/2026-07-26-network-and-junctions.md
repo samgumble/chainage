@@ -34,7 +34,18 @@ denominator = cross(u, v)
 t = cross(b − a, v) / denominator
 ```
 
-When `denominator` is near zero the two legs are near-parallel and there is no usable corner. That is the degenerate case, and it is the whole risk of this task.
+**A near-zero `denominator` means two different things, and conflating them breaks every T junction.** `cross(d_i, d_j)` vanishes when the legs point nearly the *same* way **and** when they point nearly *opposite*. Only the first is a defect:
+
+- **Same direction** (`dot(d_i, d_j) > 0`): two roads leaving the node on top of each other. There is no usable corner and no sensible junction. Report `near-parallel-legs`.
+- **Opposite directions** (`dot(d_i, d_j) < 0`): a road passing straight through, which is the commonest junction there is — every T has one. The two facing edges are *parallel*, and coincident when the widths match, so there is no unique intersection point. But nothing is wrong. Place the corner at the foot of the perpendicular from the node, laterally at the wider of the two half-widths:
+
+  ```
+  corner = left(d_i) · max(w_i, w_j)
+  ```
+
+  Because that point is perpendicular to both legs, `dot(corner, d_i)` is zero — it contributes no trim, which is right: a road running straight through needs no pulling back on its outer side.
+
+Getting this wrong rejects every T junction as degenerate, which is exactly what happened on the first implementation attempt.
 
 **Trim distance.** Leg `i` must be pulled back far enough to clear both of its corners:
 
@@ -42,7 +53,11 @@ When `denominator` is near zero the two legs are near-parallel and there is no u
 trim_i = max(0, dot(cornerBefore − P, d_i), dot(cornerAfter − P, d_i))
 ```
 
-**Junction polygon.** Counter-clockwise, for each leg in order: the leg's trimmed right point, its trimmed left point, then the corner between it and the next leg. Three vertices per leg. Triangulate as a fan from `P`, which is valid because a junction polygon is star-shaped about its own node for any geometry that is not already degenerate.
+**Junction polygon.** Counter-clockwise, for each leg in order: the leg's trimmed right point, its trimmed left point, then the corner between it and the next leg. Triangulate as a fan from `P`, which is valid because a junction polygon is star-shaped about its own node for any geometry that is not already degenerate.
+
+**Those three points per leg frequently coincide, and the duplicates must be removed.** A leg's trim is *derived from* its corners, so whenever a corner is the one that set the trim, that corner and the leg's trimmed edge point are the same point. On a square crossroads every one of them collapses: the polygon is genuinely just its four corners. On a T it is five points — the two arms' outer edges plus the through road's straight side.
+
+So the vertex count is **not** three per leg; it depends on the geometry. Deduplicate consecutive boundary points, including the wrap from last back to first, within a tolerance of `1e-6` metres. Skipping this leaves zero-area triangles in the mesh — which is what happened on the first implementation attempt, and it shows up as a signed area of exactly zero in the winding test.
 
 **Nodes with fewer than three legs are not junctions.** One leg is a dead end; two legs are a road passing through, which the alignment already handles as a bend. Only three or more legs need a junction surface. This mirrors how Cities: Skylines classifies nodes, and it removes a whole family of edge cases.
 
@@ -882,6 +897,34 @@ describe('solveJunction feasibility', () => {
     expect(r.reason).toBe('near-parallel-legs')
   })
 
+  it('accepts opposite legs, which are a road running straight through', () => {
+    // The through pair of a T has cross() of essentially zero, exactly like a
+    // coincident pair — but it is the commonest junction there is. Rejecting
+    // it would reject every T.
+    const r = solveJunction(legsAt([180, 90, -90]))
+    expect(r.feasible).toBe(true)
+  })
+
+  it('gives a through pair zero trim on its outer side', () => {
+    // The corner between the two opposite legs is perpendicular to both, so it
+    // contributes nothing; each leg's trim comes only from its other corner.
+    const w = 5
+    const r = solveJunction(legsAt([180, 90, -90], w))
+    expect(r.feasible).toBe(true)
+    if (!r.feasible) return
+    for (const trim of r.trims) expect(trim).toBeCloseTo(w, 6)
+  })
+
+  it('accepts a through pair of unequal widths', () => {
+    const legs = [
+      { roadId: 0, end: 'start' as const, direction: fromAngle(-Math.PI / 2), halfWidth: 4, bearing: -Math.PI / 2 },
+      { roadId: 1, end: 'start' as const, direction: fromAngle(Math.PI / 2), halfWidth: 9, bearing: Math.PI / 2 },
+      { roadId: 2, end: 'start' as const, direction: fromAngle(Math.PI), halfWidth: 5, bearing: Math.PI },
+    ].sort((a, b) => a.bearing - b.bearing)
+    const r = solveJunction(legs)
+    expect(r.feasible).toBe(true)
+  })
+
   it('rejects a junction demanding an absurd trim', () => {
     // A very acute pair pushes the corner far from the node.
     const r = solveJunction(legsAt([0, 2, 180]), MAX_TRIM_DISTANCE)
@@ -1027,6 +1070,17 @@ const intersectLines = (
 }
 
 /**
+ * Are two legs opposite rather than coincident?
+ *
+ * `cross` vanishes for both, so it cannot tell them apart on its own. Opposite
+ * legs are a road passing straight through — the commonest junction there is —
+ * while coincident legs are two roads leaving on top of each other, which has
+ * no sensible junction at all.
+ */
+const isThroughPair = (a: JunctionLeg, b: JunctionLeg): boolean =>
+  dot(a.direction, b.direction) < 0
+
+/**
  * Work out where a junction's corners sit and how far each leg pulls back.
  *
  * Legs must already be sorted counter-clockwise. The corner between leg i and
@@ -1065,8 +1119,25 @@ export const solveJunction = (
     const originJ = scale(leftJ, -legJ.halfWidth)
 
     const position = intersectLines(originI, legI.direction, originJ, legJ.direction)
+
     if (!position) {
-      return { feasible: false, reason: 'near-parallel-legs' }
+      // No unique intersection. Which of the two degenerate cases is it?
+      if (!isThroughPair(legI, legJ)) {
+        // Coincident: two roads leaving on top of each other. No junction.
+        return { feasible: false, reason: 'near-parallel-legs' }
+      }
+      // Opposite: a road running straight through. The facing edges are
+      // parallel — coincident when the widths match — so there is no unique
+      // crossing point, but nothing is wrong. Put the corner at the foot of
+      // the perpendicular, laterally at the wider of the two. Being
+      // perpendicular to both legs, it contributes zero trim, which is right:
+      // a through road needs no pulling back on its outer side.
+      corners.push({
+        position: scale(leftI, Math.max(legI.halfWidth, legJ.halfWidth)),
+        beforeLeg: i,
+        afterLeg: j,
+      })
+      continue
     }
 
     corners.push({ position, beforeLeg: i, afterLeg: j })
@@ -1099,7 +1170,7 @@ Note the corners and trims are computed **relative to the node at the origin** �
 npm test -- src/mesh/junctionCorners.test.ts
 ```
 
-Expected: PASS, 14 tests.
+Expected: PASS, 17 tests.
 
 - [ ] **Step 5: Verify the typecheck**
 
@@ -1161,16 +1232,30 @@ const crossroads = () => {
 }
 
 describe('buildJunctionMesh', () => {
-  it('emits a centre vertex plus three per leg', () => {
+  it('collapses a square crossroads to its four corners', () => {
+    // Every leg's trimmed edge point coincides with the corner that set its
+    // trim, so the polygon is genuinely just the four corners plus the centre.
     const { legs, geometry } = crossroads()
     const m = buildJunctionMesh(vec2(0, 0), 50, legs, geometry)
-    expect(m.vertexCount).toBe(1 + 4 * 3)
+    expect(m.vertexCount).toBe(1 + 4)
   })
 
   it('emits one triangle per boundary edge', () => {
     const { legs, geometry } = crossroads()
     const m = buildJunctionMesh(vec2(0, 0), 50, legs, geometry)
-    expect(m.triangleCount).toBe(4 * 3)
+    expect(m.triangleCount).toBe(m.vertexCount - 1)
+  })
+
+  it('leaves no degenerate triangle in the fan', () => {
+    const { legs, geometry } = crossroads()
+    const m = buildJunctionMesh(vec2(0, 0), 50, legs, geometry)
+    for (let t = 0; t < m.indices.length; t += 3) {
+      const a = m.indices[t]!, b = m.indices[t + 1]!, c = m.indices[t + 2]!
+      const twiceArea =
+        (m.positions[b * 3]! - m.positions[a * 3]!) * (m.positions[c * 3 + 1]! - m.positions[a * 3 + 1]!) -
+        (m.positions[b * 3 + 1]! - m.positions[a * 3 + 1]!) * (m.positions[c * 3]! - m.positions[a * 3]!)
+      expect(Math.abs(twiceArea)).toBeGreaterThan(1e-6)
+    }
   })
 
   it('places the centre vertex at the node', () => {
@@ -1245,19 +1330,27 @@ describe('buildJunctionMesh', () => {
     expect(m.indices).toHaveLength(0)
   })
 
-  it('handles a three-leg junction', () => {
+  it('collapses a T junction to five boundary points', () => {
+    // Two arm ends plus the through road's straight outer side.
     const legs = legsAt([180, 90, -90])
     const geometry = solveJunction(legs)
     const m = buildJunctionMesh(vec2(0, 0), 50, legs, geometry)
-    expect(m.vertexCount).toBe(1 + 3 * 3)
-    expect(m.triangleCount).toBe(3 * 3)
+    expect(m.vertexCount).toBe(1 + 5)
+    expect(m.triangleCount).toBe(5)
   })
 
-  it('handles a five-leg junction', () => {
+  it('handles a five-leg junction without degenerate triangles', () => {
     const legs = legsAt([0, 72, 144, -144, -72])
     const geometry = solveJunction(legs)
     const m = buildJunctionMesh(vec2(0, 0), 50, legs, geometry)
-    expect(m.vertexCount).toBe(1 + 5 * 3)
+    expect(m.vertexCount).toBeGreaterThanOrEqual(1 + 5)
+    for (let t = 0; t < m.indices.length; t += 3) {
+      const a = m.indices[t]!, b = m.indices[t + 1]!, c = m.indices[t + 2]!
+      const twiceArea =
+        (m.positions[b * 3]! - m.positions[a * 3]!) * (m.positions[c * 3 + 1]! - m.positions[a * 3 + 1]!) -
+        (m.positions[b * 3 + 1]! - m.positions[a * 3 + 1]!) * (m.positions[c * 3]! - m.positions[a * 3]!)
+      expect(Math.abs(twiceArea)).toBeGreaterThan(1e-6)
+    }
   })
 })
 ```
@@ -1289,6 +1382,28 @@ const EMPTY: MeshData = {
   triangleCount: 0,
 }
 
+/** Two boundary points closer than this are the same point. */
+const BOUNDARY_TOLERANCE = 1e-6
+
+/** Drop consecutive duplicates, including the wrap from last back to first. */
+const dedupeConsecutive = (points: readonly Vec2[]): Vec2[] => {
+  const kept: Vec2[] = []
+  for (const point of points) {
+    const previous = kept[kept.length - 1]
+    if (previous && Math.hypot(point.x - previous.x, point.y - previous.y) <= BOUNDARY_TOLERANCE) {
+      continue
+    }
+    kept.push(point)
+  }
+  const first = kept[0]
+  const last = kept[kept.length - 1]
+  if (kept.length > 1 && first && last &&
+      Math.hypot(last.x - first.x, last.y - first.y) <= BOUNDARY_TOLERANCE) {
+    kept.pop()
+  }
+  return kept
+}
+
 /**
  * The surface filling the gap that trimmed ribbons leave at a junction.
  *
@@ -1310,7 +1425,7 @@ export const buildJunctionMesh = (
   if (!geometry.feasible) return EMPTY
 
   const n = legs.length
-  const boundary: Vec2[] = []
+  const raw: Vec2[] = []
 
   for (let i = 0; i < n; i++) {
     const leg = legs[i]!
@@ -1319,10 +1434,18 @@ export const buildJunctionMesh = (
     const along = scale(leg.direction, trim)
 
     // Right edge first, then left, so the boundary runs counter-clockwise.
-    boundary.push(add(along, scale(left, -leg.halfWidth)))
-    boundary.push(add(along, scale(left, leg.halfWidth)))
-    boundary.push(geometry.corners[i]!.position)
+    raw.push(add(along, scale(left, -leg.halfWidth)))
+    raw.push(add(along, scale(left, leg.halfWidth)))
+    raw.push(geometry.corners[i]!.position)
   }
+
+  // A leg's trim is derived from its corners, so whenever a corner is the one
+  // that set the trim, that corner and the leg's trimmed edge point are the
+  // same point. On a square crossroads every one of them collapses and the
+  // polygon is genuinely just its four corners. Leaving the duplicates in
+  // produces zero-area triangles.
+  const boundary = dedupeConsecutive(raw)
+  if (boundary.length < 3) return EMPTY
 
   const vertexCount = 1 + boundary.length
   const triangleCount = boundary.length
@@ -1376,7 +1499,7 @@ export const buildJunctionMesh = (
 npm test -- src/mesh/junctionMesh.test.ts
 ```
 
-Expected: PASS, 11 tests.
+Expected: PASS, 12 tests.
 
 If the winding test fails with a negative signed area, the boundary is running clockwise — swap the order in which each leg's right and left points are pushed, rather than reversing the index order, so the reason stays legible.
 
@@ -1827,7 +1950,7 @@ Expected: no TypeScript errors.
 npm test
 ```
 
-Expected: PASS, 350 tests across 23 files — 283 from earlier plans, plus 8 road extent, 15 network graph, 9 junction legs, 14 junction corners, 11 junction mesh, 10 network mesh.
+Expected: PASS, 356 tests across 23 files. Earlier plans and the fix rounds within this one supply the rest; the figure that matters is that nothing regresses.
 
 - [ ] **Step 5: Commit and push**
 

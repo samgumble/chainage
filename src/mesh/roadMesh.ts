@@ -20,6 +20,20 @@ export type RoadMesh = {
 }
 
 /**
+ * The stations between which a road physically exists.
+ *
+ * A road running into a junction is trimmed back so its ribbon does not
+ * overlap the junction surface, which means it can start after its alignment
+ * starts and end before its alignment ends. Stations stay **absolute** —
+ * chainage is measured from the alignment origin and never renumbered, which
+ * is the whole point of the measurement the game is named after.
+ */
+export type RoadExtent = {
+  readonly from: number
+  readonly to: number
+}
+
+/**
  * Build every pavement layer of a road.
  *
  * Omit `stations` for a finished road. All three layers are always present in
@@ -32,22 +46,26 @@ export const buildRoadMesh = (
   roadClass: RoadClass,
   stations?: LayerStations,
   options: RibbonOptions = {},
+  extent?: RoadExtent,
 ): RoadMesh => {
+  const from = extent ? extent.from : 0
+  const to = extent ? extent.to : alignment.length
+
+  if (to < from) {
+    throw new RangeError('extent.to must not be less than extent.from')
+  }
+
   const layers = roadClass.layers.map((spec) => {
-    const endStation = stations === undefined
-      ? alignment.length
-      : stations[spec.name] ?? 0
+    // A construction station is an absolute alignment station. Clamp it into
+    // the extent: past the end means fully built, before the start means not
+    // started. Omitting the layer entirely also means not started.
+    const requested = stations === undefined ? to : stations[spec.name] ?? from
+    const endStation = requested < from ? from : requested > to ? to : requested
 
     const section = layerTopProfile(roadClass, spec.name)
-    // `startStation`/`endStation` are deliberately overridden below, even if
-    // the caller supplied them in `options`: construction always begins at
-    // the road's start (station 0), and sweeping each layer only to its own
-    // per-layer construction station is this function's whole purpose. A
-    // caller wanting a partial range should slice the alignment itself
-    // rather than pass station bounds here.
     const mesh = sweepRibbon(alignment, design, section, {
       ...options,
-      startStation: 0,
+      startStation: from,
       endStation,
     })
 
