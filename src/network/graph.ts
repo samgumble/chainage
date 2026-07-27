@@ -47,34 +47,52 @@ export const NODE_SNAP_DISTANCE = 0.5
  * without touching a vertex buffer.
  */
 export class RoadNetwork {
-  private readonly roadList: Road[] = []
-  private readonly nodeList: { id: NodeId; position: Vec2; ends: RoadEnd[] }[] = []
+  private readonly roadMap = new Map<RoadId, Road>()
+  private readonly nodeMap = new Map<
+    NodeId,
+    { id: NodeId; position: Vec2; ends: RoadEnd[] }
+  >()
+
+  /**
+   * Identifiers come from a counter, never from a position.
+   *
+   * The mesh layer, the crossing detector and the scene all hold `RoadId` and
+   * `NodeId` keys across rebuilds. An index-derived id would renumber every
+   * later element on removal and silently repoint all of them. A counter that
+   * never reuses a value means a stale id is a lookup that throws, which is a
+   * bug you find, rather than a lookup that succeeds against the wrong road,
+   * which is a bug you ship.
+   */
+  private nextRoadId: RoadId = 0
+  private nextNodeId: NodeId = 0
 
   get roads(): readonly Road[] {
-    return [...this.roadList]
+    return [...this.roadMap.values()]
   }
 
   get nodes(): readonly NetworkNode[] {
-    return this.nodeList.map((n) => ({ ...n, ends: [...n.ends] }))
+    return [...this.nodeMap.values()].map((n) => ({ ...n, ends: [...n.ends] }))
   }
 
   road(id: RoadId): Road {
-    const found = this.roadList[id]
+    const found = this.roadMap.get(id)
     if (!found) throw new RangeError(`no road with id ${id}`)
     return { ...found }
   }
 
   node(id: NodeId): NetworkNode {
-    const found = this.nodeList[id]
+    const found = this.nodeMap.get(id)
     if (!found) throw new RangeError(`no node with id ${id}`)
     return { ...found, ends: [...found.ends] }
   }
 
   nodeAt(position: Vec2): NetworkNode | undefined {
-    const found = this.nodeList.find(
-      (n) => distance(n.position, position) <= NODE_SNAP_DISTANCE,
-    )
-    return found ? { ...found, ends: [...found.ends] } : undefined
+    for (const n of this.nodeMap.values()) {
+      if (distance(n.position, position) <= NODE_SNAP_DISTANCE) {
+        return { ...n, ends: [...n.ends] }
+      }
+    }
+    return undefined
   }
 
   /** Three or more road ends. Fewer is a dead end or a road passing through. */
@@ -87,17 +105,17 @@ export class RoadNetwork {
       throw new RangeError('cannot add a road with an empty alignment')
     }
 
-    const roadId = this.roadList.length
+    const roadId = this.nextRoadId++
     const startPosition = alignment.poseAt(0).position
     const endPosition = alignment.poseAt(alignment.length).position
 
     const startNode = this.nodeFor(startPosition)
     const endNode = this.nodeFor(endPosition)
 
-    this.nodeList[startNode]!.ends.push({ roadId, end: 'start' })
-    this.nodeList[endNode]!.ends.push({ roadId, end: 'end' })
+    this.nodeMap.get(startNode)!.ends.push({ roadId, end: 'start' })
+    this.nodeMap.get(endNode)!.ends.push({ roadId, end: 'end' })
 
-    this.roadList.push({ id: roadId, alignment, className, startNode, endNode })
+    this.roadMap.set(roadId, { id: roadId, alignment, className, startNode, endNode })
     return roadId
   }
 
@@ -114,8 +132,37 @@ export class RoadNetwork {
     const existing = this.nodeAt(position)
     if (existing) return existing.id
 
-    const id = this.nodeList.length
-    this.nodeList.push({ id, position, ends: [] })
+    const id = this.nextNodeId++
+    this.nodeMap.set(id, { id, position, ends: [] })
     return id
+  }
+
+  /**
+   * Remove a road and any node it leaves unreferenced.
+   *
+   * A node exists to record that road ends meet there. Once the last end is
+   * gone the node is not an empty junction, it is nothing, and leaving it
+   * behind would make it a snap target for roads drawn nowhere near an
+   * existing one.
+   */
+  removeRoad(id: RoadId): void {
+    const road = this.roadMap.get(id)
+    if (!road) throw new RangeError(`no road with id ${id}`)
+
+    this.roadMap.delete(id)
+
+    // A road may begin and end at the same node; the Set visits it once, and
+    // the filter below drops both of that road's ends in that one visit.
+    for (const nodeId of new Set([road.startNode, road.endNode])) {
+      const node = this.nodeMap.get(nodeId)
+      if (!node) continue
+
+      const remaining = node.ends.filter((e) => e.roadId !== id)
+      if (remaining.length === 0) {
+        this.nodeMap.delete(nodeId)
+      } else {
+        node.ends = remaining
+      }
+    }
   }
 }

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { RoadNetwork, NODE_SNAP_DISTANCE, type Road, type NetworkNode, type RoadEnd } from './graph'
 import { Alignment } from '../geometry/alignment'
-import { Line } from '../geometry/primitives'
+import { Arc, Line } from '../geometry/primitives'
 import { vec2 } from '../geometry/vec2'
 
 const straight = (fromX: number, fromY: number, heading: number, length: number) =>
@@ -265,5 +265,80 @@ describe('RoadNetwork snapping order dependency', () => {
     // but the specific connections differ based on order
     expect(order1NodeCount).toBeGreaterThanOrEqual(2)
     expect(order2NodeCount).toBeGreaterThanOrEqual(2)
+  })
+})
+
+describe('removeRoad', () => {
+  it('leaves the ids of surviving roads untouched', () => {
+    const net = new RoadNetwork()
+    const a = net.addRoad(straight(0, 0, 0, 100), 'rural')
+    const b = net.addRoad(straight(0, 50, 0, 100), 'rural')
+    const c = net.addRoad(straight(0, 100, 0, 100), 'rural')
+
+    net.removeRoad(b)
+
+    expect(net.road(c).id).toBe(c)
+    expect(net.road(a).id).toBe(a)
+    expect(net.roads.map((r) => r.id)).toEqual([a, c])
+    expect(() => net.road(b)).toThrow(RangeError)
+  })
+
+  it('never reuses the id of a removed road', () => {
+    const net = new RoadNetwork()
+    const a = net.addRoad(straight(0, 0, 0, 100), 'rural')
+    net.removeRoad(a)
+    const b = net.addRoad(straight(0, 0, 0, 100), 'rural')
+
+    expect(b).not.toBe(a)
+  })
+
+  it('deletes a node once nothing references it', () => {
+    const net = new RoadNetwork()
+    const a = net.addRoad(straight(0, 0, 0, 100), 'rural')
+    const nodeIds = net.nodes.map((n) => n.id)
+    expect(nodeIds).toHaveLength(2)
+
+    net.removeRoad(a)
+
+    expect(net.nodes).toHaveLength(0)
+    for (const id of nodeIds) {
+      expect(() => net.node(id)).toThrow(RangeError)
+    }
+  })
+
+  it('keeps a node that another road still uses, and detaches only the removed end', () => {
+    const net = new RoadNetwork()
+    // Two roads meeting at the origin.
+    const a = net.addRoad(straight(0, 0, 0, 100), 'rural')
+    const b = net.addRoad(straight(0, 0, Math.PI / 2, 100), 'rural')
+
+    const shared = net.nodeAt(vec2(0, 0))
+    expect(shared?.ends).toHaveLength(2)
+
+    net.removeRoad(a)
+
+    const after = net.nodeAt(vec2(0, 0))
+    expect(after?.id).toBe(shared?.id)
+    expect(after?.ends).toEqual([{ roadId: b, end: 'start' }])
+  })
+
+  it('detaches both ends of a road that loops back to its own node', () => {
+    const net = new RoadNetwork()
+    // A full circle: curvature 1/50, length 2*pi*50, so the end lands on the start.
+    const k = 1 / 50
+    const loop = new Alignment([new Arc(vec2(0, 0), 0, (2 * Math.PI) / k, k)])
+    const id = net.addRoad(loop, 'rural')
+
+    const node = net.nodeAt(vec2(0, 0))
+    expect(node?.ends).toHaveLength(2)
+
+    net.removeRoad(id)
+
+    expect(net.nodes).toHaveLength(0)
+  })
+
+  it('rejects an unknown road id', () => {
+    const net = new RoadNetwork()
+    expect(() => net.removeRoad(999)).toThrow(RangeError)
   })
 })
