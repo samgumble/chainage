@@ -14,6 +14,7 @@ import { ROAD_CLASSES, formationHalfWidth, totalPavementThickness, type RoadClas
 import { toBufferGeometry } from '../render/meshAdapter'
 import { terrainGeometry } from '../render/terrainMesh'
 import { CameraRig, type Vec3 as RigVec3 } from '../render/cameraRig'
+import { surfaceFor } from '../render/materials'
 import { RoadNetwork, type RoadId } from '../network/graph'
 import { buildNetworkMesh, type NetworkMesh } from '../mesh/networkMesh'
 import { DrawTool, SNAP_RADIUS } from '../tool/drawTool'
@@ -108,19 +109,14 @@ const EXCAVATION_MARGIN = 5
  */
 const EXCAVATION_ZFIGHT_MARGIN = 0.05
 
-/** Layer colours: warm earth, pale aggregate, dark asphalt — tuned for
- * contrast against each other and against the terrain so the three
- * differing end-stations are unmistakable. */
-const LAYER_COLOURS: Record<string, number> = {
-  subgrade: 0x8a6a3f,
-  base: 0xc7c3ba,
-  wearing: 0x35383d,
-}
-
-/** Structure (bridge/wall) colour — a neutral stone tone distinct from every
- * pavement layer, so a structure reads as a different kind of thing rather
- * than an odd-coloured road. */
-const STRUCTURE_COLOUR = 0x9a958c
+/**
+ * Where the demo network's three arms meet — a T junction on the valley
+ * floor, main road running east-west with a narrower gravel branch heading
+ * north. Module scope (not local to `buildSceneContent`) because
+ * `drawRoadScene` also needs it, to frame the camera rig on the same point
+ * the network was actually built around rather than a second guess at it.
+ */
+const JUNCTION = vec2(900, 1280)
 
 /**
  * Cut and fill the terrain down to the design surface along the corridor.
@@ -349,8 +345,6 @@ export const buildSceneContent = (): SceneContent => {
   // leg at the junction means every leg's own elevation there is natural
   // ground, so the three legs agree and the junction sits flush without
   // needing `elevationMismatches` to paper over a drifted arrival station.
-  const JUNCTION = vec2(900, 1280)
-
   const network = new RoadNetwork()
 
   // West and east arms both start at the junction, heading opposite ways
@@ -373,6 +367,86 @@ export const buildSceneContent = (): SceneContent => {
 
   const { designs, editLayer, built, infeasibleRoads } = solveNetwork(terrain, network)
   return { terrain, network, designs, editLayer, built, infeasibleRoads }
+}
+
+/** A sphere in the project's own convention (`(x, y)` ground, `z` up) that
+ * encloses a terrain's full footprint and elevation range. */
+export type TerrainBounds = {
+  readonly centerX: number
+  readonly centerY: number
+  readonly centerZ: number
+  readonly radius: number
+}
+
+/**
+ * The bounding sphere of a heightmap — its footprint (from `originX`/`originY`
+ * out to `width`/`height`) and the full spread of its own elevations.
+ *
+ * Exists to size the sun's shadow camera (see `drawRoadScene`): a
+ * `DirectionalLight`'s shadow is an orthographic camera whose default frustum
+ * is a couple of units across, which on terrain at this scene's scale
+ * produces either no shadows at all or a small square of them near the
+ * origin. A pure function of the terrain rather than a number picked by eye,
+ * so it stays correct if the demo terrain's footprint or relief ever changes.
+ * No three.js in sight, so it is testable without a renderer.
+ */
+export const terrainBounds = (terrain: Heightmap): TerrainBounds => {
+  let minZ = Infinity
+  let maxZ = -Infinity
+  for (const z of terrain.elevations) {
+    if (z < minZ) minZ = z
+    if (z > maxZ) maxZ = z
+  }
+
+  const centerX = terrain.originX + terrain.width / 2
+  const centerY = terrain.originY + terrain.height / 2
+  const centerZ = (minZ + maxZ) / 2
+  const halfElevation = (maxZ - minZ) / 2
+
+  return {
+    centerX,
+    centerY,
+    centerZ,
+    radius: Math.hypot(terrain.width / 2, terrain.height / 2, halfElevation),
+  }
+}
+
+/**
+ * Per-vertex colour for the terrain mesh, RGB triples in `terrainGeometry`'s
+ * own (row-major, step-1) vertex order.
+ *
+ * Undisturbed ground gets `surfaceFor('terrain')`'s colour; anywhere the edit
+ * layer has moved the ground from its natural elevation — the whole excavated
+ * corridor, batters included, not just where a road's ribbon sits — gets
+ * `surfaceFor('cutFace')`'s instead. Terrain and cut face share the same
+ * roughness and metalness (see `materials.ts`), so a single material with
+ * vertex colours carries the whole distinction; there is no second mesh here
+ * to give a different material to.
+ *
+ * Deliberately not built inside `terrainGeometry` itself: walking the same
+ * grid a second time here, rather than threading a colour concern into that
+ * function, keeps `terrainGeometry` free of anything but position/normal/uv,
+ * at the cost of repeating its (col, row) -> vertex-index walk. Must be
+ * called with `step = 1`, matching how `drawRoadScene` builds the geometry —
+ * a different step would desync the two vertex orderings.
+ */
+const terrainVertexColours = (terrain: Heightmap, editLayer: TerrainEditLayer): Float32Array => {
+  const terrainColour = new THREE.Color(surfaceFor('terrain').colour)
+  const cutColour = new THREE.Color(surfaceFor('cutFace').colour)
+  const colours = new Float32Array(terrain.cols * terrain.rows * 3)
+
+  for (let row = 0; row < terrain.rows; row++) {
+    for (let col = 0; col < terrain.cols; col++) {
+      const cut = editLayer.deltaAt(col, row) !== 0
+      const colour = cut ? cutColour : terrainColour
+      const i = (row * terrain.cols + col) * 3
+      colours[i] = colour.r
+      colours[i + 1] = colour.g
+      colours[i + 2] = colour.b
+    }
+  }
+
+  return colours
 }
 
 /**
@@ -407,17 +481,25 @@ const addNetworkMeshes = (
     )
   }
 
+  // Road and junction surfaces receive the sun's shadow (from terrain, from
+  // structures, from each other at a junction) as well as casting it — a
+  // ribbon in the shade of a cutting is exactly what a raised, low-sun view
+  // should show.
   for (const [, roadMesh] of built.roads) {
     for (const layer of roadMesh.layers) {
       if (layer.mesh.vertexCount === 0) continue
+      const surface = surfaceFor(layer.name)
       const mesh = new THREE.Mesh(
         toBufferGeometry(layer.mesh),
         new THREE.MeshStandardMaterial({
-          color: LAYER_COLOURS[layer.name] ?? 0x888888,
-          roughness: 0.9,
+          color: surface.colour,
+          roughness: surface.roughness,
+          metalness: surface.metalness,
           side: THREE.DoubleSide,
         }),
       )
+      mesh.castShadow = true
+      mesh.receiveShadow = true
       scene.add(mesh)
       meshes.push(mesh)
     }
@@ -425,14 +507,20 @@ const addNetworkMeshes = (
 
   for (const [, junctionMesh] of built.junctions) {
     if (junctionMesh.vertexCount === 0) continue
+    // A junction plate is the same sealed surface as the wearing course it
+    // joins, not a fourth material of its own.
+    const surface = surfaceFor('wearing')
     const mesh = new THREE.Mesh(
       toBufferGeometry(junctionMesh),
       new THREE.MeshStandardMaterial({
-        color: LAYER_COLOURS.wearing ?? 0x2e3033,
-        roughness: 0.9,
+        color: surface.colour,
+        roughness: surface.roughness,
+        metalness: surface.metalness,
         side: THREE.DoubleSide,
       }),
     )
+    mesh.castShadow = true
+    mesh.receiveShadow = true
     scene.add(mesh)
     meshes.push(mesh)
   }
@@ -446,12 +534,21 @@ const addNetworkMeshes = (
 
   for (const [, structureMesh] of built.structures) {
     if (structureMesh.vertexCount === 0) continue
+    // Bridge decks, abutments, piers and retaining walls are all structural
+    // concrete — one material, distinct from every pavement layer and from
+    // the terrain, so a structure reads as a different kind of thing rather
+    // than an odd-coloured road.
+    const surface = surfaceFor('concrete')
     const mesh = new THREE.Mesh(
       toBufferGeometry(structureMesh),
       new THREE.MeshStandardMaterial({
-        color: STRUCTURE_COLOUR, roughness: 0.85, side: THREE.DoubleSide,
+        color: surface.colour,
+        roughness: surface.roughness,
+        metalness: surface.metalness,
+        side: THREE.DoubleSide,
       }),
     )
+    mesh.castShadow = true
     scene.add(mesh)
     meshes.push(mesh)
   }
@@ -460,15 +557,31 @@ const addNetworkMeshes = (
     console.warn('crossings below minimum clearance', [...built.tightCrossings.entries()])
   }
 
+  // Vertex-coloured rather than a flat tint: the excavated corridor (see
+  // `terrainVertexColours`) is a different surface from undisturbed ground,
+  // not just a different shade of the same one. Terrain and cut face share a
+  // roughness and metalness (see `materials.ts`), so those two properties are
+  // still uniform across the mesh — only colour varies per vertex.
+  const terrainSurface = surfaceFor('terrain')
   const terrainMesh = new THREE.Mesh(
     terrainGeometry(terrain, 1, editLayer),
     // DoubleSide: the raised camera can look down on the terrain from angles
     // a near-level fixed camera never reached, and the grid winding culls as
     // back-facing from directly above without this.
     new THREE.MeshStandardMaterial({
-      color: 0x7a8a63, roughness: 0.95, flatShading: false, side: THREE.DoubleSide,
+      vertexColors: true,
+      roughness: terrainSurface.roughness,
+      metalness: terrainSurface.metalness,
+      flatShading: false,
+      side: THREE.DoubleSide,
     }),
   )
+  terrainMesh.geometry.setAttribute(
+    'color',
+    new THREE.BufferAttribute(terrainVertexColours(terrain, editLayer), 3),
+  )
+  terrainMesh.castShadow = true
+  terrainMesh.receiveShadow = true
   scene.add(terrainMesh)
   meshes.push(terrainMesh)
 
