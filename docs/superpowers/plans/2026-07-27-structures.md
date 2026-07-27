@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Give the three structure types geometry — retaining walls where a batter has no room, bridges where the design line stands too high above ground to fill, and overpasses where one road crosses another.
+**Goal:** Give two of the three structure types geometry — retaining walls where a batter has no room, and bridges where the design line stands too high above ground to fill — and give the third, road-over-road overpasses, detection and clearance reporting only. Overpass geometry is deliberately out of scope; see "Deliberately not in this plan" at the end, where the reasoning is recorded.
 
 **Architecture:** `src/mesh/structures/` produces plain typed arrays like the rest of `src/mesh/`. Two triggers already exist and are unused: `retainingWall()` in the terrain layer reports where a wall stands and how tall, and `classifySupport()` reports which stations need a structure rather than earth. This plan turns both into meshes, and adds the third trigger — road-over-road crossings — which needs the network graph.
 
@@ -1953,7 +1953,7 @@ What the reviewer will check:
 
 ## Plan complete
 
-All three structure types have geometry, and both previously-unused triggers finally drive something.
+Walls and bridges have geometry, overpasses have detection, and both previously-unused triggers finally drive something.
 
 ### Deliberately not in this plan
 

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { buildBridgeMesh, DECK_DEPTH, PIER_SPACING, supportStations } from './bridgeMesh'
 import { Alignment } from '../../geometry/alignment'
-import { Line } from '../../geometry/primitives'
+import { Line, Arc } from '../../geometry/primitives'
 import { vec2 } from '../../geometry/vec2'
 import { Heightmap } from '../../terrain/heightmap'
 import type { ProfilePoint } from '../../terrain/groundProfile'
@@ -150,9 +150,36 @@ describe('buildBridgeMesh', () => {
 
   // Signed-volume checks: a winding-vs-normal test (see above) is true by
   // construction in MeshBuilder and cannot catch a uniformly inverted solid.
-  // A short span over deep ground makes the abutment/pier boxes dominate the
-  // mesh, so the sign of the divergence-theorem volume is unambiguous even
-  // though the deck itself is an open surface with no meaningful volume.
+  // Every piece of the bridge is a closed solid — deck slab included, since
+  // its ends are capped — so the divergence-theorem volume is the true
+  // enclosed volume, independent of where the origin happens to be. That
+  // independence is what makes the sign an invariant rather than a race
+  // between whichever part of the mesh sits furthest from (0, 0, 0).
+
+  it('gives the deck slab its exact volume, with no supports in the mesh', () => {
+    // Ground above the deck's underside, so every support is skipped and the
+    // slab is all that is left: 100m long, 10m wide, DECK_DEPTH thick.
+    const m = buildBridgeMesh(road(200), flat(99), level(200, 100), span(50, 150, 1), 5)
+    expect(signedVolume(m)).toBeCloseTo(100 * 10 * DECK_DEPTH, 1)
+  })
+
+  it('measures the same volume wherever the origin is put', () => {
+    // A CURVED road on purpose. On a straight one the two end caps face
+    // exactly opposite ways, so their area vectors cancel and an uncapped
+    // slab is accidentally origin-independent anyway — the test would pass
+    // on the very mesh it exists to reject. Through a one-radian bend they
+    // do not cancel.
+    const bend = new Alignment([new Arc(vec2(0, 0), 0, 200, 1 / 200)])
+    const m = buildBridgeMesh(bend, flat(10), level(200, 100), span(50, 150, 90), 5)
+    const shifted = {
+      positions: Float32Array.from(m.positions, (v, i) =>
+        v + [1e4, 2e4, 3e4][i % 3]!),
+      indices: m.indices,
+    }
+    // Relative tolerance: Float32 positions 30km from the origin cannot hold
+    // a cubic metre exactly, but an unclosed surface would not be close at all.
+    expect(signedVolume(shifted)).toBeCloseTo(signedVolume(m), -2)
+  })
 
   it('has positive signed volume for an abutments-only bridge', () => {
     const m = buildBridgeMesh(road(200), flat(10), level(200, 100), span(90, 110, 90), 5, {

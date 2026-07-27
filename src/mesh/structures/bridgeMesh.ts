@@ -73,7 +73,8 @@ export const buildBridgeMesh = (
 
   // --- Deck slab, stepped along the span ---
   const steps = Math.max(1, Math.ceil(length / DECK_STEP))
-  let previous = deckSection(span.fromStation)
+  const first = deckSection(span.fromStation)
+  let previous = first
 
   for (let i = 1; i <= steps; i++) {
     const s = span.fromStation + (length * i) / steps
@@ -90,6 +91,24 @@ export const buildBridgeMesh = (
 
     previous = current
   }
+
+  // End caps, closing the slab into a solid.
+  //
+  // Two reasons, and the second is the one that matters. Visibly, the deck
+  // meets the abutments here and an uncapped slab leaves a hole straight
+  // through it. For the tests, an open surface encloses no volume, so the
+  // divergence-theorem check that catches an inside-out solid — the failure
+  // mode `MeshBuilder`'s winding guarantee makes its own normals test blind
+  // to — measured an origin-dependent number that came out positive only
+  // because the support boxes outweighed the slab. Closed, it measures the
+  // deck's true volume from any origin.
+  //
+  // Wound counter-clockwise seen from outside. At the start face the viewer
+  // stands off the end looking along the road, so the road's left edge is on
+  // their left and bottom-left, bottom-right, top-right, top-left runs the
+  // right way round.
+  builder.addQuad(first.leftBottom, first.rightBottom, first.rightTop, first.leftTop)
+  builder.addQuad(previous.leftTop, previous.rightTop, previous.rightBottom, previous.leftBottom)
 
   // --- Abutments and piers ---
   const supports = supportStations(span.fromStation, span.toStation, pierSpacing)

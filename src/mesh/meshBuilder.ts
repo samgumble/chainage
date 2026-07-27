@@ -22,6 +22,21 @@ const UV_METRES_PER_TILE = 4
  * — an inside-out road ribbon and an inside-out junction plate — and both were
  * caught only by a test comparing face normals against stored normals. Doing
  * it once here means the later tasks cannot repeat it.
+ *
+ * But note what that guarantee costs the test that caught those two bugs.
+ * Because each face's stored normal is derived from that face's own winding,
+ * "computed normal agrees with stored normal" is now true by construction for
+ * anything built through here — it is a tautology, not a check. It still
+ * catches a mesh assembled some other way, and it still catches faces that
+ * disagree with each OTHER, but it cannot see a solid that is uniformly
+ * inside-out: flip every face and every face still agrees with itself. That
+ * is exactly how the bridge's pier and abutment boxes originally shipped.
+ *
+ * For a closed solid the real test is the signed volume by the divergence
+ * theorem, which is positive only with outward normals and independent of the
+ * origin. It requires the solid actually to be closed — an open surface has
+ * no enclosed volume and its "volume" moves with the origin — so caps that
+ * look merely cosmetic are load-bearing for the test.
  */
 export class MeshBuilder {
   private readonly positions: number[] = []
