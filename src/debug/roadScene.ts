@@ -20,6 +20,7 @@ import { DrawTool, SNAP_RADIUS } from '../tool/drawTool'
 import { resolveSnap, type SnapTarget } from '../tool/snap'
 import { SelectTool, type SplitOutcome } from '../tool/selectTool'
 import {
+  describePolylineRejection,
   describeSplitOutcome,
   describeUpgradeObstacles,
   describeInfeasibleRoads,
@@ -608,7 +609,11 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     if (result.ok) {
       rebuildNetworkMeshes()
     } else {
+      // Kept alongside the message line below (not replaced by it): the
+      // console gives the raw rejection object for debugging, the message
+      // line gives the player a sentence they can act on.
       console.warn('commit rejected:', result.rejection.reason, result.rejection)
+      setMessage(describePolylineRejection(result.rejection), 'refusal')
     }
   }
 
@@ -709,7 +714,12 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     return new THREE.Vector3(p.x, z, -p.y)
   }
 
-  /** Log a rejection once per distinct cause, not once per frame. */
+  /**
+   * Report a rejection once per distinct cause, not once per frame — to the
+   * console, as before, and now to the message line too, so a corner too
+   * sharp to fillet or a segment short of the minimum shows up on screen
+   * while the player is still drawing it, not only at commit time.
+   */
   let lastLoggedRejectionKey: string | undefined
   const logRejection = (rejection: PolylineRejection | undefined): void => {
     if (!rejection) {
@@ -720,6 +730,7 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     if (key === lastLoggedRejectionKey) return
     lastLoggedRejectionKey = key
     console.warn('draw preview rejected:', rejection.reason, rejection)
+    setMessage(describePolylineRejection(rejection), 'refusal')
   }
 
   const setPreviewGeometry = (points: THREE.Vector3[], material: THREE.LineBasicMaterial): void => {
