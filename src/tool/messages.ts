@@ -1,6 +1,6 @@
 import type { PolylineRejection } from '../geometry/polyline'
 import type { UpgradeObstacle } from '../mesh/upgradeCheck'
-import type { InfeasibleCrossing } from '../network/crossingKind'
+import type { InfeasibleCrossing, ShallowCrossing } from '../network/crossingKind'
 import type { RoadId } from '../network/graph'
 import type { SplitOutcome } from './selectTool'
 
@@ -154,5 +154,35 @@ export const describeInfeasibleCrossings = (
     `road ${first.road} at ${fmt(first.requiredElevation)}m by station ` +
     `${fmt(first.station)}m to clear road ${first.crosses}, and its grade line ` +
     `gives up at station ${fmt(first.failedAtStation)}m.`
+  )
+}
+
+/**
+ * Summarise the crossings that were decked to a clamped length.
+ *
+ * A third channel again, and for the same reason the second one exists: the
+ * outcome is different from either of the others. These roads graded, got
+ * their lift and got a deck — the deck is simply too short for the angle, so
+ * the crossing is built and known to be wrong, rather than refused. The fix
+ * available to the player is different too: not a different alignment, and not
+ * a different place to cross, but a squarer angle to cross at.
+ *
+ * Empty when nothing was clamped, so a caller can test it for truthiness,
+ * exactly as the other two are used.
+ */
+export const describeShallowCrossings = (
+  crossings: readonly ShallowCrossing[],
+): string => {
+  const first = crossings[0]
+  if (!first) return ''
+
+  const count = crossings.length
+  const word = count === 1 ? 'crossing' : 'crossings'
+  const degrees = (first.angle * 180) / Math.PI
+  return (
+    `${count} ${word} cross too shallowly to deck; the first has road ${first.road} ` +
+    `over road ${first.crosses} at ${fmt(degrees)} degrees, which needs ` +
+    `${fmt(first.requiredHalfLength)}m of deck each way but was built with ` +
+    `${fmt(first.deckHalfLength)}m, so its earthwork falls on the road below.`
   )
 }

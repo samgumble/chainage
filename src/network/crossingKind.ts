@@ -41,6 +41,43 @@ export type InfeasibleCrossing = {
 }
 
 /**
+ * A crossing too shallow for an honest overpass deck, built to a clamped one.
+ *
+ * A deck has to keep the lifted road's earthwork out of a band either side of
+ * the road below, and the station length that takes grows as `1 / sin θ` in
+ * the angle between the two alignments — without bound as they approach
+ * parallel. Something has to stop it, so the derivation is clamped; but a
+ * clamped deck is a deck that is genuinely too short, and the earthwork it
+ * fails to hold back lands on the road underneath. That is the same defect
+ * the grade separation exists to fix, so it is reported rather than left to be
+ * discovered by looking at it.
+ *
+ * A separate channel from `InfeasibleCrossing` because the outcome is
+ * different: an infeasible crossing produces no road at all, while this one
+ * produces a road, and a deck, and a known-wrong overlap at the crossing.
+ */
+export type ShallowCrossing = {
+  /** The road that was lifted — always the newer of the two. */
+  readonly road: RoadId
+  /** The road it was lifted over. */
+  readonly crosses: RoadId
+  /** Station on `road` where the crossing falls, metres. */
+  readonly station: number
+  /** Angle between the two alignments at the crossing, radians. */
+  readonly angle: number
+  /** Half-length the deck was actually built to, metres. */
+  readonly deckHalfLength: number
+  /**
+   * Half-length the crossing angle actually called for, metres.
+   *
+   * `Infinity` for two exactly parallel alignments — which `findCrossings`
+   * cannot report, since parallel segments never intersect, but which the
+   * arithmetic here reaches honestly rather than by a special case.
+   */
+  readonly requiredHalfLength: number
+}
+
+/**
  * Whether a crossing is a junction the player asked for or a road they drew
  * across another one.
  *
