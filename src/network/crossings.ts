@@ -1,5 +1,5 @@
-import type { RoadNetwork, RoadId } from './graph'
-import { type Vec2, sub, cross, add, scale } from '../geometry/vec2'
+import { type RoadNetwork, type RoadId, NODE_SNAP_DISTANCE } from './graph'
+import { type Vec2, sub, cross, add, scale, distance } from '../geometry/vec2'
 import {
   type ProfilePoint, designElevationAtStation,
 } from '../terrain/groundProfile'
@@ -26,11 +26,15 @@ export type Crossing = {
 export const MIN_OVERPASS_CLEARANCE = 5.0
 
 /**
- * Where two roads cross in plan without sharing a node.
+ * Where two roads cross in plan without meeting at a junction.
  *
- * Roads that share a node meet at a junction and are excluded — a junction is
- * a crossing at the same level, deliberately. What is left is roads that pass
- * over or under one another, which is the overpass trigger.
+ * A crossing that lands at a node the two roads share is a junction — a
+ * crossing at the same level, deliberately — and is excluded. That exclusion
+ * is per-crossing, not per-pair: two roads connected at one junction can
+ * still cross again elsewhere, and that second crossing is a genuine
+ * overpass. Skipping the whole pair because they share a node anywhere would
+ * silently lose it, so every intersection is computed first and only the
+ * ones sitting on a shared node are discarded.
  *
  * Detection is by sampling: each alignment becomes a polyline and every pair
  * of segments is tested. That is quadratic in sample count and fine for the
@@ -66,40 +70,51 @@ export const findCrossings = (
       const roadA = roads[ia]!
       const roadB = roads[ib]!
 
-      // Sharing a node means they meet at a junction, not an overpass.
-      if (
-        roadA.startNode === roadB.startNode || roadA.startNode === roadB.endNode ||
-        roadA.endNode === roadB.startNode || roadA.endNode === roadB.endNode
-      ) {
-        continue
+      // Positions of nodes the two roads attach to in common. A crossing
+      // landing within NODE_SNAP_DISTANCE of one of these is the junction
+      // itself, not a second overpass.
+      const sharedNodeIds = new Set<number>()
+      for (const nodeId of [roadA.startNode, roadA.endNode]) {
+        if (nodeId === roadB.startNode || nodeId === roadB.endNode) {
+          sharedNodeIds.add(nodeId)
+        }
       }
+      const sharedNodePositions = [...sharedNodeIds].map((id) => network.node(id).position)
 
-      const hit = firstIntersection(polylines.get(roadA.id)!, polylines.get(roadB.id)!)
-      if (!hit) continue
+      const hits = allIntersections(polylines.get(roadA.id)!, polylines.get(roadB.id)!)
 
-      const zA = designElevationAtStation(designs.get(roadA.id) ?? [], hit.sA)
-      const zB = designElevationAtStation(designs.get(roadB.id) ?? [], hit.sB)
-      const aIsUpper = zA >= zB
+      for (const hit of hits) {
+        const atSharedNode = sharedNodePositions.some(
+          (nodePosition) => distance(nodePosition, hit.position) <= NODE_SNAP_DISTANCE,
+        )
+        if (atSharedNode) continue
 
-      crossings.push({
-        upper: aIsUpper ? roadA.id : roadB.id,
-        lower: aIsUpper ? roadB.id : roadA.id,
-        position: hit.position,
-        upperStation: aIsUpper ? hit.sA : hit.sB,
-        lowerStation: aIsUpper ? hit.sB : hit.sA,
-        clearance: Math.abs(zA - zB),
-      })
+        const zA = designElevationAtStation(designs.get(roadA.id) ?? [], hit.sA)
+        const zB = designElevationAtStation(designs.get(roadB.id) ?? [], hit.sB)
+        const aIsUpper = zA >= zB
+
+        crossings.push({
+          upper: aIsUpper ? roadA.id : roadB.id,
+          lower: aIsUpper ? roadB.id : roadA.id,
+          position: hit.position,
+          upperStation: aIsUpper ? hit.sA : hit.sB,
+          lowerStation: aIsUpper ? hit.sB : hit.sA,
+          clearance: Math.abs(zA - zB),
+        })
+      }
     }
   }
 
   return crossings
 }
 
-/** The first place two polylines cross, with the station on each. */
-const firstIntersection = (
+/** Every place two polylines cross, with the station on each. */
+const allIntersections = (
   a: readonly { point: Vec2; s: number }[],
   b: readonly { point: Vec2; s: number }[],
-): { position: Vec2; sA: number; sB: number } | null => {
+): { position: Vec2; sA: number; sB: number }[] => {
+  const hits: { position: Vec2; sA: number; sB: number }[] = []
+
   for (let i = 1; i < a.length; i++) {
     const p = a[i - 1]!
     const q = a[i]!
@@ -119,12 +134,26 @@ const firstIntersection = (
 
       if (tA < 0 || tA > 1 || tB < 0 || tB > 1) continue
 
-      return {
+      const hit = {
         position: add(p.point, scale(u, tA)),
         sA: p.s + (q.s - p.s) * tA,
         sB: r.s + (t.s - r.s) * tB,
       }
+
+      // A crossing that falls exactly on a shared polyline vertex is found
+      // twice — once from the segment ending at that vertex, once from the
+      // segment starting there. NODE_SNAP_DISTANCE (0.5m) is reused as the
+      // dedup tolerance for the same reason it works for node snapping: it
+      // is comfortably below any real road separation, so two genuinely
+      // distinct crossings on the same road pair are never merged, and
+      // comfortably above floating-point noise, so a same-vertex duplicate
+      // always collapses.
+      const isDuplicate = hits.some(
+        (existing) => distance(existing.position, hit.position) <= NODE_SNAP_DISTANCE,
+      )
+      if (!isDuplicate) hits.push(hit)
     }
   }
-  return null
+
+  return hits
 }
