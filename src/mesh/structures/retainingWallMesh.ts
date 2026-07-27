@@ -127,9 +127,44 @@ export const buildRetainingWallMesh = (
       .filter((w) => w.side === side)
       .sort((a, b) => a.s - b.s)
 
+    // The caller (networkMesh.ts) drops any segment that falls inside a
+    // bridge span before handing segments here, and `wallSegments` itself
+    // only emits a segment where a wall is actually needed — so a run can
+    // have gaps for either reason, and joining across one paints a solid
+    // panel over ground that has no wall at all. The fix needs to know how
+    // far apart two adjacent samples are SUPPOSED to be, which is the
+    // sampling spacing the caller used — but that value isn't passed in and
+    // hardcoding it would silently misjudge every caller who samples at a
+    // different spacing. So it's derived from the run itself: the median of
+    // the gaps between consecutive stations. Median rather than the minimum,
+    // because the last sample can legitimately be a shorter partial step
+    // (see `wallSegments`, which appends the alignment's own end station
+    // even when it doesn't land on a multiple of the sampling spacing) — the
+    // minimum gap would then be that partial step, not the regular cadence,
+    // and would wrongly reject every ordinary join as "too far apart".
+    // Median is only meaningful with at least two gaps (three segments); a
+    // run of exactly two segments has nothing else to compare its one gap
+    // against and is always joined — see retainingWallMesh.test.ts for that
+    // limitation made explicit.
+    const gaps: number[] = []
+    for (let i = 1; i < run.length; i++) gaps.push(run[i]!.s - run[i - 1]!.s)
+    const sortedGaps = [...gaps].sort((a, b) => a - b)
+    const mid = Math.floor(sortedGaps.length / 2)
+    const expectedSpacing = sortedGaps.length === 0
+      ? 0
+      : sortedGaps.length % 2 === 0
+        ? (sortedGaps[mid - 1]! + sortedGaps[mid]!) / 2
+        : sortedGaps[mid]!
+    // Any gap opened by a dropped segment skips at least one whole sample,
+    // so it is at least twice the regular spacing; 1.5x the median cleanly
+    // separates that from a genuine step while absorbing a shorter final
+    // partial step and ordinary floating-point noise.
+    const maxJoinGap = expectedSpacing * 1.5
+
     for (let i = 1; i < run.length; i++) {
       const from = run[i - 1]!
       const to = run[i]!
+      if (to.s - from.s > maxJoinGap) continue
 
       const poseFrom = alignment.poseAt(from.s)
       const poseTo = alignment.poseAt(to.s)

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { wallSegments, buildRetainingWallMesh } from './retainingWallMesh'
+import { wallSegments, buildRetainingWallMesh, type WallSegment } from './retainingWallMesh'
 import { Alignment } from '../../geometry/alignment'
 import { Line, Arc } from '../../geometry/primitives'
 import { vec2 } from '../../geometry/vec2'
@@ -197,5 +197,82 @@ describe('buildRetainingWallMesh', () => {
       const dot = fx * m.normals[i * 3]! + fy * m.normals[i * 3 + 1]! + fz * m.normals[i * 3 + 2]!
       expect(dot).toBeGreaterThan(0)
     }
+  })
+
+  // Handcrafted segments rather than `wallSegments()` output — these two
+  // tests are about the join logic in `buildRetainingWallMesh` alone, not
+  // about when `wallSegments`/networkMesh decide a wall is needed.
+  describe('station gaps', () => {
+    // A straight, heading-0 Line starting at the origin: `poseAt(s).position`
+    // is `(s, 0)` and `leftNormal` for heading 0 is `(0, 1)`, so every
+    // vertex's x-coordinate is exactly the station of the segment it came
+    // from — which is what lets the assertions below check adjacency
+    // directly off the emitted geometry instead of trusting a triangle count.
+    const straight = road(1000)
+
+    const seg = (s: number, side: 'left' | 'right'): WallSegment => ({
+      s,
+      side,
+      offset: side === 'left' ? -5 : 5,
+      topZ: 10,
+      bottomZ: 3,
+    })
+
+    // The station any vertex came from, recovered from its x-coordinate.
+    const stationOf = (m: ReturnType<typeof buildRetainingWallMesh>, vertex: number): number =>
+      m.positions[vertex * 3]!
+
+    it('does not join two segments separated by a station gap', () => {
+      // Segments at stations 100, 105, 110 — then 300, 305, 310. Spacing
+      // within each run is 5m, so the 110 -> 300 jump is a 190m gap, not an
+      // adjacency, even though the two runs are consecutive entries once
+      // sorted by station.
+      const stations = [100, 105, 110, 300, 305, 310]
+      const segments: WallSegment[] = stations.flatMap((s) => [seg(s, 'left'), seg(s, 'right')])
+      const mesh = buildRetainingWallMesh(straight, segments)
+
+      // The two small runs must still produce panels — this is not "does
+      // the whole thing come out empty", it is specifically "is the 190m
+      // gap absent from the geometry".
+      expect(mesh.triangleCount).toBeGreaterThan(0)
+
+      // Assert on the geometry itself, not a triangle/quad count a wrong
+      // implementation could equally satisfy: no triangle may join two
+      // vertices whose source stations are more than one nominal step (5m)
+      // apart. A triangle spanning the 190m gap would blow this bound by
+      // nearly 40x and is exactly the defect under test.
+      for (let t = 0; t < mesh.indices.length; t += 3) {
+        const stationsOfTri = [0, 1, 2].map((k) => stationOf(mesh, mesh.indices[t + k]!))
+        const spread = Math.max(...stationsOfTri) - Math.min(...stationsOfTri)
+        expect(spread).toBeLessThanOrEqual(5 + 1e-6)
+      }
+    })
+
+    it('still joins genuinely adjacent segments into one panel', () => {
+      // Segments at 100, 105, 110 with no gap must remain a single
+      // continuous panel — the fix must not shatter every wall into
+      // per-segment quads, which is the failure mode a naive "never join"
+      // change would produce while still passing the test above.
+      const stations = [100, 105, 110]
+      const segments: WallSegment[] = stations.flatMap((s) => [seg(s, 'left'), seg(s, 'right')])
+      const mesh = buildRetainingWallMesh(straight, segments)
+
+      expect(mesh.triangleCount).toBeGreaterThan(0)
+
+      // Structural continuity, not a count: every triangle must still
+      // respect the one-step bound (as above)...
+      for (let t = 0; t < mesh.indices.length; t += 3) {
+        const stationsOfTri = [0, 1, 2].map((k) => stationOf(mesh, mesh.indices[t + k]!))
+        const spread = Math.max(...stationsOfTri) - Math.min(...stationsOfTri)
+        expect(spread).toBeLessThanOrEqual(5 + 1e-6)
+      }
+
+      // ...and the geometry must actually reach both ends of the run — if
+      // the 105 -> 110 step were wrongly rejected alongside a genuine gap,
+      // the mesh would stop at station 105 rather than covering 100 to 110.
+      const allStations = Array.from({ length: mesh.vertexCount }, (_, i) => stationOf(mesh, i))
+      expect(Math.min(...allStations)).toBeCloseTo(100, 6)
+      expect(Math.max(...allStations)).toBeCloseTo(110, 6)
+    })
   })
 })
