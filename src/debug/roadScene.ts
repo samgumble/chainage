@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js'
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 import { Alignment } from '../geometry/alignment'
 import { Line } from '../geometry/primitives'
@@ -1513,6 +1514,17 @@ void main() {
     fragmentShader: TILT_SHIFT_FRAGMENT_SHADER,
   })
   composer.addPass(tiltShiftPass)
+
+  // Tone mapping and the sRGB encode happen in the material shader only when
+  // three renders to the *default framebuffer*. Rendering into a composer's
+  // target writes raw linear values instead, so without a final pass to
+  // convert them the linear buffer is handed to the screen as though it were
+  // already sRGB — which reads as a dark, desaturated, muddy image, and makes
+  // `toneMappingExposure` appear to do nothing at all, because no tone mapping
+  // ever ran. `OutputPass` exists for exactly this: it applies the renderer's
+  // tone mapping and output colour space as the last thing before the screen,
+  // so it must stay last in the chain.
+  composer.addPass(new OutputPass())
 
   // `ShaderPass` deep-clones the uniforms object passed to its constructor
   // (`UniformsUtils.cloneUniforms`, called on the object literal above) into
