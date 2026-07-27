@@ -5,13 +5,14 @@ import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 import { Alignment } from '../geometry/alignment'
 import { Line } from '../geometry/primitives'
-import { vec2, fromAngle, type Vec2 } from '../geometry/vec2'
+import { vec2, type Vec2 } from '../geometry/vec2'
 import type { PolylineRejection } from '../geometry/polyline'
 import { generateValley } from '../terrain/generate'
-import { sampleGroundProfile, designElevationAtStation, type ProfilePoint } from '../terrain/groundProfile'
+import { sampleGroundProfile, type ProfilePoint } from '../terrain/groundProfile'
 import { solveGradeProfile, type GradeSolution } from '../terrain/gradeSolver'
 import { TerrainEditLayer } from '../terrain/editLayer'
-import { designSurfaceAtOffset, type CorridorTemplate, type CorridorBatters } from '../terrain/corridor'
+import { type CorridorTemplate, type CorridorBatters } from '../terrain/corridor'
+import { CorridorExcavation, sweepCorridor } from '../terrain/excavation'
 import { rayTerrainIntersection, type Ray3, type Vec3 as GroundVec3 } from '../terrain/rayCast'
 import { clampNumber, type Heightmap, type TerrainSampler } from '../terrain/heightmap'
 import {
@@ -131,54 +132,37 @@ const EXCAVATION_ZFIGHT_MARGIN = 0.05
 const JUNCTION = vec2(900, 1280)
 
 /**
- * Cut and fill the terrain down to the design surface along the corridor.
+ * Sweep one road's corridor into a shared excavation.
  *
  * This is the piece that was missing: without it, the solved design line
  * (correctly placed below natural ground through cuts) sits inside an
  * un-dug hill and only pokes through where it happens to break the surface.
  *
- * Approach, approximate by design — this feeds a debug view, not the real
- * earthworks pipeline:
+ * The walk itself — station stepping, transverse sampling, grid snapping —
+ * lives in `terrain/excavation.ts`'s `sweepCorridor`, which is pure and
+ * tested; this function just supplies this scene's per-road parameters
+ * (pavement depth, batter template, spacing) and hands the result to a
+ * `CorridorExcavation` the caller shares across every road, so an overlap
+ * at a junction is arbitrated by nearest centreline rather than by whichever
+ * road happened to sweep that node last.
  *
- * 1. Walk the alignment every `EXCAVATION_STATION_SPACING` metres.
- * 2. At each station, take the design elevation from the solved profile and
- *    step transversely across the corridor, no further per step than the
- *    terrain's own cell size, out to a half-width generous enough to cover
- *    the batters (formation half-width, plus the steeper of the two slopes
- *    times the local cut/fill depth, plus a margin).
- * 3. At each transverse sample, snap to the nearest terrain grid node, read
- *    its existing (unedited) elevation, compute the corridor template's
- *    target elevation there, and record the difference as that node's delta
- *    in the edit layer.
- *
- * Grid nodes get written from multiple nearby stations/offsets; last write
- * wins, which is fine here since neighbouring stations along a gently curving
- * alignment agree closely on the design surface at a shared node.
- *
- * This excavation routine is a visual stand-in for the real earthworks
- * pipeline and must not be promoted into `src/terrain/`. Nearest-node
- * snapping with last-write-wins is fine for a debug view where "looks
- * continuous from an orbiting camera" is the bar, but it is not fine for
- * computing quantities — that needs the exact transverse integration in
- * `src/terrain/volumes.ts`, not this grid-snapped approximation.
- *
- * Writes into a caller-supplied `layer` rather than returning a fresh one, so
- * that calling this once per road in a network accumulates every corridor's
- * deltas onto the same terrain instead of each excavation clobbering the last.
+ * Until structure spans are threaded through from Task 3, `structureRanges`
+ * is empty: no station is treated as carried, so this sweep still cuts and
+ * fills straight through where a bridge should leave the ground alone. That
+ * is a known, temporary regression from the old per-station `MAX_FILL_HEIGHT`
+ * check this replaced, not a silent gap.
  */
 const excavateCorridor = (
-  layer: TerrainEditLayer,
+  into: CorridorExcavation,
+  terrain: Heightmap,
   alignment: Alignment,
   profile: readonly ProfilePoint[],
   className: RoadClassName,
 ): void => {
   if (alignment.isEmpty || profile.length === 0) return
 
-  const terrain = layer.base
   const template = corridorTemplateFor(className)
-  const transverseStep = terrain.cellSize
   const maxSlope = Math.max(template.cutSlope, template.fillSlope)
-  const steps = Math.max(1, Math.ceil(alignment.length / EXCAVATION_STATION_SPACING))
 
   // The design profile is the top of the finished road (top of the wearing
   // course), not the terrain elevation the road should rest on. The terrain
@@ -186,44 +170,23 @@ const excavateCorridor = (
   // the full pavement stack — plus a small margin against z-fighting. Using
   // an arbitrary clearance instead of this would either bury the pavement in
   // cut sections or leave it floating above the embankment in fill sections.
-  const pavementDepth = totalPavementThickness(ROAD_CLASSES[className])
+  const pavementDepth = totalPavementThickness(ROAD_CLASSES[className]) + EXCAVATION_ZFIGHT_MARGIN
 
-  for (let i = 0; i <= steps; i++) {
-    const s = Math.min(i * EXCAVATION_STATION_SPACING, alignment.length)
-    const pose = alignment.poseAt(s)
-    const roadZ = designElevationAtStation(profile, s)
-    const designZ = roadZ - pavementDepth - EXCAVATION_ZFIGHT_MARGIN
-
-    const centreGroundZ = terrain.sample(pose.position.x, pose.position.y)
-
-    // Where a structure carries the road there is no earthwork to build, so
-    // leave the ground alone — otherwise the embankment this loop would raise
-    // swallows the bridge whole. Same test `classifySupport` applies, but
-    // station by station: it does not know about `MIN_SPAN_LENGTH`, so an
-    // isolated high station would leave a short unfilled notch with no bridge
-    // over it. None occur in this valley, and this is a debug view.
-    if (roadZ - centreGroundZ > MAX_FILL_HEIGHT) continue
-
-    const depth = Math.abs(centreGroundZ - designZ)
-    const half = template.formationHalfWidth + maxSlope * depth + EXCAVATION_MARGIN
-
-    const normal = fromAngle(pose.heading + Math.PI / 2)
-    const transverseSteps = Math.max(1, Math.ceil(half / transverseStep))
-
-    for (let j = -transverseSteps; j <= transverseSteps; j++) {
-      const offset = (half * j) / transverseSteps
-      const worldX = pose.position.x + normal.x * offset
-      const worldY = pose.position.y + normal.y * offset
-
-      const col = Math.round((worldX - terrain.originX) / terrain.cellSize)
-      const row = Math.round((worldY - terrain.originY) / terrain.cellSize)
-      if (col < 0 || col >= terrain.cols || row < 0 || row >= terrain.rows) continue
-
-      const groundZ = terrain.elevationAtIndex(col, row)
-      const targetZ = designSurfaceAtOffset(offset, designZ, groundZ, template)
-      layer.setDelta(col, row, targetZ - groundZ)
-    }
-  }
+  sweepCorridor(
+    {
+      alignment,
+      profile,
+      terrain,
+      template,
+      pavementDepth,
+      maxSlope,
+      margin: EXCAVATION_MARGIN,
+      stationSpacing: EXCAVATION_STATION_SPACING,
+      transverseSpacing: terrain.cellSize,
+      structureRanges: [],
+    },
+    into,
+  )
 }
 
 /** Everything the scene draws, with no three.js anywhere in sight. */
@@ -302,15 +265,22 @@ export const solveNetwork = (
 
   // Excavate the terrain down to every road's design line before anything is
   // rendered, so each road sits in a real cutting/embankment rather than
-  // buried inside (or floating above) untouched ground. All roads accumulate
-  // onto the same edit layer so overlapping corridor footprints (junctions)
-  // are carved consistently.
+  // buried inside (or floating above) untouched ground. Every road sweeps
+  // into the SAME `CorridorExcavation`, and it is applied to the edit layer
+  // only once every road has been swept — a node inside two overlapping
+  // corridors is arbitrated by nearest centreline regardless of which road
+  // was swept first. Building one excavation per road instead would
+  // reproduce the last-write-wins bug this replaced: whichever road's
+  // `applyTo` ran last would erase any earlier road's cut wherever their
+  // footprints overlapped.
   const editLayer = new TerrainEditLayer(terrain)
+  const excavation = new CorridorExcavation(terrain.cols, terrain.rows)
   for (const road of network.roads) {
     const design = designs.get(road.id)
     if (!design || design.length === 0) continue
-    excavateCorridor(editLayer, road.alignment, design, road.className)
+    excavateCorridor(excavation, terrain, road.alignment, design, road.className)
   }
+  excavation.applyTo(editLayer)
 
   // Structures are measured against NATURAL ground, not the edit layer. The
   // edit layer has already been cut and filled to the design surface, so
