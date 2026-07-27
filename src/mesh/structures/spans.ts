@@ -87,5 +87,26 @@ export const structureSpans = (
   }
   closeRun(support.length - 1)
 
-  return spans
+  // Merge overlapping or touching spans. Two bridges whose abutments overlap
+  // are one bridge, and the merged span's height is the greater of the two.
+  const merged: StructureSpan[] = []
+  for (const span of spans) {
+    if (merged.length === 0) {
+      merged.push(span)
+    } else {
+      const prev = merged[merged.length - 1]!
+      if (span.fromStation <= prev.toStation) {
+        // Spans overlap or touch; merge them.
+        merged[merged.length - 1] = {
+          fromStation: prev.fromStation,
+          toStation: Math.max(prev.toStation, span.toStation),
+          maxHeight: Math.max(prev.maxHeight, span.maxHeight),
+        }
+      } else {
+        merged.push(span)
+      }
+    }
+  }
+
+  return merged
 }
