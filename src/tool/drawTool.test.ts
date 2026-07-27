@@ -3,7 +3,7 @@ import { Alignment } from '../geometry/alignment'
 import { Line } from '../geometry/primitives'
 import { distance } from '../geometry/vec2'
 import { NODE_SNAP_DISTANCE, RoadNetwork } from '../network/graph'
-import { DrawTool } from './drawTool'
+import { DrawTool, type CommitResult } from './drawTool'
 import { roadAt } from './snap'
 
 const straight = (x: number, y: number, heading: number, length: number) =>
@@ -82,6 +82,82 @@ describe('DrawTool', () => {
     expect(tool.snapAt(0)?.kind).toBe('node')
     if (tool.snapAt(0)?.kind !== 'node') return
     expect(tool.snapAt(0)).toMatchObject({ nodeId: startNode })
+  })
+
+  describe('suppressing snap', () => {
+    it('hovers at the raw position when snap is suppressed near a node', () => {
+      const net = new RoadNetwork()
+      net.addRoad(straight(0, 0, 0, 100), 'rural')
+
+      const tool = new DrawTool(net, 'rural')
+      tool.place({ x: 500, y: 500 }) // an anchor point, far from anything
+      tool.hover({ x: 3, y: 4 }, true) // well within SNAP_RADIUS of (0,0)
+
+      expect(tool.preview?.ok).toBe(true)
+      if (!tool.preview?.ok) return
+      const end = tool.preview.alignment.poseAt(tool.preview.alignment.length)
+      expect(end.position.x).toBeCloseTo(3, 6)
+      expect(end.position.y).toBeCloseTo(4, 6)
+    })
+
+    it('still snaps a hover when suppression is not requested', () => {
+      const net = new RoadNetwork()
+      net.addRoad(straight(0, 0, 0, 100), 'rural')
+
+      const tool = new DrawTool(net, 'rural')
+      tool.place({ x: 500, y: 500 })
+      tool.hover({ x: 3, y: 4 })
+
+      expect(tool.preview?.ok).toBe(true)
+      if (!tool.preview?.ok) return
+      const end = tool.preview.alignment.poseAt(tool.preview.alignment.length)
+      expect(end.position.x).toBeCloseTo(0, 6)
+      expect(end.position.y).toBeCloseTo(0, 6)
+    })
+
+    it('places at the raw position when snap is suppressed near a node', () => {
+      const net = new RoadNetwork()
+      net.addRoad(straight(0, 0, 0, 100), 'rural')
+
+      const tool = new DrawTool(net, 'rural')
+      tool.place({ x: 3, y: 4 }, true) // well within SNAP_RADIUS of (0,0)
+
+      expect(tool.points[0]).toEqual({ x: 3, y: 4 })
+      expect(tool.snapAt(0)?.kind).toBe('free')
+    })
+
+    it('still snaps a placed point to a node when suppression is not requested', () => {
+      const net = new RoadNetwork()
+      net.addRoad(straight(0, 0, 0, 100), 'rural')
+
+      const tool = new DrawTool(net, 'rural')
+      tool.place({ x: 3, y: 4 })
+
+      expect(tool.points[0]).toEqual({ x: 0, y: 0 })
+      expect(tool.snapAt(0)?.kind).toBe('node')
+    })
+
+    it('still splits a road at commit even when the point that lands on it was placed with snapping suppressed', () => {
+      // commit() re-derives containment from position, never from how a
+      // point was placed — see place()'s docstring. A suppressed point that
+      // happens to land on a road's centreline is not exempt from that.
+      const net = new RoadNetwork()
+      const existing = net.addRoad(straight(0, 0, 0, 400), 'rural')
+
+      const tool = new DrawTool(net, 'rural')
+      tool.place({ x: 200, y: 0 }, true) // exactly on the existing road, suppressed
+      expect(tool.snapAt(0)?.kind).toBe('free')
+      tool.place({ x: 200, y: 300 })
+
+      const result = tool.commit()
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+
+      expect(() => net.road(existing)).toThrow(RangeError)
+      expect(net.roads).toHaveLength(3)
+      const startNode = net.road(result.roadId).startNode
+      expect(net.isJunction(startNode)).toBe(true)
+    })
   })
 
   it('surfaces a rejection instead of a preview when the geometry is impossible', () => {
@@ -264,6 +340,108 @@ describe('DrawTool', () => {
     const newRoad = net.road(newRoadId)
     expect(net.isJunction(newRoad.startNode)).toBe(false)
     expect(net.isJunction(newRoad.endNode)).toBe(false)
+  })
+
+  it('splits both roads at an at-grade crossing when a point lands on it', () => {
+    // Two roads crossing at (0,0): one running east-west, one north-south.
+    // A point placed exactly on the crossing must split *both* — leaving
+    // one through unbroken would make the node look like a three-legged
+    // junction to isJunction() while a whole road silently passes over it.
+    const net = new RoadNetwork()
+    const roadA = net.addRoad(straight(-100, 0, 0, 200), 'rural') // x: -100..100, y=0
+    const roadB = net.addRoad(straight(0, -100, Math.PI / 2, 200), 'rural') // y: -100..100, x=0
+
+    const tool = new DrawTool(net, 'rural')
+    tool.place({ x: 0, y: 0 }) // exactly the crossing
+    tool.place({ x: 150, y: 150 }) // off both roads
+
+    const result = tool.commit()
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+
+    // Both originals are gone, each replaced by two halves, plus the new
+    // road: 5 roads total.
+    expect(() => net.road(roadA)).toThrow(RangeError)
+    expect(() => net.road(roadB)).toThrow(RangeError)
+    expect(net.roads).toHaveLength(5)
+
+    // The crossing alone needs 4 legs (two roads split in half each); the
+    // new road's own start adds a fifth.
+    const startNode = net.road(result.roadId).startNode
+    expect(net.isJunction(startNode)).toBe(true)
+    expect(net.node(startNode).ends).toHaveLength(5)
+  })
+
+  describe('the node-skip guard at commit', () => {
+    // commit() must not try to re-split a road where a node already exists —
+    // its own end, or a node an earlier point in the same loop just created.
+    // Gutting this guard does not fail any test that existed before this
+    // describe block: every one of them keeps placed points well clear of
+    // any node. These two are the guard's only coverage.
+
+    it('starts a new road at an existing node without throwing', () => {
+      const net = new RoadNetwork()
+      const existing = net.addRoad(straight(0, 0, 0, 200), 'rural')
+      const existingEnd = net.road(existing).endNode // at (200, 0)
+
+      const tool = new DrawTool(net, 'rural')
+      tool.place({ x: 200, y: 2 }) // within SNAP_RADIUS of the existing end node
+      expect(tool.snapAt(0)?.kind).toBe('node')
+      tool.place({ x: 200, y: 300 }) // a fresh direction away from it
+
+      let result: CommitResult | undefined
+      expect(() => {
+        result = tool.commit()
+      }).not.toThrow()
+      expect(result?.ok).toBe(true)
+      if (!result?.ok) return
+
+      const newRoad = net.road(result.roadId)
+      expect(newRoad.startNode).toBe(existingEnd)
+      // The dead end became a through connection: the original road's end
+      // plus the new road's start, two ends, not (yet) a junction.
+      expect(net.node(existingEnd).ends).toHaveLength(2)
+    })
+
+    it('skips a road where an earlier split in the same commit already left a node close by', () => {
+      const net = new RoadNetwork()
+      const main = net.addRoad(straight(0, 0, 0, 1000), 'rural')
+
+      const tool = new DrawTool(net, 'gravel')
+      // At place time `main` is still one continuous, unsplit road, so both
+      // of these resolve as 'road' snaps — station ~300 and ~300.3 — not as
+      // 'node' snaps. Two intervening waypoints keep every clicked segment
+      // comfortably clear of the minimum length, and route the path back to
+      // (300.3, 0) from the east so no corner is anywhere near a reversal.
+      tool.place({ x: 300, y: 0 }) // on `main`, station 300 — splits it
+      expect(tool.snapAt(0)?.kind).toBe('road')
+      tool.place({ x: 300, y: 300 })
+      tool.place({ x: 600, y: 300 })
+      tool.place({ x: 300.3, y: 0 }) // 0.3m from the first point's split —
+      // within NODE_SNAP_DISTANCE (0.5) of the fresh node, but not placed
+      // exactly on it: no node existed there when this point was placed.
+      expect(tool.snapAt(3)?.kind).toBe('road')
+
+      let result: CommitResult | undefined
+      expect(() => {
+        result = tool.commit()
+      }).not.toThrow()
+      expect(result?.ok).toBe(true)
+      if (!result?.ok) return
+
+      // `main` is split exactly once (at station 300), not a second time at
+      // the near-duplicate station the last point resolves to: two halves
+      // plus the new road, three roads total.
+      expect(() => net.road(main)).toThrow(RangeError)
+      expect(net.roads).toHaveLength(3)
+
+      const node = net.nodeAt({ x: 300, y: 0 })
+      expect(node).toBeDefined()
+      expect(node?.ends).toHaveLength(4) // both halves of `main`, plus the
+      // new road's start and end, which both land within snap distance of
+      // this same node.
+      expect(net.isJunction(node!.id)).toBe(true)
+    })
   })
 
   it('cancels without touching the network', () => {

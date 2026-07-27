@@ -7,7 +7,7 @@ import type { Alignment } from '../geometry/alignment'
 import type { Vec2 } from '../geometry/vec2'
 import { NODE_SNAP_DISTANCE, type RoadId, type RoadNetwork } from '../network/graph'
 import { ROAD_CLASSES, type RoadClassName } from '../network/roadClass'
-import { type SnapTarget, resolveSnap, roadAt } from './snap'
+import { type SnapTarget, resolveSnap, roadsAt } from './snap'
 
 export type DrawPreview =
   | { readonly ok: true; readonly alignment: Alignment }
@@ -85,13 +85,51 @@ export class DrawTool {
       : { ok: false, rejection: result.rejection }
   }
 
-  /** Move the provisional last point. Snaps, so the preview shows the truth. */
-  hover(position: Vec2): void {
-    this.hovered = resolveSnap(this.network, position, SNAP_RADIUS).position
+  /**
+   * Move the provisional last point. Snaps, so the preview shows the truth.
+   *
+   * `suppressSnap` bypasses snap resolution entirely and uses `position`
+   * exactly as given — the held-modifier escape hatch §4.1 requires ("A
+   * held modifier suppresses all snapping. This is table stakes and both
+   * Cities: Skylines games get it wrong"). The scene is expected to pass
+   * the modifier's current held state through on every call, the same way
+   * it already passes the pointer position through on every call — not to
+   * toggle some sticky mode on the tool.
+   *
+   * This only changes how the point's position is decided, nothing more:
+   * see `place`'s docstring for why suppressing snap does not also exempt
+   * the point from what `commit` does with it afterwards.
+   */
+  hover(position: Vec2, suppressSnap = false): void {
+    this.hovered = suppressSnap
+      ? position
+      : resolveSnap(this.network, position, SNAP_RADIUS).position
   }
 
-  place(position: Vec2): void {
-    const snap = resolveSnap(this.network, position, SNAP_RADIUS)
+  /**
+   * Place a point. Snaps by default; see `hover` for `suppressSnap`.
+   *
+   * A suppressed point is recorded with `kind: 'free'` — the same as a point
+   * that simply had nothing nearby to snap to, since from here on that is
+   * exactly what it is: a raw position, not a claim about any node or road.
+   *
+   * Deliberately **not** exempt from `commit`'s splitting, though. `commit`
+   * does not consult how a point was placed at all — it re-derives which
+   * roads a point's final position falls on fresh, every time (see its
+   * docstring), precisely so stale place-time information can never steer a
+   * mutation. A point placed with snapping suppressed that happens to land
+   * exactly on an existing road's centreline is, topologically, on that
+   * road; giving it immunity because of *how* it got there would mean
+   * carrying "this point asked not to snap" as extra state all the way to
+   * commit time — reintroducing the trust-the-place-time-metadata bug
+   * `commit` was already fixed once to not have. Suppressing snap is about
+   * player control over where a point lands, not about controlling what the
+   * graph does once it has landed there.
+   */
+  place(position: Vec2, suppressSnap = false): void {
+    const snap: SnapTarget = suppressSnap
+      ? { kind: 'free', position }
+      : resolveSnap(this.network, position, SNAP_RADIUS)
     this.placed.push({ position: snap.position, snap })
     this.hovered = undefined
   }
@@ -109,36 +147,36 @@ export class DrawTool {
    * Build the road.
    *
    * A point placed on an existing road splits it first, so the new road meets
-   * a real junction rather than crossing an unbroken one.
+   * a real junction rather than crossing an unbroken one. A point placed
+   * where two roads cross at grade splits *both* — a crossing that leaves one
+   * road unbroken looks like a junction to `isJunction` (the other road's
+   * ends still make it 3+) while actually being a stub with a road silently
+   * passing through it, the same shape of bug as splitting nothing at all.
    *
-   * Containment is re-derived here with `roadAt`, not trusted from the
+   * Containment is re-derived here with `roadsAt`, not trusted from the
    * `SnapTarget` captured when each point was placed: an earlier iteration of
-   * this same loop can already have split the road a later point's captured
-   * id refers to, leaving that id stale. `resolveSnap` cannot stand in for
-   * this re-derivation — its node-first radius would resolve a point back to
-   * the node an earlier split just created and skip the split it is meant to
-   * perform, the same bug in a narrower case (see `roadAt`'s docstring).
+   * this same loop can already have split a road a later point's captured id
+   * refers to, leaving that id stale. `resolveSnap` cannot stand in for this
+   * re-derivation — its node-first radius would resolve a point back to the
+   * node an earlier split just created and skip the split it is meant to
+   * perform, the same bug in a narrower case (see `roadAt`'s docstring, which
+   * `roadsAt` shares).
    *
    * Splitting every point before adding the new road matters, and not for the
    * reason it might look like — `addRoad`'s own node lookup dedupes by
    * position regardless of which call created the node first, so it does not
    * itself need the split to exist first (verified: reversing the two steps
    * still passes the single-split three-leg-junction test, because of that
-   * dedup). What breaks is `roadAt`. Once the new road has been added, its
+   * dedup). What breaks is `roadsAt`. Once the new road has been added, its
    * own centreline touches every point in `this.placed` at distance zero —
-   * that is where it was snapped to meet them — so it becomes a second
-   * candidate tied with the pre-existing road at every point still waiting to
-   * be split. `roadAt` only takes a strictly closer candidate, so nothing
-   * should override an already-found zero-distance match, but the "zero" on
-   * each side is really the bisection refinement's residual, and those
-   * residuals are not equal in practice: measured against this codebase,
-   * adding the new road first before resolving any point makes `roadAt`
-   * match the fresh road instead of the pre-existing one at *every* point,
-   * silently skipping every split and leaving both ends unconnected (see the
-   * "ordering" test in drawTool.test.ts, which reproduces this against a live
-   * network rather than asserting it from reasoning about the code).
-   * Splitting first avoids the ambiguity entirely: the new road does not
-   * exist yet to tie against anything while its points are being resolved.
+   * that is where it was snapped to meet them — so it becomes an extra
+   * candidate alongside any pre-existing road at every point still waiting to
+   * be split, and would itself get "split" nonsensically. Splitting first
+   * avoids the ambiguity entirely: the new road does not exist yet to appear
+   * as a candidate while its points are being resolved (see the "ordering"
+   * test in drawTool.test.ts, which reproduces the single-road version of
+   * this failure against a live network rather than asserting it from
+   * reasoning about the code).
    *
    * On rejection the placed points survive. A player whose last corner is too
    * sharp wants to move that corner, not to draw the whole road again.
@@ -148,18 +186,18 @@ export class DrawTool {
     if (!built.ok) return { ok: false, rejection: built.rejection }
 
     for (const { position } of this.placed) {
-      const found = roadAt(this.network, position, ROAD_CONTAINMENT_TOLERANCE)
-      if (!found) continue // Not on any road any more.
+      for (const found of roadsAt(this.network, position, ROAD_CONTAINMENT_TOLERANCE)) {
+        const road = this.network.road(found.roadId)
+        const distanceToEnd = road.alignment.length - found.station
+        if (found.station <= NODE_SNAP_DISTANCE || distanceToEnd <= NODE_SNAP_DISTANCE) {
+          // A node already exists here — this road's own end, or an earlier
+          // split in this loop — and addRoad will snap to it. Nothing to
+          // split.
+          continue
+        }
 
-      const road = this.network.road(found.roadId)
-      const distanceToEnd = road.alignment.length - found.station
-      if (found.station <= NODE_SNAP_DISTANCE || distanceToEnd <= NODE_SNAP_DISTANCE) {
-        // A node already exists here — this road's own end, or an earlier
-        // split in this loop — and addRoad will snap to it. Nothing to split.
-        continue
+        this.network.splitRoad(found.roadId, found.station)
       }
-
-      this.network.splitRoad(found.roadId, found.station)
     }
 
     const roadId = this.network.addRoad(built.alignment, this.className)

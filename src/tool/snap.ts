@@ -64,11 +64,11 @@ const nearestStation = (
 }
 
 /**
- * The road whose centreline currently passes within `tolerance` of a
- * position, and the station there — or `undefined` if no road does.
+ * Every road whose centreline currently passes within `tolerance` of a
+ * position, each with the station there.
  *
  * Unlike `resolveSnap`, this expresses no preference for nodes: it answers
- * "which road passes through this exact position", not "what is the player
+ * "which roads pass through this exact position", not "what is the player
  * pointing at". That distinction matters for re-deriving containment after a
  * mutation — for instance at commit time, once an earlier split may have
  * replaced the road a point was originally snapped to. `resolveSnap`'s wide,
@@ -76,10 +76,42 @@ const nearestStation = (
  * just created back to that node, skipping the very split it is being asked
  * to determine.
  *
+ * Plural, not "the nearest one": two roads can legitimately cross at grade,
+ * and a point placed on that crossing has to split both of them, not just
+ * whichever is closer (see `roadAt` for the single-match accessor, kept for
+ * callers that only care about one).
+ *
  * A tight tolerance — a tenth of a metre or so — is right: a position
  * reaching this function came from a snap onto a centreline, so it already
  * sits on the road to within floating-point noise. A loose tolerance would
  * start claiming a road the point merely passes near.
+ */
+export const roadsAt = (
+  network: RoadNetwork,
+  position: Vec2,
+  tolerance: number,
+): { readonly roadId: RoadId; readonly station: number }[] => {
+  const matches: { roadId: RoadId; station: number }[] = []
+  for (const road of network.roads) {
+    const candidate = nearestStation(network, road.id, position)
+    if (candidate.distance <= tolerance) {
+      matches.push({ roadId: road.id, station: candidate.station })
+    }
+  }
+  return matches
+}
+
+/**
+ * The single nearest road to pass `roadsAt`'s tolerance, or `undefined` if
+ * none does.
+ *
+ * On an exact tie, the first road encountered in `network.roads` order wins
+ * — insertion order, i.e. the earliest-created road — since ties are only
+ * ever overtaken by a strictly closer candidate. Most callers that care about
+ * containment should reach for `roadsAt` instead: a position can genuinely
+ * sit on more than one road (an at-grade crossing), and picking only the
+ * nearest silently drops the others. This accessor exists for callers that
+ * are deliberately choosing one candidate rather than enumerating a set.
  */
 export const roadAt = (
   network: RoadNetwork,
