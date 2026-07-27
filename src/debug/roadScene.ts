@@ -1479,28 +1479,51 @@ void main() {
   const FOCUS_RANGE_METRES = 60
   const FOCUS_FALLOFF_METRES = 220
 
-  const tiltShiftUniforms = {
-    tDiffuse: { value: null as THREE.Texture | null },
-    tDepth: { value: null as THREE.Texture | null },
-    uFocusDistance: { value: rig.distance },
-    uFocusRange: { value: FOCUS_RANGE_METRES },
-    uFocusFalloff: { value: FOCUS_FALLOFF_METRES },
-    uNear: { value: camera.near },
-    uFar: { value: camera.far },
-    uTexelSize: {
-      value: new THREE.Vector2(
-        1 / (initialWidth * composerPixelRatio),
-        1 / (initialHeight * composerPixelRatio),
-      ),
-    },
+  /** The uniform shape `TILT_SHIFT_UNIFORM_NAMES` names, typed concretely so
+   * the per-frame/per-resize writes below don't have to fight three's own
+   * `{ [name: string]: { value: any } }` typing on `ShaderPass.uniforms`. */
+  type TiltShiftUniforms = {
+    readonly tDiffuse: { value: THREE.Texture | null }
+    readonly tDepth: { value: THREE.Texture | null }
+    readonly uFocusDistance: { value: number }
+    readonly uFocusRange: { value: number }
+    readonly uFocusFalloff: { value: number }
+    readonly uNear: { value: number }
+    readonly uFar: { value: number }
+    readonly uTexelSize: { value: THREE.Vector2 }
   }
 
   const tiltShiftPass = new ShaderPass({
-    uniforms: tiltShiftUniforms,
+    uniforms: {
+      tDiffuse: { value: null as THREE.Texture | null },
+      tDepth: { value: null as THREE.Texture | null },
+      uFocusDistance: { value: rig.distance },
+      uFocusRange: { value: FOCUS_RANGE_METRES },
+      uFocusFalloff: { value: FOCUS_FALLOFF_METRES },
+      uNear: { value: camera.near },
+      uFar: { value: camera.far },
+      uTexelSize: {
+        value: new THREE.Vector2(
+          1 / (initialWidth * composerPixelRatio),
+          1 / (initialHeight * composerPixelRatio),
+        ),
+      },
+    },
     vertexShader: TILT_SHIFT_VERTEX_SHADER,
     fragmentShader: TILT_SHIFT_FRAGMENT_SHADER,
   })
   composer.addPass(tiltShiftPass)
+
+  // `ShaderPass` deep-clones the uniforms object passed to its constructor
+  // (`UniformsUtils.cloneUniforms`, called on the object literal above) into
+  // a *new* object before handing it to the material it actually renders
+  // with. Holding onto the object literal itself and mutating it every frame
+  // would silently update nothing — every uniform read below goes through
+  // `tiltShiftPass.uniforms`, the clone that is actually live, not the
+  // literal above. The cast is safe rather than a hopeful guess: `cloneUniforms`
+  // maps every key of the source object 1:1, so the clone has exactly the
+  // shape of the literal just constructed above.
+  const tiltShiftUniforms = tiltShiftPass.uniforms as unknown as TiltShiftUniforms
 
   // A window `resize` event alone isn't enough: it fires only for the
   // window's own dimensions, not for every reason the canvas's box can
