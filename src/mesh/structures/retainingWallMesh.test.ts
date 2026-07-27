@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import { wallSegments, buildRetainingWallMesh } from './retainingWallMesh'
 import { Alignment } from '../../geometry/alignment'
-import { Line } from '../../geometry/primitives'
+import { Line, Arc } from '../../geometry/primitives'
 import { vec2 } from '../../geometry/vec2'
 import { Heightmap } from '../../terrain/heightmap'
 import type { ProfilePoint } from '../../terrain/groundProfile'
-import type { CorridorTemplate } from '../../terrain/corridor'
+import { retainingWall, type CorridorTemplate } from '../../terrain/corridor'
 
 const road = (length: number) => new Alignment([new Line(vec2(0, 0), 0, length)])
 const level = (length: number, z: number): ProfilePoint[] => [{ s: 0, z }, { s: length, z }]
@@ -74,6 +74,55 @@ describe('wallSegments', () => {
   })
 })
 
+describe('wallSegments elevations', () => {
+  // Same template drives both cases below: formationHalfWidth 5, cutSlope
+  // 2H:1V, fillSlope 3H:1V, batters truncated at 4m.
+  const template: CorridorTemplate = {
+    formationHalfWidth: 5, cutSlope: 2, fillSlope: 3, maxBatterWidth: 4,
+  }
+
+  it('spans from the truncated batter end up to natural ground in cut', () => {
+    // Ground 105, design 100: the batter runs the full 4m allowed at 2H:1V,
+    // rising 2m from the design surface to z=102. The wall then holds the
+    // remaining 3m up to natural ground at 105, so the wall spans [102, 105].
+    const wall = retainingWall(100, 105, template)!
+    expect(wall).toEqual({ offset: 9, height: 3 })
+
+    const segments = wallSegments(road(100), flat(105), level(100, 100), template, 25)
+    expect(segments.length).toBeGreaterThan(0)
+    for (const w of segments) {
+      expect(w.bottomZ).toBeCloseTo(102, 6)
+      expect(w.topZ).toBeCloseTo(105, 6)
+      // Height agreement: the recorded span must match what retainingWall reports.
+      expect(w.topZ - w.bottomZ).toBeCloseTo(wall.height, 6)
+      // The wall must actually reach natural ground on one side or the other.
+      expect(Math.min(Math.abs(w.topZ - 105), Math.abs(w.bottomZ - 105))).toBeLessThan(1e-6)
+    }
+  })
+
+  it('spans from natural ground up to the truncated batter end in fill', () => {
+    // Ground 97, design 100: the batter runs the full 4m allowed at 3H:1V,
+    // dropping 4/3 m from the design surface to z=100-4/3=98.6667. The wall
+    // then holds the remaining depth down to natural ground at 97, so the
+    // wall spans [97, 98.6667].
+    const wall = retainingWall(100, 97, template)!
+    expect(wall.offset).toBeCloseTo(9, 6)
+    expect(wall.height).toBeCloseTo(5 / 3, 6) // depth 3, minus 4/3 of batter
+
+    const expectedBatterEnd = 100 - 4 / 3
+    const segments = wallSegments(road(100), flat(97), level(100, 100), template, 25)
+    expect(segments.length).toBeGreaterThan(0)
+    for (const w of segments) {
+      expect(w.bottomZ).toBeCloseTo(97, 6)
+      expect(w.topZ).toBeCloseTo(expectedBatterEnd, 6)
+      // Height agreement: the recorded span must match what retainingWall reports.
+      expect(w.topZ - w.bottomZ).toBeCloseTo(wall.height, 6)
+      // The wall must actually reach natural ground on one side or the other.
+      expect(Math.min(Math.abs(w.topZ - 97), Math.abs(w.bottomZ - 97))).toBeLessThan(1e-6)
+    }
+  })
+})
+
 describe('buildRetainingWallMesh', () => {
   it('returns an empty mesh with no segments', () => {
     const m = buildRetainingWallMesh(road(100), [])
@@ -129,5 +178,24 @@ describe('buildRetainingWallMesh', () => {
 
   it('rejects non-positive spacing', () => {
     expect(() => wallSegments(road(100), flat(100), level(100, 95), walled, 0)).toThrow(RangeError)
+  })
+
+  it('winds every triangle to agree with its normal on a curved alignment', () => {
+    // Straight fixtures make every wall quad planar by construction, so this
+    // is the only test exercising MeshBuilder.addQuad's normal averaging for
+    // a genuinely non-planar quad.
+    const curved = new Alignment([new Arc(vec2(0, 0), 0, 100, 0.01)])
+    const segments = wallSegments(curved, flat(100), level(100, 95), walled, 10)
+    const m = buildRetainingWallMesh(curved, segments)
+    expect(m.triangleCount).toBeGreaterThan(0)
+    for (let t = 0; t < m.indices.length; t += 3) {
+      const [i, j, k] = [m.indices[t]!, m.indices[t + 1]!, m.indices[t + 2]!]
+      const ax = m.positions[i * 3]!, ay = m.positions[i * 3 + 1]!, az = m.positions[i * 3 + 2]!
+      const ux = m.positions[j * 3]! - ax, uy = m.positions[j * 3 + 1]! - ay, uz = m.positions[j * 3 + 2]! - az
+      const vx = m.positions[k * 3]! - ax, vy = m.positions[k * 3 + 1]! - ay, vz = m.positions[k * 3 + 2]! - az
+      const fx = uy * vz - uz * vy, fy = uz * vx - ux * vz, fz = ux * vy - uy * vx
+      const dot = fx * m.normals[i * 3]! + fy * m.normals[i * 3 + 1]! + fz * m.normals[i * 3 + 2]!
+      expect(dot).toBeGreaterThan(0)
+    }
   })
 })

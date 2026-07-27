@@ -61,7 +61,13 @@ export const wallSegments = (
     const wall = retainingWall(designZ, groundZ, template)
     if (!wall || wall.height < MIN_WALL_HEIGHT) continue
 
-    const topZ = designSurfaceAtOffset(wall.offset, designZ, groundZ, template)
+    // The wall always spans between where the truncated batter ends and
+    // natural ground, whichever is higher — in cut the batter ends below
+    // ground and the wall holds the remainder up; in fill it ends above
+    // ground and the wall holds the remainder down.
+    const batterEnd = designSurfaceAtOffset(wall.offset, designZ, groundZ, template)
+    const topZ = Math.max(batterEnd, groundZ)
+    const bottomZ = Math.min(batterEnd, groundZ)
 
     for (const side of ['left', 'right'] as const) {
       segments.push({
@@ -69,7 +75,7 @@ export const wallSegments = (
         side,
         offset: side === 'left' ? -wall.offset : wall.offset,
         topZ,
-        bottomZ: topZ - wall.height,
+        bottomZ,
       })
     }
   }
@@ -87,12 +93,14 @@ export const wallSegments = (
     const designZ = designElevationAtStation(design, s)
     const wall = retainingWall(designZ, groundZ, template)
     if (wall && wall.height >= MIN_WALL_HEIGHT) {
-      const topZ = designSurfaceAtOffset(wall.offset, designZ, groundZ, template)
+      const batterEnd = designSurfaceAtOffset(wall.offset, designZ, groundZ, template)
+      const topZ = Math.max(batterEnd, groundZ)
+      const bottomZ = Math.min(batterEnd, groundZ)
       for (const side of ['left', 'right'] as const) {
         segments.push({
           s, side,
           offset: side === 'left' ? -wall.offset : wall.offset,
-          topZ, bottomZ: topZ - wall.height,
+          topZ, bottomZ,
         })
       }
     }
