@@ -12,6 +12,30 @@ const road = (length: number) => new Alignment([new Line(vec2(0, 0), 0, length)]
 const level = (length: number, z: number): ProfilePoint[] => [{ s: 0, z }, { s: length, z }]
 const flat = (z: number) => Heightmap.flat(-500, -500, 50, 41, 41, z)
 
+/**
+ * Ground on a constant east-facing gradient, `z` metres at x = 0.
+ *
+ * Linear in x, so bilinear sampling reproduces it exactly and an assertion can
+ * name the elevation at a station rather than approximating it. Every other
+ * fixture here is level, and level is precisely the case that cannot tell an
+ * abutment measured at its own station from one measured at the span
+ * boundary — the two coincide.
+ */
+const ramp = (z: number, slope: number): Heightmap => {
+  const cols = 41, rows = 41, cellSize = 50, originX = -500
+  const elevations = new Float32Array(cols * rows)
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      elevations[row * cols + col] = z + slope * (originX + col * cellSize)
+    }
+  }
+  return new Heightmap(originX, -500, cellSize, cols, rows, elevations)
+}
+
+/** A design line climbing at a constant grade from `z` at station 0. */
+const graded = (length: number, z: number, grade: number): ProfilePoint[] =>
+  [{ s: 0, z }, { s: length, z: z + grade * length }]
+
 const span = (from: number, to: number, maxHeight: number): StructureSpan => ({
   fromStation: from, toStation: to, maxHeight,
 })
@@ -254,6 +278,93 @@ describe('buildBridgeMesh', () => {
           expect(s).toBeLessThan(100)
         }
       }
+    })
+  })
+
+  /**
+   * An abutment is measured at its OWN station, not at the span boundary.
+   *
+   * `addBox` centres its footprint on the station it is given, so an abutment
+   * sitting exactly on a span boundary would hang half its length outside the
+   * span. It is shifted inward by its own half-length instead — and once it
+   * has been, the ground under it and the deck's underside over it are both at
+   * a different station from the boundary.
+   *
+   * Both fixtures below are sloped for exactly that reason. On a level fixture
+   * the two stations give the same answer and the distinction is invisible,
+   * which is how measuring at the wrong one survived every test here.
+   *
+   * `pierSpacing` is wider than the span throughout, so the only supports
+   * built are the two abutments and nothing else can be mistaken for them. The
+   * near abutment's box is centred at station 91 (90 + `PIER_HALF_WIDTH`) and
+   * runs from 90 to 92; the deck slab steps in 5m from 90, so x = 92 belongs
+   * to the abutment alone.
+   */
+  describe('an abutment on sloped ground', () => {
+    /** Vertices whose station is `s`, within Float32 noise. */
+    const zAtStation = (
+      m: ReturnType<typeof buildBridgeMesh>,
+      s: number,
+    ): number[] => {
+      const zs: number[] = []
+      for (let i = 0; i < m.vertexCount; i++) {
+        if (Math.abs(m.positions[i * 3]! - s) < 1e-3) zs.push(m.positions[i * 3 + 2]!)
+      }
+      return zs
+    }
+
+    it('stands on the ground under its own footprint, not under the span end', () => {
+      // Ground climbing at 0.2, so the 1m inward shift moves it 0.2m — twenty
+      // times any Float32 noise in these numbers, and invisible on a level
+      // fixture.
+      const ground = ramp(10, 0.2)
+      const m = buildBridgeMesh(
+        road(200), ground, level(200, 100), span(90, 110, 90), 5, RURAL,
+        { pierSpacing: 1000 },
+      )
+
+      const near = zAtStation(m, 92)
+      expect(near.length).toBeGreaterThan(0)
+      // The box's bottom is ground at station 91 — where the box actually is —
+      // and not ground at station 90, which is 0.2m lower.
+      expect(Math.min(...near)).toBeCloseTo(ground.sample(91, 0), 3)
+      expect(ground.sample(90, 0)).not.toBeCloseTo(ground.sample(91, 0), 3)
+    })
+
+    it('reaches the deck underside above its own footprint, not above the span end', () => {
+      // Level ground far below, so nothing about the ground can account for
+      // the difference; the design line is what slopes here, at 0.1.
+      const design = graded(200, 100, 0.1)
+      const m = buildBridgeMesh(
+        road(200), flat(10), design, span(90, 110, 90), 5, RURAL,
+        { pierSpacing: 1000 },
+      )
+
+      const near = zAtStation(m, 92)
+      expect(near.length).toBeGreaterThan(0)
+      // Design line at 91, less the pavement stack, less the deck, less the
+      // margin that keeps the two faces off each other.
+      const expected =
+        100 + 0.1 * 91 - totalPavementThickness(RURAL) - DECK_DEPTH - SUPPORT_DECK_MARGIN
+      expect(Math.max(...near)).toBeCloseTo(expected, 3)
+      // Measured at station 90 instead it would be 0.1m lower — short of the
+      // deck rather than into it, which is the defect.
+      expect(Math.max(...near)).not.toBeCloseTo(expected - 0.1, 3)
+    })
+
+    it('does the same at the far abutment, shifted the other way', () => {
+      // The far abutment shifts INWARD too, so its box is centred at 109 and
+      // its free station is 108. A fix that shifted both the same direction
+      // would pass the near-end assertions above and fail here.
+      const ground = ramp(10, 0.2)
+      const m = buildBridgeMesh(
+        road(200), ground, level(200, 100), span(90, 110, 90), 5, RURAL,
+        { pierSpacing: 1000 },
+      )
+
+      const far = zAtStation(m, 108)
+      expect(far.length).toBeGreaterThan(0)
+      expect(Math.min(...far)).toBeCloseTo(ground.sample(109, 0), 3)
     })
   })
 })
