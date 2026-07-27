@@ -14,6 +14,7 @@ import { ROAD_CLASSES, formationHalfWidth, totalPavementThickness, type RoadClas
 import { toBufferGeometry } from '../render/meshAdapter'
 import { terrainGeometry } from '../render/terrainMesh'
 import { CameraRig, type Vec3 as RigVec3 } from '../render/cameraRig'
+import { sunAt } from '../render/sunlight'
 import { surfaceFor } from '../render/materials'
 import { RoadNetwork, type RoadId } from '../network/graph'
 import { buildNetworkMesh, type NetworkMesh } from '../mesh/networkMesh'
@@ -651,21 +652,50 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   renderer.setClearColor(0x14181d)
 
+  // ACES Filmic is what turns a bright sun into a scene instead of a clipped
+  // white wash — without it a physically-lit sun blows every surface it
+  // touches straight to (1,1,1) and the render reads like a screenshot of a
+  // spreadsheet. `outputColorSpace` is left alone rather than set blindly:
+  // three 0.185's `WebGLRenderer` already defaults it to `SRGBColorSpace`
+  // (confirmed by reading `WebGLRenderer.js`'s constructor), so setting it
+  // again here would only restate the default — but it is restated anyway,
+  // as a visible assertion of that fact rather than a silent reliance on it,
+  // so a future three.js version that changed the default would show up here
+  // as an explicit line rather than a quietly different render.
+  renderer.toneMapping = THREE.ACESFilmicToneMapping
+  renderer.toneMappingExposure = 1
+  renderer.outputColorSpace = THREE.SRGBColorSpace
+
+  // Soft shadows (PCFSoftShadowMap) rather than the hard-edged default: a
+  // model lit by a single directional sun wants shadows soft enough to read
+  // as daylight, not a laser-cut silhouette.
+  renderer.shadowMap.enabled = true
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap
+
   const scene = new THREE.Scene()
-  // Pushed well past the camera's usual working distance so it no longer
-  // greys out the terrain and road; kept as gentle depth cueing near the far
-  // clip.
-  scene.fog = new THREE.Fog(0x14181d, 3800, 6000)
+  // No fog: depth of field (the tilt-shift pass, below) already tells the eye
+  // what is near and what is far. Fog on top of that reads as neither — two
+  // different ways of saying "distance" competing with each other rather than
+  // one clear one.
 
   const camera = new THREE.PerspectiveCamera(45, 1, 1, 6000)
 
-  // three r185 uses physically-based lighting, so intensities read very
-  // differently to older three.js versions — these are tuned by eye to
-  // give the terrain clear form and separate the three road layers.
-  scene.add(new THREE.HemisphereLight(0xbdd7ff, 0x3a3227, 3.5))
-  const sun = new THREE.DirectionalLight(0xfff2d8, 4.5)
-  sun.position.set(-600, 900, 400)
-  scene.add(sun)
+  /** Project convention `(x, y, z)`, `z` up, to three.js's `(x, z, -y)`. Must
+   * stay the exact inverse of `threeToProject` below. Takes the camera rig's
+   * own `Vec3` — this is only ever called with `rig.position`/`rig.target` —
+   * and, being a linear (origin-preserving) map, is reused as-is to convert
+   * the sun's direction vector too. */
+  const toThreePosition = (p: RigVec3): THREE.Vector3 => new THREE.Vector3(p.x, p.z, -p.y)
+
+  /** three.js's `(x, y, z)` back to the project's `(x, y, z)`, `z` up. The
+   * inverse of `meshAdapter.ts`'s `(x, y, z) -> (x, z, -y)`: three.x = x,
+   * three.y = z, three.z = -y, so x = three.x, z = three.y, y = -three.z.
+   * Returns the ground-cast's own `Vec3` — this only ever feeds `Ray3`. */
+  const threeToProject = (v: THREE.Vector3): GroundVec3 => ({
+    x: v.x,
+    y: -v.z,
+    z: v.y,
+  })
 
   const content = buildSceneContent()
   const { terrain, network } = content
@@ -673,6 +703,80 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   let built = content.built
   let infeasibleRoads = content.infeasibleRoads
   let terrainSampler: TerrainSampler = editLayer
+
+  // --- Sun and fill light ---------------------------------------------------
+  //
+  // Mid-afternoon: long enough shadows to read as a time of day, without the
+  // orange of sunset — `sunAt`'s own docstring calls this hour out as the
+  // reason `MAX_SUN_ELEVATION` is not overhead.
+  const SUN_HOUR = 15
+  const sunlight = sunAt(SUN_HOUR)
+
+  // Reduced from the fixed light's old 3.5: that light had to do all the
+  // work on its own, and now that the sun casts a real shadow, an
+  // equally-bright fill would flatten it straight back out. Kept, rather
+  // than removed, so the shadowed side of a cutting is dim, not black.
+  scene.add(new THREE.HemisphereLight(0xbdd7ff, 0x3a3227, 1.2))
+
+  const sun = new THREE.DirectionalLight(sunlight.colour, sunlight.intensity)
+  sun.castShadow = true
+
+  // The shadow camera is orthographic and, left at its default, has a
+  // frustum a couple of units across — on terrain at this scene's scale that
+  // produces either no shadows or a small square of them near the origin, and
+  // looks exactly like a terrain bug rather than an unsized camera. Sized
+  // instead from the terrain's own bounding sphere (see `terrainBounds`), with
+  // a small margin so the frustum's edge is not razor-tight against it.
+  const bounds = terrainBounds(terrain)
+  const SHADOW_FRUSTUM_MARGIN = 1.05
+  const shadowHalfSize = bounds.radius * SHADOW_FRUSTUM_MARGIN
+
+  const shadowCamera = sun.shadow.camera
+  shadowCamera.left = -shadowHalfSize
+  shadowCamera.right = shadowHalfSize
+  shadowCamera.top = shadowHalfSize
+  shadowCamera.bottom = -shadowHalfSize
+
+  // The light itself sits a few terrain-radii out along the sun's direction,
+  // looking at the terrain's centre, so the shadow camera's near/far can
+  // bound the terrain comfortably whatever the sun's elevation.
+  const LIGHT_DISTANCE_FACTOR = 2.5
+  const lightDistance = bounds.radius * LIGHT_DISTANCE_FACTOR
+  shadowCamera.near = 1
+  shadowCamera.far = lightDistance + bounds.radius * 1.5
+
+  const sunTargetPosition: RigVec3 = { x: bounds.centerX, y: bounds.centerY, z: bounds.centerZ }
+  const sunPosition: RigVec3 = {
+    x: bounds.centerX + sunlight.direction.x * lightDistance,
+    y: bounds.centerY + sunlight.direction.y * lightDistance,
+    z: bounds.centerZ + sunlight.direction.z * lightDistance,
+  }
+  sun.position.copy(toThreePosition(sunPosition))
+  sun.target.position.copy(toThreePosition(sunTargetPosition))
+  // The light's target must be in the scene graph for its world matrix to
+  // update — otherwise it stays at the origin and the light points nowhere
+  // near the terrain regardless of where `sun.position` is set.
+  scene.add(sun.target)
+
+  // Shadow acne (self-shadowing noise on a lit face) and peter-panning (the
+  // shadow visibly detached from the object casting it) pull in opposite
+  // directions from the same knob, so both are tuned together rather than
+  // either alone. At this shadow camera's size (radius in the hundreds of
+  // metres) the shadow map's own texel already covers roughly a metre of
+  // ground, so `normalBias` — which offsets the sampled position along the
+  // surface normal in world units — needs to be on that order to clear the
+  // texel-sized error acne comes from; `bias`, a small constant offset in
+  // normalized depth, only needs to be enough to clear ordinary depth
+  // quantization. These values were reached by looking at the rendered scene
+  // (Step 8): smaller bias/normalBias showed acne across the terrain and
+  // especially along the batters; larger normalBias visibly detached the
+  // road's shadow from the road itself on the cutting side.
+  sun.shadow.bias = -0.0004
+  sun.shadow.normalBias = 0.6
+  sun.shadow.mapSize.set(4096, 4096)
+  shadowCamera.updateProjectionMatrix()
+
+  scene.add(sun)
 
   // The tool draws in whatever class the player picked; there is no class
   // picker yet, so it draws rural roads until the selection UI exists.
@@ -732,29 +836,25 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
 
   // --- Camera rig ---------------------------------------------------------
   //
-  // Targets the same place the old automatic orbit circled — ORBIT_CENTER
-  // converted from three.js's (x, z, -y) back to the project's (x, y, z) — and
-  // starts at the distance the old fixed radius/height implied, so the
-  // initial framing is unchanged even though the motion is now pointer-driven
-  // instead of automatic.
-  const RIG_TARGET: RigVec3 = { x: 1300, y: 1300, z: 105 }
-  const RIG_INITIAL_DISTANCE = Math.hypot(1400, 700)
+  // Targets the actual junction the demo network was built around (`JUNCTION`,
+  // module scope — see its docstring), not a separate guess at the same spot,
+  // so bringing the distance in below reliably frames the junction rather
+  // than empty terrain beside it.
+  const RIG_TARGET: RigVec3 = {
+    x: JUNCTION.x,
+    y: JUNCTION.y,
+    z: terrain.sample(JUNCTION.x, JUNCTION.y),
+  }
+
+  // Close enough that the junction — three formation widths meeting at one
+  // point — fills a useful part of the screen, rather than the old ~1565m
+  // that read every road as a hairline across a map (Step 6).
+  const RIG_INITIAL_DISTANCE = 300
   const rig = new CameraRig(RIG_TARGET, RIG_INITIAL_DISTANCE)
-
-  /** Project convention `(x, y, z)`, `z` up, to three.js's `(x, z, -y)`. Must
-   * stay the exact inverse of `threeToProject` below. Takes the camera rig's
-   * own `Vec3` — this is only ever called with `rig.position`/`rig.target`. */
-  const toThreePosition = (p: RigVec3): THREE.Vector3 => new THREE.Vector3(p.x, p.z, -p.y)
-
-  /** three.js's `(x, y, z)` back to the project's `(x, y, z)`, `z` up. The
-   * inverse of `meshAdapter.ts`'s `(x, y, z) -> (x, z, -y)`: three.x = x,
-   * three.y = z, three.z = -y, so x = three.x, z = three.y, y = -three.z.
-   * Returns the ground-cast's own `Vec3` — this only ever feeds `Ray3`. */
-  const threeToProject = (v: THREE.Vector3): GroundVec3 => ({
-    x: v.x,
-    y: -v.z,
-    z: v.y,
-  })
+  // Lower than `CameraRig`'s own default elevation (`Math.PI / 5`, 36°): a
+  // diorama is looked across at a raised, comfortable angle, not down at from
+  // near-plan.
+  rig.elevation = 0.4
 
   const updateCameraFromRig = (): void => {
     camera.position.copy(toThreePosition(rig.position))
@@ -1407,6 +1507,10 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     marker.geometry.dispose()
     ;(marker.material as THREE.MeshBasicMaterial).dispose()
 
+    // The sun's shadow map is a render target the renderer allocates lazily
+    // on first use, once shadows are enabled — not created by this function
+    // directly, but still this function's responsibility to free.
+    sun.shadow.dispose()
     renderer.dispose()
     messageEl.remove()
   }
