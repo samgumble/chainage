@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { Alignment } from '../geometry/alignment'
 import { minimumRadiusForSpeed } from '../geometry/designSpeed'
 import { Arc, Line } from '../geometry/primitives'
+import { Spiral } from '../geometry/spiral'
 import { checkClassChange } from './classChange'
 import { RoadNetwork } from './graph'
 import { ROAD_CLASSES } from './roadClass'
@@ -71,15 +72,13 @@ describe('checkClassChange', () => {
     expect(result.ok).toBe(false)
     if (result.ok) return
     expect(result.rejection.actualRadius).toBeCloseTo(severe, 3)
-    // Not toBeGreaterThan(60): Alignment.primitiveAt assigns an exact
-    // boundary station to the later primitive (see alignment.ts and
-    // alignment.test.ts "assigns a boundary station to the later
-    // primitive"), so with two 60m arcs and the default 1m sample spacing,
-    // poseAt(60) already reports the second arc's curvature. The tightest
-    // curve genuinely begins at s=60; requiring station > 60 would demand a
-    // sample that lands past the joint, which the fixture's round numbers
-    // never produce.
+    // The severe arc spans stations 60 to 120 and has constant curvature
+    // throughout, so with the endpoint scan the reported station must be one
+    // of its two ends — a real constraint on the implementation, not a
+    // tautology like ">= 60" (which the first arc's own end station would
+    // already satisfy regardless of which arc is reported).
     expect(result.rejection.station).toBeGreaterThanOrEqual(60)
+    expect(result.rejection.station).toBeLessThanOrEqual(120)
   })
 
   it('allows a downgrade that the geometry already satisfies', () => {
@@ -94,5 +93,48 @@ describe('checkClassChange', () => {
   it('accepts a change to the class the road already is', () => {
     const road = roadWith(new Alignment([new Line({ x: 0, y: 0 }, 0, 100)]), 'rural')
     expect(checkClassChange(road, 'rural')).toEqual({ ok: true })
+  })
+
+  it('catches a sub-metre illegal arc that a 1-metre sampling grid steps over', () => {
+    const required = minimumRadiusForSpeed(ROAD_CLASSES.highway.designSpeedKph)
+    const tight = required / 3
+
+    // A 0.5m arc sitting strictly between the s=10 and s=11 grid points, with
+    // dead-straight, curvature-0 line either side. A fixed 1m sample grid
+    // visits 10 and 11 and nothing in between, so it never sees the arc.
+    const line1 = new Line({ x: 0, y: 0 }, 0, 10.3)
+    const p1 = line1.poseAt(10.3)
+    const arc = new Arc(p1.position, p1.heading, 0.5, 1 / tight)
+    const p2 = arc.poseAt(0.5)
+    const line2 = new Line(p2.position, p2.heading, 10)
+
+    const road = roadWith(new Alignment([line1, arc, line2]), 'gravel')
+
+    const result = checkClassChange(road, 'highway')
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.rejection.actualRadius).toBeCloseTo(tight, 3)
+    expect(result.rejection.station).toBeGreaterThanOrEqual(10.3)
+    expect(result.rejection.station).toBeLessThanOrEqual(10.8)
+  })
+
+  it("finds a Spiral's peak curvature at its endpoint, off the sample grid", () => {
+    const required = minimumRadiusForSpeed(ROAD_CLASSES.highway.designSpeedKph)
+    // Just barely illegal at the very tip of the spiral; curvature scales
+    // linearly down from there, so both neighbouring 1m grid points (10 and
+    // 11) sit comfortably on the legal side.
+    const endCurvature = 1 / (0.99 * required)
+
+    const spiral = new Spiral({ x: 0, y: 0 }, 0, 10.5, 0, endCurvature)
+    const p = spiral.poseAt(10.5)
+    const line = new Line(p.position, p.heading, 10)
+
+    const road = roadWith(new Alignment([spiral, line]), 'gravel')
+
+    const result = checkClassChange(road, 'highway')
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.rejection.actualRadius).toBeCloseTo(0.99 * required, 3)
+    expect(result.rejection.station).toBeCloseTo(10.5, 6)
   })
 })
