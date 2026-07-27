@@ -90,12 +90,11 @@ export class RoadNetwork {
   }
 
   nodeAt(position: Vec2): NetworkNode | undefined {
-    const candidates = this.index.nearby(position)
-    const first = candidates[0]
-    if (first === undefined) return undefined
-    const found = this.nodeMap.get(first)
-    if (!found) return undefined
-    return { ...found, ends: [...found.ends] }
+    for (const candidate of this.index.nearby(position)) {
+      const found = this.nodeMap.get(candidate)
+      if (found) return { ...found, ends: [...found.ends] }
+    }
+    return undefined
   }
 
   /** Three or more road ends. Fewer is a dead end or a road passing through. */

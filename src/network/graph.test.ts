@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { RoadNetwork, NODE_SNAP_DISTANCE, type Road, type NetworkNode, type RoadEnd } from './graph'
 import { Alignment } from '../geometry/alignment'
 import { Arc, Line } from '../geometry/primitives'
-import { vec2 } from '../geometry/vec2'
+import { vec2, type Vec2 } from '../geometry/vec2'
 
 const straight = (fromX: number, fromY: number, heading: number, length: number) =>
   new Alignment([new Line(vec2(fromX, fromY), heading, length)])
@@ -136,6 +136,29 @@ describe('RoadNetwork lookups', () => {
   it('rejects an empty alignment', () => {
     const net = new RoadNetwork()
     expect(() => net.addRoad(new Alignment([]), 'rural')).toThrow(RangeError)
+  })
+})
+
+describe('RoadNetwork nodeAt robustness', () => {
+  it('skips a stale index entry and still finds the real node', () => {
+    const net = new RoadNetwork()
+    const id = net.addRoad(straight(0, 0, 0, 100), 'rural')
+    const realNode = net.road(id).startNode
+
+    // Plant a stale index entry at the same position, with an id lower than
+    // the real node's — NodeIndex.nearby returns candidates in ascending id
+    // order, so this stale entry sorts first. Nothing but the index knows
+    // about it: it is not in nodeMap, exactly the shape a removed-but-not-
+    // reindexed node would leave behind. Reached via the private field
+    // directly (TS `private` is not enforced at runtime) rather than adding
+    // a production-only hook for this one test.
+    const internals = net as unknown as {
+      index: { insert(id: number, position: Vec2): void }
+    }
+    internals.index.insert(realNode - 1, vec2(0, 0))
+
+    const found = net.nodeAt(vec2(0, 0))
+    expect(found?.id).toBe(realNode)
   })
 })
 
