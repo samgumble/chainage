@@ -39,12 +39,12 @@ export class CameraRig {
     if (!(distance > 0)) {
       throw new RangeError('camera distance must be positive')
     }
-    this.targetPosition = target
+    this.targetPosition = { ...target }
     this.distance = clamp(distance, MIN_DISTANCE, MAX_DISTANCE)
   }
 
   get target(): Vec3 {
-    return this.targetPosition
+    return { ...this.targetPosition }
   }
 
   get position(): Vec3 {
