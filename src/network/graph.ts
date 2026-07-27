@@ -201,4 +201,18 @@ export class RoadNetwork {
 
     return { first, second, node: this.road(first).endNode }
   }
+
+  /**
+   * Change a road's class.
+   *
+   * Deliberately unconditional: legality is `checkClassChange`'s job and, for
+   * junctions, `checkUpgrade`'s. Folding the check in here would make the
+   * graph import the mesh layer to ask about junction geometry, inverting the
+   * dependency direction. The caller checks, then commits.
+   */
+  setRoadClass(id: RoadId, className: RoadClassName): void {
+    const road = this.roadMap.get(id)
+    if (!road) throw new RangeError(`no road with id ${id}`)
+    this.roadMap.set(id, { ...road, className })
+  }
 }

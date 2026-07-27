@@ -413,3 +413,25 @@ describe('splitRoad', () => {
     expect(() => net.splitRoad(id, 99.8)).toThrow(RangeError)
   })
 })
+
+describe('setRoadClass', () => {
+  it('changes the class and keeps the id and topology', () => {
+    const net = new RoadNetwork()
+    const id = net.addRoad(straight(0, 0, 0, 100), 'gravel')
+    const before = net.road(id)
+
+    net.setRoadClass(id, 'highway')
+
+    const after = net.road(id)
+    expect(after.className).toBe('highway')
+    expect(after.id).toBe(id)
+    expect(after.startNode).toBe(before.startNode)
+    expect(after.endNode).toBe(before.endNode)
+    expect(after.alignment).toBe(before.alignment)
+  })
+
+  it('rejects an unknown road id', () => {
+    const net = new RoadNetwork()
+    expect(() => net.setRoadClass(999, 'rural')).toThrow(RangeError)
+  })
+})
