@@ -111,3 +111,18 @@ export const formationHalfWidth = (rc: RoadClass): number =>
 
 export const totalPavementThickness = (rc: RoadClass): number =>
   rc.layers.reduce((sum, l) => sum + l.thickness, 0)
+
+/**
+ * The classes in ascending order of capacity.
+ *
+ * A ladder rather than a set, because "upgrade" and "downgrade" have to mean
+ * a step, and the order is a design statement — gravel lane to rural two-lane
+ * to arterial to divided highway — not something derivable from lane counts,
+ * which could coincide.
+ */
+export const ROAD_CLASS_ORDER: readonly RoadClassName[] = [
+  'gravel',
+  'rural',
+  'arterial',
+  'highway',
+]
