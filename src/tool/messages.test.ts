@@ -199,4 +199,46 @@ describe('describeInfeasibleRoads', () => {
     )
     expect(message).toContain('2')
   })
+
+  it('says "road" (singular) for exactly one failure', () => {
+    const message = describeInfeasibleRoads(new Map([[4, 100]]))
+    // Would still pass if the singular/plural branch were deleted and
+    // "roads" always printed — the negative assertion is what pins it.
+    expect(message).toMatch(/1 road\b/)
+    expect(message).not.toMatch(/\broads\b/)
+  })
+
+  it('says "roads" (plural) for more than one failure', () => {
+    const message = describeInfeasibleRoads(
+      new Map([
+        [4, 10],
+        [9, 20],
+      ]),
+    )
+    expect(message).toMatch(/2 roads\b/)
+  })
+})
+
+describe('fmt (number formatting shared by every message)', () => {
+  // `fmt` is not exported — its docstring says rounding to one decimal place
+  // is deliberate, but every existing test above happens to use values that
+  // `String(metres)` would also print correctly. These two pin the actual
+  // rounding behaviour through a public function, so replacing `fmt` with
+  // `String` would fail them even though it passes everything else.
+  it('rounds beyond one decimal place rather than printing full precision', () => {
+    const message = describePolylineRejection({
+      reason: 'segment-too-short',
+      index: 0,
+      length: 4.567,
+      limit: 7,
+    })
+    expect(message).toMatch(/4\.6m/)
+    expect(message).not.toContain('4.567')
+  })
+
+  it('still shows one decimal place for an already-integral value', () => {
+    const message = describeInfeasibleRoads(new Map([[4, 132]]))
+    // `String(132)` would print "132", with no decimal point at all.
+    expect(message).toMatch(/132\.0m/)
+  })
 })
