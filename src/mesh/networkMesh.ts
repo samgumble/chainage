@@ -261,10 +261,20 @@ export const buildNetworkMesh = (
           // centreline, so borrowing another class's width puts it in the
           // wrong place.
           const template = { ...batters, formationHalfWidth: halfWidth }
+          // Stations inside a span are dropped: a retaining wall holds back
+          // an earthwork, and where a bridge carries the road there is no
+          // earthwork to hold. `retainingWall()` cannot know that — it is
+          // handed one station's design and ground elevation and nothing
+          // else, and a design line standing 17m over a valley floor looks
+          // to it exactly like one standing on a 17m embankment. Only here,
+          // where the spans are already in hand, is the difference visible.
+          const carried = (s: number) =>
+            spans.some((span) => s >= span.fromStation && s <= span.toStation)
           parts.push(
             buildRetainingWallMesh(
               road.alignment,
-              wallSegments(road.alignment, terrain, design, template, spacing),
+              wallSegments(road.alignment, terrain, design, template, spacing)
+                .filter((segment) => !carried(segment.s)),
             ),
           )
         }

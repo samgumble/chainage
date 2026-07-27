@@ -320,6 +320,21 @@ describe('buildNetworkMesh structures', () => {
     expect(m.structures.get(west)!.vertexCount).toBe(0)
   })
 
+  // A retaining wall holds back an earthwork. Where a bridge carries the
+  // road there is no earthwork to hold, so a wall there would stand in mid
+  // air beside the deck, retaining nothing.
+  it('builds no retaining wall where a bridge carries the road', () => {
+    const { net, designs, west } = tJunction()
+    const options = { spacing: 10, terrain: flatGround(10), maxFillHeight: 10 } as const
+    // 40m of fill puts the whole road on a structure. Without the span, this
+    // template would wall every station of it.
+    const withWalls = buildNetworkMesh(net, designs, { ...options, corridorBatters: template })
+    const bridgeOnly = buildNetworkMesh(net, designs, options)
+    expect(bridgeOnly.structures.get(west)!.vertexCount).toBeGreaterThan(0)
+    expect(withWalls.structures.get(west)!.vertexCount)
+      .toBe(bridgeOnly.structures.get(west)!.vertexCount)
+  })
+
   // A wall stands at `formationHalfWidth + maxBatterWidth` from the
   // centreline, and formation width is a property of the road class. One
   // network-wide template made every road's wall stand where the rural road's
