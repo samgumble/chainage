@@ -5,7 +5,7 @@ import { buildJunctionMesh } from './junctionMesh'
 import {
   buildRoadMesh, type RoadMesh, type RoadExtent, type LayerStations,
 } from './roadMesh'
-import { ROAD_CLASSES } from './roadClass'
+import { ROAD_CLASSES, formationHalfWidth } from './roadClass'
 import { type ProfilePoint, designElevationAtStation } from '../terrain/groundProfile'
 import type { MeshData } from './ribbon'
 
@@ -27,6 +27,9 @@ export type NetworkMesh = {
 /**
  * Largest tolerable spread between legs' design elevations at a junction,
  * metres, before it's recorded in `elevationMismatches`.
+ *
+ * Measured at each leg's trim station — where its ribbon actually meets the
+ * junction plate — not at the node, so the figure reflects the real join.
  *
  * A quarter of a metre is a step a player would see; below that the join
  * reads as flush.
@@ -74,21 +77,42 @@ export const buildNetworkMesh = (
       continue
     }
 
-    // Elevation is the mean of every leg's own design elevation at the node,
-    // not one leg's arbitrarily — roads graded independently routinely
-    // disagree, and averaging halves the worst step instead of handing one
-    // leg a perfect join and the rest the whole error. Legs with an empty
-    // design profile are skipped: `designElevationAtStation` returns 0 for
-    // those, and treating that as a real elevation would fabricate a huge
-    // spread.
+    // Elevation is the mean of every leg's own design elevation, not one
+    // leg's arbitrarily — roads graded independently routinely disagree, and
+    // averaging halves the worst step instead of handing one leg a perfect
+    // join and the rest the whole error. Legs with an empty design profile
+    // are skipped: `designElevationAtStation` returns 0 for those, and
+    // treating that as a real elevation would fabricate a huge spread.
+    //
+    // Sampled at the leg's TRIM station, not the node station. The ribbon
+    // does not reach the node — it stops `trim` metres short of it (or
+    // `length - trim` for an `end`-attached leg) — so sampling at the node
+    // reads a grade-line elevation the ribbon never actually has at the
+    // point where it meets the plate. On a graded approach that mismatch
+    // grows with both the grade and the trim distance.
+    //
+    // A flat plate also cannot match a cross-sectioned ribbon exactly: the
+    // ribbon's trimmed end presents a crown in the middle and two edges sat
+    // `formationHalfWidth * crossfall` below it, while the plate is one flat
+    // surface. Sitting the plate at crown height would put the *whole* of
+    // that drop at the edges as a visible lip; subtracting half the drop
+    // here instead splits the difference, so the worst-case step at the
+    // plate/ribbon join is bounded by half the crossfall drop rather than
+    // all of it. Fully removing this residual would mean running the
+    // crossfall out to flat over the last few metres of each approach — real
+    // junction design does exactly that — but that's a shaping change to the
+    // ribbon itself, deferred to a later plan.
     const legElevations: number[] = []
-    for (const leg of legs) {
+    legs.forEach((leg, i) => {
       const design = designs.get(leg.roadId)
-      if (!design || design.length === 0) continue
+      if (!design || design.length === 0) return
       const road = network.road(leg.roadId)
-      const stationAtNode = leg.end === 'start' ? 0 : road.alignment.length
-      legElevations.push(designElevationAtStation(design, stationAtNode))
-    }
+      const trim = geometry.trims[i]!
+      const trimStation = leg.end === 'start' ? trim : road.alignment.length - trim
+      const rc = ROAD_CLASSES[road.className]
+      const crossfallDrop = (formationHalfWidth(rc) * rc.crossfall) / 2
+      legElevations.push(designElevationAtStation(design, trimStation) - crossfallDrop)
+    })
 
     let elevation = 0
     if (legElevations.length > 0) {

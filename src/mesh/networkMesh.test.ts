@@ -4,8 +4,13 @@ import { RoadNetwork } from '../network/graph'
 import { Alignment } from '../geometry/alignment'
 import { Line, Arc } from '../geometry/primitives'
 import { vec2 } from '../geometry/vec2'
+import { ROAD_CLASSES, formationHalfWidth } from './roadClass'
 import type { ProfilePoint } from '../terrain/groundProfile'
 import type { RoadId } from '../network/graph'
+
+/** Half the crossfall drop for a rural road: what the plate sits below crown by. */
+const RURAL_CROSSFALL_DROP =
+  (formationHalfWidth(ROAD_CLASSES.rural) * ROAD_CLASSES.rural.crossfall) / 2
 
 const level = (length: number, z: number): ProfilePoint[] => [{ s: 0, z }, { s: length, z }]
 
@@ -126,13 +131,13 @@ describe('buildNetworkMesh', () => {
   })
 
   describe('junction elevation', () => {
-    it('sets the junction to the shared elevation when all legs agree', () => {
+    it('sets the junction to the shared elevation when all legs agree, minus half the crossfall drop', () => {
       const { net, designs } = tJunction()
       const m = buildNetworkMesh(net, designs, { spacing: 10 })
       const junction = net.nodeAt(vec2(100, 0))!
       const mesh = m.junctions.get(junction.id)!
       for (let i = 0; i < mesh.vertexCount; i++) {
-        expect(mesh.positions[i * 3 + 2]).toBeCloseTo(50, 6)
+        expect(mesh.positions[i * 3 + 2]).toBeCloseTo(50 - RURAL_CROSSFALL_DROP, 6)
       }
       expect(m.elevationMismatches.has(junction.id)).toBe(false)
     })
@@ -140,7 +145,9 @@ describe('buildNetworkMesh', () => {
     it('sets the junction to the mean of disagreeing legs and records the spread', () => {
       const { net, west, north, south } = tJunction()
       // West's own attach station reads 50; north and south are offset by
-      // +0.6 and -0.6, an even split so the mean stays exactly 50.
+      // +0.6 and -0.6, an even split so the mean stays exactly 50 (before
+      // the half-crossfall-drop term, which is identical across all three
+      // legs and so shifts the mean without touching the spread).
       const designs = new Map<RoadId, ProfilePoint[]>([
         [west, level(100, 50)], [north, level(100, 50.6)], [south, level(100, 49.4)],
       ])
@@ -148,7 +155,7 @@ describe('buildNetworkMesh', () => {
       const junction = net.nodeAt(vec2(100, 0))!
       const mesh = m.junctions.get(junction.id)!
       for (let i = 0; i < mesh.vertexCount; i++) {
-        expect(mesh.positions[i * 3 + 2]).toBeCloseTo(50, 6)
+        expect(mesh.positions[i * 3 + 2]).toBeCloseTo(50 - RURAL_CROSSFALL_DROP, 6)
       }
       expect(m.elevationMismatches.get(junction.id)).toBeCloseTo(1.2, 6)
     })
@@ -163,6 +170,76 @@ describe('buildNetworkMesh', () => {
       expect(0.15).toBeLessThan(MAX_JUNCTION_ELEVATION_SPREAD)
       const junction = net.nodeAt(vec2(100, 0))!
       expect(m.elevationMismatches.has(junction.id)).toBe(false)
+    })
+
+    it('sits below crown height by half the crossfall drop for a level junction', () => {
+      // All three legs agree exactly on 50m everywhere: no grade, no
+      // disagreement. A flat plate still can't sit at crown height, because
+      // the ribbon's edges (at the trim station) are `formationHalfWidth *
+      // crossfall` below their own crown — the plate should split that
+      // difference and sit half that far below 50, not at 50 itself.
+      const { net, designs } = tJunction()
+      const m = buildNetworkMesh(net, designs, { spacing: 10 })
+      const junction = net.nodeAt(vec2(100, 0))!
+      const mesh = m.junctions.get(junction.id)!
+      expect(RURAL_CROSSFALL_DROP).toBeCloseTo(0.0625, 6)
+      for (let i = 0; i < mesh.vertexCount; i++) {
+        expect(mesh.positions[i * 3 + 2]).toBeCloseTo(50 - RURAL_CROSSFALL_DROP, 6)
+      }
+    })
+
+    it('matches the ribbon design elevation at the trim station, not the node, on a graded approach', () => {
+      // West is on a 5% grade (50 -> 55 over 100m) and meets the junction at
+      // its `end`, so the node is at station 100 but the ribbon actually
+      // stops at the trim station, 95 (trim = formationHalfWidth = 5 for a
+      // rural road). North and south are flat at exactly the design
+      // elevation west's ribbon has at station 95, so if the junction
+      // correctly samples at the trim station all three legs agree and the
+      // plate sits flush; sampling at the node (the old, wrong behaviour)
+      // would instead read west's elevation as 55, a full 0.25m off.
+      const { net, west, north, south } = tJunction()
+      const gradedTrimElevation = 54.75 // designElevationAtStation(west, 95)
+      const designs = new Map<RoadId, ProfilePoint[]>([
+        [west, [{ s: 0, z: 50 }, { s: 100, z: 55 }]],
+        [north, level(100, gradedTrimElevation)],
+        [south, level(100, gradedTrimElevation)],
+      ])
+      const m = buildNetworkMesh(net, designs, { spacing: 10 })
+      const junction = net.nodeAt(vec2(100, 0))!
+      const mesh = m.junctions.get(junction.id)!
+
+      const expectedElevation = gradedTrimElevation - RURAL_CROSSFALL_DROP
+      for (let i = 0; i < mesh.vertexCount; i++) {
+        expect(mesh.positions[i * 3 + 2]).toBeCloseTo(expectedElevation, 6)
+      }
+      // Sampling at the node instead (west's design elevation at station
+      // 100) would have put the plate at 55 minus the crossfall term — well
+      // off the correct value.
+      expect(mesh.positions[2]).not.toBeCloseTo(55 - RURAL_CROSSFALL_DROP, 2)
+      // All legs agree once sampled correctly, so no mismatch is recorded.
+      expect(m.elevationMismatches.has(junction.id)).toBe(false)
+    })
+
+    it('measures elevationMismatches at trim stations, catching legs that agree at the node but disagree at their trims', () => {
+      // All three legs share exactly z=50 at the node-touching end of their
+      // profile, so a node-station comparison (the old, wrong behaviour)
+      // sees zero spread and reports nothing. But each profile bends sharply
+      // in the last few metres before the node, so at the actual trim
+      // stations the legs disagree by 1.5m.
+      const { net, west, north, south } = tJunction()
+      const designs = new Map<RoadId, ProfilePoint[]>([
+        // West meets the junction at its end (station 100); trim station 95.
+        [west, [{ s: 0, z: 50 }, { s: 95, z: 49 }, { s: 100, z: 50 }]],
+        // North and south meet at their start (station 0); trim station 5.
+        [north, [{ s: 0, z: 50 }, { s: 5, z: 50.5 }, { s: 100, z: 60 }]],
+        [south, [{ s: 0, z: 50 }, { s: 5, z: 49.7 }, { s: 100, z: 40 }]],
+      ])
+      const m = buildNetworkMesh(net, designs, { spacing: 10 })
+      const junction = net.nodeAt(vec2(100, 0))!
+      // Raw trim-station elevations are 49, 50.5, 49.7 — a spread of 1.5m.
+      // The crossfall term is identical across all three (same road class),
+      // so it cancels out of the spread entirely.
+      expect(m.elevationMismatches.get(junction.id)).toBeCloseTo(1.5, 6)
     })
   })
 
