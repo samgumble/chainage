@@ -20,7 +20,7 @@ import { terrainGeometry } from '../render/terrainMesh'
 import { CameraRig, type Vec3 as RigVec3 } from '../render/cameraRig'
 import { sunAt } from '../render/sunlight'
 import { surfaceFor } from '../render/materials'
-import { TILT_SHIFT_FRAGMENT_SHADER } from '../render/tiltShift'
+import { TILT_SHIFT_FRAGMENT_SHADER, createTiltShiftUniforms } from '../render/tiltShift'
 import { RoadNetwork, type RoadId } from '../network/graph'
 import { buildNetworkMesh, type NetworkMesh } from '../mesh/networkMesh'
 import { DrawTool, SNAP_RADIUS } from '../tool/drawTool'
@@ -1501,9 +1501,19 @@ void main() {
   const FOCUS_RANGE_METRES = 60
   const FOCUS_FALLOFF_METRES = 220
 
-  /** The uniform shape `TILT_SHIFT_UNIFORM_NAMES` names, typed concretely so
-   * the per-frame/per-resize writes below don't have to fight three's own
-   * `{ [name: string]: { value: any } }` typing on `ShaderPass.uniforms`. */
+  /**
+   * The uniform shape `TILT_SHIFT_UNIFORM_NAMES` names, typed concretely (with
+   * real texture types, since this file — unlike `tiltShift.ts` — is allowed
+   * to know about three.js) so the per-frame/per-resize writes below don't
+   * have to fight three's own `{ [name: string]: { value: any } }` typing on
+   * `ShaderPass.uniforms`.
+   *
+   * Deliberately not built by hand here: `createTiltShiftUniforms` (see
+   * `tiltShift.ts`) is keyed off `TILT_SHIFT_UNIFORM_NAMES` itself, so a
+   * uniform the shader declares but this construction forgets — the failure
+   * mode `908fe00` already fixed once — is now a type error at that
+   * function's own return statement, not a silent no-op discovered by eye.
+   */
   type TiltShiftUniforms = {
     readonly tDiffuse: { value: THREE.Texture | null }
     readonly tDepth: { value: THREE.Texture | null }
@@ -1512,25 +1522,19 @@ void main() {
     readonly uFocusFalloff: { value: number }
     readonly uNear: { value: number }
     readonly uFar: { value: number }
-    readonly uTexelSize: { value: THREE.Vector2 }
+    readonly uTexelSize: { value: { x: number; y: number } }
   }
 
   const tiltShiftPass = new ShaderPass({
-    uniforms: {
-      tDiffuse: { value: null as THREE.Texture | null },
-      tDepth: { value: null as THREE.Texture | null },
-      uFocusDistance: { value: rig.distance },
-      uFocusRange: { value: FOCUS_RANGE_METRES },
-      uFocusFalloff: { value: FOCUS_FALLOFF_METRES },
-      uNear: { value: camera.near },
-      uFar: { value: camera.far },
-      uTexelSize: {
-        value: new THREE.Vector2(
-          1 / (initialWidth * composerPixelRatio),
-          1 / (initialHeight * composerPixelRatio),
-        ),
-      },
-    },
+    uniforms: createTiltShiftUniforms({
+      focusDistance: rig.distance,
+      focusRange: FOCUS_RANGE_METRES,
+      focusFalloff: FOCUS_FALLOFF_METRES,
+      near: camera.near,
+      far: camera.far,
+      texelWidth: 1 / (initialWidth * composerPixelRatio),
+      texelHeight: 1 / (initialHeight * composerPixelRatio),
+    }),
     vertexShader: TILT_SHIFT_VERTEX_SHADER,
     fragmentShader: TILT_SHIFT_FRAGMENT_SHADER,
   })
@@ -1583,10 +1587,12 @@ void main() {
     // with them, the depth texture attached to each), so no separate
     // render-target recreation is needed here.
     composer.setSize(width, height)
-    tiltShiftUniforms.uTexelSize.value.set(
-      1 / (width * composerPixelRatio),
-      1 / (height * composerPixelRatio),
-    )
+    // Not a `THREE.Vector2` (see `TiltShiftUniforms`, above, and
+    // `createTiltShiftUniforms` in `tiltShift.ts`) — a plain `{x, y}` pair, so
+    // set the two fields directly rather than calling a `.set()` that does
+    // not exist on this shape.
+    tiltShiftUniforms.uTexelSize.value.x = 1 / (width * composerPixelRatio)
+    tiltShiftUniforms.uTexelSize.value.y = 1 / (height * composerPixelRatio)
   }
 
   const resizeObserver = new ResizeObserver((entries) => {

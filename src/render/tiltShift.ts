@@ -32,6 +32,12 @@ export const TILT_SHIFT_UNIFORM_NAMES = [
  *
  * Symmetric about the focal distance — near and far blur alike, which is what
  * a real shallow depth of field does and what separates the look from fog.
+ *
+ * Mirrored by the GLSL function of the same name inside
+ * `TILT_SHIFT_FRAGMENT_SHADER`, below — that shader comment points back here.
+ * The two cannot be checked identical without a GL context (see this file's
+ * tests), so keeping them in lock-step by hand is what this comment pair is
+ * for: change one, change the other.
  */
 export const blurFractionAt = (depth: number, focus: TiltShiftFocus): number => {
   if (!(focus.falloff > 0)) {
@@ -118,3 +124,99 @@ void main() {
   gl_FragColor = colorSum / sampleCount;
 }
 `
+
+/** The uniform names as a type, derived from `TILT_SHIFT_UNIFORM_NAMES`
+ * itself so the two can never quietly drift apart. */
+type TiltShiftUniformName = (typeof TILT_SHIFT_UNIFORM_NAMES)[number]
+
+/**
+ * The value type each uniform holds, one entry per name above.
+ *
+ * The loosest shape this module can name without importing three.js: numbers
+ * for every scalar uniform, a plain `{x, y}` pair for the one vec2 (three's
+ * own `WebGLUniforms` vec2 setter reads `.x`/`.y` off whatever object it is
+ * given — it does not require an actual `THREE.Vector2`), and `unknown` for
+ * the two textures, which this module never constructs and a caller must
+ * supply.
+ */
+type TiltShiftUniformValue = {
+  readonly tDiffuse: unknown
+  readonly tDepth: unknown
+  readonly uFocusDistance: number
+  readonly uFocusRange: number
+  readonly uFocusFalloff: number
+  readonly uNear: number
+  readonly uFar: number
+  readonly uTexelSize: { readonly x: number; readonly y: number }
+}
+
+/**
+ * The uniform object shape `ShaderPass` needs to run `TILT_SHIFT_FRAGMENT_SHADER`.
+ *
+ * Mapped from `TiltShiftUniformName` rather than written out as a second,
+ * independent object type — so a name added to or removed from
+ * `TILT_SHIFT_UNIFORM_NAMES` without a matching change to `TiltShiftUniformValue`
+ * is a type error at `createTiltShiftUniforms`'s return statement, not a
+ * silent no-op. `_TiltShiftUniformKeysMatch` below closes the other
+ * direction: a key in `TiltShiftUniformValue` that is not in
+ * `TILT_SHIFT_UNIFORM_NAMES`.
+ */
+export type TiltShiftUniforms = {
+  readonly [K in TiltShiftUniformName]: { readonly value: TiltShiftUniformValue[K] }
+}
+
+type AssertSameKeys<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never
+
+/**
+ * Compile-time check that `TiltShiftUniformValue` names exactly the same
+ * uniforms as `TILT_SHIFT_UNIFORM_NAMES` — no more, no fewer. If the two
+ * ever disagree, `_TiltShiftUniformKeysMatch`'s type becomes `never`, and
+ * assigning `true` to it fails to compile. Never read at runtime; exists
+ * purely to make a name added on one side and forgotten on the other a type
+ * error.
+ */
+type _TiltShiftUniformKeysMatch = AssertSameKeys<keyof TiltShiftUniformValue, TiltShiftUniformName>
+const _tiltShiftUniformKeysMatch: _TiltShiftUniformKeysMatch = true
+
+/** What a caller supplies to build the pass's uniforms; everything that
+ * varies per frame or per resize. Deliberately not three.js types — see this
+ * module's own ban on importing three. */
+export type TiltShiftUniformInputs = {
+  readonly focusDistance: number
+  readonly focusRange: number
+  readonly focusFalloff: number
+  readonly near: number
+  readonly far: number
+  readonly texelWidth: number
+  readonly texelHeight: number
+}
+
+/**
+ * Build the uniform object `ShaderPass` expects for
+ * `TILT_SHIFT_FRAGMENT_SHADER`, keyed off `TILT_SHIFT_UNIFORM_NAMES` rather
+ * than hand-typed again at the call site.
+ *
+ * Before this factory existed, `roadScene.ts` wrote the uniforms object
+ * literal by hand, so `TILT_SHIFT_UNIFORM_NAMES` — the only guard against the
+ * "uniforms never reached the shader" bug already fixed once on this branch
+ * (`908fe00`) — was never actually checked against what the pass constructed:
+ * the list and the literal could silently drift apart again with nothing to
+ * catch it. Routing construction through here, whose return type is derived
+ * from that same list (see `TiltShiftUniforms`, above), makes that drift a
+ * type error instead of a silent no-op.
+ *
+ * `tDiffuse` and `tDepth` start `null`: both are textures the render pipeline
+ * supplies after construction (`tDiffuse` every frame, from whichever buffer
+ * the previous pass wrote; `tDepth` once the composer's own depth texture
+ * exists), not something this three-free module can produce itself.
+ */
+export const createTiltShiftUniforms = (inputs: TiltShiftUniformInputs): TiltShiftUniforms => ({
+  tDiffuse: { value: null },
+  tDepth: { value: null },
+  uFocusDistance: { value: inputs.focusDistance },
+  uFocusRange: { value: inputs.focusRange },
+  uFocusFalloff: { value: inputs.focusFalloff },
+  uNear: { value: inputs.near },
+  uFar: { value: inputs.far },
+  uTexelSize: { value: { x: inputs.texelWidth, y: inputs.texelHeight } },
+})

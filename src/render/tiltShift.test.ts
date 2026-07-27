@@ -5,6 +5,7 @@ import {
   TILT_SHIFT_UNIFORM_NAMES,
   type TiltShiftFocus,
   blurFractionAt,
+  createTiltShiftUniforms,
 } from './tiltShift'
 
 const focus: TiltShiftFocus = { distance: 800, range: 300, falloff: 900 }
@@ -92,5 +93,51 @@ describe('TILT_SHIFT_FRAGMENT_SHADER', () => {
 
   it('reaches the same full-blur bound as the profile', () => {
     expect(TILT_SHIFT_FRAGMENT_SHADER).toContain(String(MAX_BLUR_PIXELS))
+  })
+})
+
+describe('createTiltShiftUniforms', () => {
+  const uniforms = createTiltShiftUniforms({
+    focusDistance: 300,
+    focusRange: 60,
+    focusFalloff: 220,
+    near: 1,
+    far: 6000,
+    texelWidth: 1 / 1920,
+    texelHeight: 1 / 1080,
+  })
+
+  it('supplies exactly the uniforms TILT_SHIFT_UNIFORM_NAMES names, in both directions', () => {
+    // Not a type-level check (see TiltShiftUniforms/_TiltShiftUniformKeysMatch
+    // in tiltShift.ts for that): this is the runtime guarantee that the
+    // *actual object the pass is constructed from* has exactly this key set,
+    // which is the thing that would have caught 908fe00's bug — a uniform
+    // named in the shader and the list but never reaching the pass at all.
+    const suppliedNames = Object.keys(uniforms).slice().sort()
+    const listedNames = [...TILT_SHIFT_UNIFORM_NAMES].sort()
+    expect(suppliedNames).toEqual(listedNames)
+  })
+
+  it('gives every uniform a { value } wrapper, the shape ShaderPass/ShaderMaterial expect', () => {
+    for (const name of TILT_SHIFT_UNIFORM_NAMES) {
+      expect(uniforms[name]).toHaveProperty('value')
+    }
+  })
+
+  it('starts the two textures null, since this module cannot construct one', () => {
+    expect(uniforms.tDiffuse.value).toBeNull()
+    expect(uniforms.tDepth.value).toBeNull()
+  })
+
+  it('carries the scalar inputs straight through', () => {
+    expect(uniforms.uFocusDistance.value).toBe(300)
+    expect(uniforms.uFocusRange.value).toBe(60)
+    expect(uniforms.uFocusFalloff.value).toBe(220)
+    expect(uniforms.uNear.value).toBe(1)
+    expect(uniforms.uFar.value).toBe(6000)
+  })
+
+  it('packs the texel size into an {x, y} pair', () => {
+    expect(uniforms.uTexelSize.value).toEqual({ x: 1 / 1920, y: 1 / 1080 })
   })
 })
