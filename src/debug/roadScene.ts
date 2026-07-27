@@ -1058,12 +1058,26 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
    * delete, split, reclassify) are all immediate, so leaving it cancels
    * nothing — in particular the selection itself survives the trip (see
    * `updateHighlight`), so switching to draw and back does not lose it.
+   *
+   * A held drag is cleared here too, regardless of which mode is being left.
+   * `onPointerUp` resolves a drag by reading `toolMode` at release time, not
+   * at press time — so a drag started in one mode and released after a mode
+   * switch would otherwise resolve in the mode it did not start in (e.g. a
+   * held left-button placement release, in select mode, after Tab was
+   * pressed mid-drag). Ending it here, and releasing the pointer capture
+   * that goes with it, means `onPointerUp` finds no drag to resolve at all.
    */
   const switchToolMode = (next: ToolMode): void => {
     if (next === toolMode) return
     if (toolMode === 'draw') {
       cancelPendingClick()
       tool.cancel()
+    }
+    if (drag) {
+      if (canvas.hasPointerCapture(drag.pointerId)) {
+        canvas.releasePointerCapture(drag.pointerId)
+      }
+      drag = undefined
     }
     toolMode = next
     setMessage('')
@@ -1164,6 +1178,11 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     }
 
     switch (event.key) {
+      case 'Escape':
+        event.preventDefault()
+        selectTool.clear()
+        setMessage('')
+        break
       case 'Delete':
       case 'Backspace':
         event.preventDefault()

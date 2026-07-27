@@ -12,6 +12,18 @@ describe('SelectTool', () => {
     expect(new SelectTool(new RoadNetwork()).selected).toBeUndefined()
   })
 
+  it('clears the selection on demand', () => {
+    const net = new RoadNetwork()
+    net.addRoad(straight(0, 0, 0, 200), 'rural')
+    const tool = new SelectTool(net)
+
+    tool.select({ x: 100, y: 0 })
+    expect(tool.selected).toBeDefined()
+
+    tool.clear()
+    expect(tool.selected).toBeUndefined()
+  })
+
   it('selects a road near the given position', () => {
     const net = new RoadNetwork()
     const id = net.addRoad(straight(0, 0, 0, 200), 'rural')
