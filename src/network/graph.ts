@@ -1,6 +1,7 @@
 import type { Alignment } from '../geometry/alignment'
-import { type Vec2, distance } from '../geometry/vec2'
+import type { Vec2 } from '../geometry/vec2'
 import type { RoadClassName } from '../mesh/roadClass'
+import { NodeIndex } from './nodeIndex'
 
 export type NodeId = number
 export type RoadId = number
@@ -52,6 +53,7 @@ export class RoadNetwork {
     NodeId,
     { id: NodeId; position: Vec2; ends: RoadEnd[] }
   >()
+  private readonly index = new NodeIndex(NODE_SNAP_DISTANCE)
 
   /**
    * Identifiers come from a counter, never from a position.
@@ -87,12 +89,12 @@ export class RoadNetwork {
   }
 
   nodeAt(position: Vec2): NetworkNode | undefined {
-    for (const n of this.nodeMap.values()) {
-      if (distance(n.position, position) <= NODE_SNAP_DISTANCE) {
-        return { ...n, ends: [...n.ends] }
-      }
-    }
-    return undefined
+    const candidates = this.index.nearby(position)
+    const first = candidates[0]
+    if (first === undefined) return undefined
+    const found = this.nodeMap.get(first)
+    if (!found) return undefined
+    return { ...found, ends: [...found.ends] }
   }
 
   /** Three or more road ends. Fewer is a dead end or a road passing through. */
@@ -134,6 +136,7 @@ export class RoadNetwork {
 
     const id = this.nextNodeId++
     this.nodeMap.set(id, { id, position, ends: [] })
+    this.index.insert(id, position)
     return id
   }
 
@@ -160,6 +163,7 @@ export class RoadNetwork {
       const remaining = node.ends.filter((e) => e.roadId !== id)
       if (remaining.length === 0) {
         this.nodeMap.delete(nodeId)
+        this.index.remove(nodeId)
       } else {
         node.ends = remaining
       }
