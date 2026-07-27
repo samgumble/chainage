@@ -39,6 +39,17 @@ describe('the demo scene', () => {
     expect(structureVertices(bridgesOnly)).toBeGreaterThan(0)
   })
 
+  it('produces retaining walls as well as bridges', () => {
+    // Same scene minus the batter limit: no wall can be built without one, so
+    // whatever the full scene has beyond this is wall.
+    const bridgesOnly = buildNetworkMesh(content.network, content.designs, {
+      spacing: 4,
+      terrain: content.terrain,
+      maxFillHeight: 10,
+    })
+    expect(structureVertices(content.built)).toBeGreaterThan(structureVertices(bridgesOnly))
+  })
+
   it('leaves the ground unexcavated where a bridge carries the road', () => {
     // The bridge spans a valley the earthworks would otherwise fill in. If
     // the excavation ran through the span, the deck would be buried in its

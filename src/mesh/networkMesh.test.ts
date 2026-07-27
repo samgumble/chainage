@@ -280,12 +280,10 @@ describe('buildNetworkMesh', () => {
 })
 
 import { Heightmap } from '../terrain/heightmap'
-import type { CorridorTemplate } from '../terrain/corridor'
+import type { CorridorBatters } from '../terrain/corridor'
 
 const flatGround = (z: number) => Heightmap.flat(-1000, -1000, 100, 41, 41, z)
-const template: CorridorTemplate = {
-  formationHalfWidth: 5, cutSlope: 2, fillSlope: 3, maxBatterWidth: 1,
-}
+const template: CorridorBatters = { cutSlope: 2, fillSlope: 3, maxBatterWidth: 1 }
 
 describe('buildNetworkMesh structures', () => {
   it('builds no structures without a terrain', () => {
@@ -297,7 +295,7 @@ describe('buildNetworkMesh structures', () => {
   it('builds a structure entry per road when a terrain is given', () => {
     const { net, designs } = tJunction()
     const m = buildNetworkMesh(net, designs, {
-      spacing: 10, terrain: flatGround(50), maxFillHeight: 10, corridorTemplate: template,
+      spacing: 10, terrain: flatGround(50), maxFillHeight: 10, corridorBatters: template,
     })
     expect(m.structures.size).toBe(3)
   })
@@ -306,7 +304,7 @@ describe('buildNetworkMesh structures', () => {
     const { net, designs, west } = tJunction()
     // Ground 40m below the roads, so every station needs a structure.
     const m = buildNetworkMesh(net, designs, {
-      spacing: 10, terrain: flatGround(10), maxFillHeight: 10, corridorTemplate: template,
+      spacing: 10, terrain: flatGround(10), maxFillHeight: 10, corridorBatters: template,
     })
     expect(m.structures.get(west)!.vertexCount).toBeGreaterThan(0)
   })
@@ -317,9 +315,44 @@ describe('buildNetworkMesh structures', () => {
       spacing: 10,
       terrain: flatGround(50),
       maxFillHeight: 10,
-      corridorTemplate: { formationHalfWidth: 5, cutSlope: 2, fillSlope: 3 },
+      corridorBatters: { cutSlope: 2, fillSlope: 3 },
     })
     expect(m.structures.get(west)!.vertexCount).toBe(0)
+  })
+
+  // A wall stands at `formationHalfWidth + maxBatterWidth` from the
+  // centreline, and formation width is a property of the road class. One
+  // network-wide template made every road's wall stand where the rural road's
+  // would, so the gravel branch's walls floated 3m clear of its own formation.
+  it('stands each road wall against its own class formation width', () => {
+    const net = new RoadNetwork()
+    // Two parallel roads far enough apart to share no node.
+    const main = net.addRoad(new Alignment([new Line(vec2(0, 0), 0, 200)]), 'rural')
+    const track = net.addRoad(new Alignment([new Line(vec2(0, 1000), 0, 200)]), 'gravel')
+    const designs = new Map<RoadId, ProfilePoint[]>([
+      [main, level(200, 50)], [track, level(200, 50)],
+    ])
+    // 10m of fill at 3H:1V wants a 30m batter; 4m of room means a wall.
+    // maxFillHeight of 20 keeps the fill well short of a bridge.
+    const m = buildNetworkMesh(net, designs, {
+      spacing: 10,
+      terrain: flatGround(40),
+      maxFillHeight: 20,
+      corridorBatters: { cutSlope: 2, fillSlope: 3, maxBatterWidth: 4 },
+    })
+
+    /** Furthest a road's structure vertices sit from its own centreline. */
+    const reach = (id: RoadId, centreY: number) => {
+      const mesh = m.structures.get(id)!
+      let furthest = 0
+      for (let i = 0; i < mesh.vertexCount; i++) {
+        furthest = Math.max(furthest, Math.abs(mesh.positions[i * 3 + 1]! - centreY))
+      }
+      return furthest
+    }
+
+    expect(reach(main, 0)).toBeCloseTo(formationHalfWidth(ROAD_CLASSES.rural) + 4, 6)
+    expect(reach(track, 1000)).toBeCloseTo(formationHalfWidth(ROAD_CLASSES.gravel) + 4, 6)
   })
 
   // The fill allowance is the caller's, not the mesh layer's: it is whatever

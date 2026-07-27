@@ -6,7 +6,7 @@ import { generateValley } from '../terrain/generate'
 import { sampleGroundProfile, designElevationAtStation, type ProfilePoint } from '../terrain/groundProfile'
 import { solveGradeProfile } from '../terrain/gradeSolver'
 import { TerrainEditLayer } from '../terrain/editLayer'
-import { designSurfaceAtOffset, type CorridorTemplate } from '../terrain/corridor'
+import { designSurfaceAtOffset, type CorridorTemplate, type CorridorBatters } from '../terrain/corridor'
 import { ROAD_CLASSES, formationHalfWidth, totalPavementThickness, type RoadClassName } from '../mesh/roadClass'
 import { toBufferGeometry } from '../render/meshAdapter'
 import { terrainGeometry } from '../render/terrainMesh'
@@ -40,28 +40,42 @@ const MAX_STRUCTURE_HEIGHT = 30
 const CORRIDOR_CUT_SLOPE = 2
 const CORRIDOR_FILL_SLOPE = 3
 
+/**
+ * How far a batter may run from the formation edge before a wall takes over.
+ *
+ * Derived from this scene's own depths rather than picked. The cut batter is
+ * 2H:1V and `MAX_CUT_DEPTH` is 12m, so an untruncated cut batter runs out
+ * 24m; limiting it to 8m puts a wall wherever the cut is deeper than 4m, or
+ * the fill higher than 2.7m at 3H:1V. Measured over the three arms that is
+ * 24% of the west arm's stations, 57% of the east and 80% of the gravel
+ * branch — walls where this corridor is genuinely tight, which is most of the
+ * branch and a quarter of the shallow west arm. Without it `retainingWall()`
+ * returns null at every station and no wall is ever built.
+ */
+const CORRIDOR_MAX_BATTER_WIDTH = 8
+
+/**
+ * Batters and wall limit, shared by every road in the scene.
+ *
+ * None of it varies by road class: the hillside stands at the same angle
+ * whatever is built on it, and the corridor is as constrained for the branch
+ * as for the main road. Formation width — the part that does vary — is filled
+ * in per road, by `corridorTemplateFor` here and by `buildNetworkMesh` for
+ * the wall geometry.
+ */
+const CORRIDOR_BATTERS: CorridorBatters = {
+  cutSlope: CORRIDOR_CUT_SLOPE,
+  fillSlope: CORRIDOR_FILL_SLOPE,
+  maxBatterWidth: CORRIDOR_MAX_BATTER_WIDTH,
+}
+
 /** Earthworks cross-section used to carve the corridor into the terrain for
  * a given road class — each class has its own formation width, so the
  * gravel branch excavates a narrower footprint than the rural main road. */
 const corridorTemplateFor = (className: RoadClassName): CorridorTemplate => ({
+  ...CORRIDOR_BATTERS,
   formationHalfWidth: formationHalfWidth(ROAD_CLASSES[className]),
-  cutSlope: CORRIDOR_CUT_SLOPE,
-  fillSlope: CORRIDOR_FILL_SLOPE,
 })
-
-/**
- * Corridor template passed to `buildNetworkMesh` for structure geometry.
- *
- * `NetworkMeshOptions.corridorTemplate` takes one template for the whole
- * network rather than one per road class, unlike the excavation above (which
- * rightly varies by class via `corridorTemplateFor`). This uses the rural
- * class's footprint, since the west/east arms are rural and are what the
- * retaining-wall visual check is aimed at. The gravel branch's own excavation
- * still carves its narrower footprint (formationHalfWidth 2.0m vs rural's
- * 5.0m), so a wall built against this wider template there may not sit
- * exactly flush with its actual excavated ground.
- */
-const CORRIDOR_TEMPLATE: CorridorTemplate = corridorTemplateFor('rural')
 
 /** How far apart, along the alignment, the excavation walk takes stations. */
 const EXCAVATION_STATION_SPACING = 5
@@ -288,7 +302,7 @@ export const buildSceneContent = (): SceneContent => {
     spacing: 4,
     terrain,
     maxFillHeight: MAX_FILL_HEIGHT,
-    corridorTemplate: CORRIDOR_TEMPLATE,
+    corridorBatters: CORRIDOR_BATTERS,
   })
 
   return { terrain, network, designs, editLayer, built }

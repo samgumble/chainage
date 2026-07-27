@@ -9,7 +9,7 @@ import { ROAD_CLASSES, formationHalfWidth } from './roadClass'
 import { type ProfilePoint, designElevationAtStation } from '../terrain/groundProfile'
 import type { MeshData } from './ribbon'
 import type { TerrainSampler } from '../terrain/heightmap'
-import { type CorridorTemplate } from '../terrain/corridor'
+import { type CorridorBatters } from '../terrain/corridor'
 import { classifySupport } from '../terrain/gradeSolver'
 import { sampleGroundProfile } from '../terrain/groundProfile'
 import { structureSpans } from './structures/spans'
@@ -21,7 +21,16 @@ type NetworkMeshCommon = {
   readonly spacing?: number
   /** Per-road construction stations. A road not listed is fully built. */
   readonly stations?: ReadonlyMap<RoadId, LayerStations>
-  readonly corridorTemplate?: CorridorTemplate
+  /**
+   * Batters and wall limit for the whole network. Required for retaining
+   * walls; bridges do not need it.
+   *
+   * Deliberately not a full `CorridorTemplate`: formation width is a property
+   * of the road class, and a network holds several. Each road's own width is
+   * filled in here from `ROAD_CLASSES`, so a gravel branch cannot have its
+   * walls measured against a rural road's formation.
+   */
+  readonly corridorBatters?: CorridorBatters
 }
 
 /**
@@ -217,7 +226,7 @@ export const buildNetworkMesh = (
   // both on the template would silently cost a terrain-only caller its
   // bridges, so the two triggers are gated independently.
   if (terrain !== undefined && maxFillHeight !== undefined) {
-    const template = options.corridorTemplate
+    const batters = options.corridorBatters
 
     for (const road of network.roads) {
       const design = designs.get(road.id) ?? []
@@ -241,7 +250,12 @@ export const buildNetworkMesh = (
           parts.push(buildBridgeMesh(road.alignment, terrain, design, span, halfWidth))
         }
 
-        if (template !== undefined) {
+        if (batters !== undefined) {
+          // This road's own formation width, not the network's — the wall
+          // stands at `formationHalfWidth + maxBatterWidth` from the
+          // centreline, so borrowing another class's width puts it in the
+          // wrong place.
+          const template = { ...batters, formationHalfWidth: halfWidth }
           parts.push(
             buildRetainingWallMesh(
               road.alignment,
