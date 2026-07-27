@@ -1,15 +1,19 @@
 /**
- * The transverse shape of the earthworks at a station.
+ * How the ground stands beside a road, independent of the road itself.
  *
  * Slopes are horizontal-to-vertical ratios, the civil convention: a value of
  * 2 means 2H:1V, so the batter runs out 2m horizontally for every 1m of
  * height. Steeper slopes have smaller numbers. Cut batters are conventionally
  * steeper than fill batters, since undisturbed ground stands better than
  * placed material.
+ *
+ * Split from `CorridorTemplate` because none of it varies by road class:
+ * a motorway and a farm track cut the same hillside at the same angle, and
+ * are constrained by the same boundary. Only the formation width differs.
+ * A caller working across a whole network can hold this and let each road
+ * supply its own width, rather than imposing one road's width on all of them.
  */
-export type CorridorTemplate = {
-  /** Half the formation width — carriageway plus shoulders — in metres. */
-  readonly formationHalfWidth: number
+export type CorridorBatters = {
   /** Cut batter, horizontal-to-vertical. */
   readonly cutSlope: number
   /** Fill batter, horizontal-to-vertical. */
@@ -19,6 +23,12 @@ export type CorridorTemplate = {
    * wall takes over, metres. Omitted means batters may run as far as needed.
    */
   readonly maxBatterWidth?: number
+}
+
+/** The transverse shape of the earthworks at a station, for one road. */
+export type CorridorTemplate = CorridorBatters & {
+  /** Half the formation width — carriageway plus shoulders — in metres. */
+  readonly formationHalfWidth: number
 }
 
 // NOTE: hot path. `designSurfaceAtOffset` is called thousands of times per

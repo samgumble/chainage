@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Give the three structure types geometry — retaining walls where a batter has no room, bridges where the design line stands too high above ground to fill, and overpasses where one road crosses another.
+**Goal:** Give two of the three structure types geometry — retaining walls where a batter has no room, and bridges where the design line stands too high above ground to fill — and give the third, road-over-road overpasses, detection and clearance reporting only. Overpass geometry is deliberately out of scope; see "Deliberately not in this plan" at the end, where the reasoning is recorded.
 
 **Architecture:** `src/mesh/structures/` produces plain typed arrays like the rest of `src/mesh/`. Two triggers already exist and are unused: `retainingWall()` in the terrain layer reports where a wall stands and how tall, and `classifySupport()` reports which stations need a structure rather than earth. This plan turns both into meshes, and adds the third trigger — road-over-road crossings — which needs the network graph.
 
@@ -613,7 +613,18 @@ export const wallSegments = (
     const wall = retainingWall(designZ, groundZ, template)
     if (!wall || wall.height < MIN_WALL_HEIGHT) continue
 
-    const topZ = designSurfaceAtOffset(wall.offset, designZ, groundZ, template)
+    // The wall spans between where the truncated batter ends and natural
+    // ground — whichever of the two is higher is the top.
+    //
+    // In CUT the batter climbs from the formation edge and the wall holds the
+    // remaining height UP to natural ground. In FILL the batter descends and
+    // the wall carries the fill DOWN to natural ground. Deriving both bounds
+    // from min/max handles the two without a branch; subtracting the height
+    // from the batter end gets cut exactly backwards, placing the wall below
+    // the face it is meant to retain.
+    const batterEnd = designSurfaceAtOffset(wall.offset, designZ, groundZ, template)
+    const topZ = Math.max(batterEnd, groundZ)
+    const bottomZ = Math.min(batterEnd, groundZ)
 
     for (const side of ['left', 'right'] as const) {
       segments.push({
@@ -621,26 +632,30 @@ export const wallSegments = (
         side,
         offset: side === 'left' ? -wall.offset : wall.offset,
         topZ,
-        bottomZ: topZ - wall.height,
+        bottomZ,
       })
     }
   }
 
-  // The stepped loop can stop short of the alignment end; include it.
+  // The stepped loop can stop short of the alignment end; include it. Only
+  // when the loop actually took a step — with spacing coarser than the whole
+  // alignment there is a single station and no panel to build.
   const last = segments[segments.length - 1]
-  if (last && last.s < alignment.length) {
+  if (steps >= 1 && last && last.s < alignment.length) {
     const s = alignment.length
     const pose = alignment.poseAt(s)
     const groundZ = terrain.sample(pose.position.x, pose.position.y)
     const designZ = designElevationAtStation(design, s)
     const wall = retainingWall(designZ, groundZ, template)
     if (wall && wall.height >= MIN_WALL_HEIGHT) {
-      const topZ = designSurfaceAtOffset(wall.offset, designZ, groundZ, template)
+      const batterEnd = designSurfaceAtOffset(wall.offset, designZ, groundZ, template)
+      const topZ = Math.max(batterEnd, groundZ)
+      const bottomZ = Math.min(batterEnd, groundZ)
       for (const side of ['left', 'right'] as const) {
         segments.push({
           s, side,
           offset: side === 'left' ? -wall.offset : wall.offset,
-          topZ, bottomZ: topZ - wall.height,
+          topZ, bottomZ,
         })
       }
     }
@@ -1245,7 +1260,15 @@ export const buildBridgeMesh = (
 
     // An abutment carries the full road width; a pier is a slender column.
     const halfAcross = isAbutment ? halfWidth : pierHalfWidth
-    addBox(builder, alignment, s, halfAcross, pierHalfWidth, groundZ, topZ)
+
+    // A box is centred on its station, so an abutment placed on the span
+    // boundary would overhang past the span end by its own half-length. Shift
+    // it inward so the whole structure stays within the span it belongs to.
+    const inward = isAbutment
+      ? (s === span.fromStation ? pierHalfWidth : -pierHalfWidth)
+      : 0
+
+    addBox(builder, alignment, s + inward, halfAcross, pierHalfWidth, groundZ, topZ)
   }
 
   return builder.build()
@@ -1930,7 +1953,7 @@ What the reviewer will check:
 
 ## Plan complete
 
-All three structure types have geometry, and both previously-unused triggers finally drive something.
+Walls and bridges have geometry, overpasses have detection, and both previously-unused triggers finally drive something.
 
 ### Deliberately not in this plan
 

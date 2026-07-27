@@ -233,6 +233,17 @@ Upgrading in place is a first-class verb, not a demolish-and-rebuild. This is wh
 
 Class determines: lane count, design speed, capacity, construction cost per metre, earthwork tolerance, and pavement durability.
 
+### What upgrading actually touches
+
+Changing a road's class is one field on the network graph, and then almost everything downstream has to follow. Listing it here because the cost is not obvious from the size of the edit:
+
+- **The road gets wider**, so its earthwork corridor changes — new cut and fill volumes, possibly new retaining walls where the wider batter no longer fits.
+- **Every junction it touches must re-solve.** Trim distances come from the legs' half-widths, so widening one leg pulls every other leg at that node further back. A junction that was feasible can stop being feasible.
+- **The vertical alignment may no longer be legal.** A higher class carries a higher design speed, which demands a larger minimum curve radius. Upgrading a winding rural road to a highway can make its own curves illegal — which is real, and is exactly the sort of engineering consequence this game exists to surface rather than hide.
+- **It is construction work**, not an instant swap. The construction layer should stage an upgrade the same way it stages a new road, and the pavement lifecycle should treat the new surface as new.
+
+The honest failure mode, consistent with the rest of the project: when an upgrade cannot be built — the curve is too tight for the new design speed, or a junction stops solving — say so and say why, rather than silently building something that violates its own standard.
+
 ### 4.8 Pavement lifecycle
 
 Governed by the AASHTO fourth-power law: damage scales with axle load to the fourth power.

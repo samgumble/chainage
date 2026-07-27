@@ -8,12 +8,52 @@ import {
 import { ROAD_CLASSES, formationHalfWidth } from './roadClass'
 import { type ProfilePoint, designElevationAtStation } from '../terrain/groundProfile'
 import type { MeshData } from './ribbon'
+import type { TerrainSampler } from '../terrain/heightmap'
+import { type CorridorBatters } from '../terrain/corridor'
+import { classifySupport } from '../terrain/gradeSolver'
+import { sampleGroundProfile } from '../terrain/groundProfile'
+import { structureSpans } from './structures/spans'
+import { buildBridgeMesh } from './structures/bridgeMesh'
+import { wallSegments, buildRetainingWallMesh } from './structures/retainingWallMesh'
+import { findCrossings, MIN_OVERPASS_CLEARANCE, type Crossing } from '../network/crossings'
 
-export type NetworkMeshOptions = {
+type NetworkMeshCommon = {
   readonly spacing?: number
   /** Per-road construction stations. A road not listed is fully built. */
   readonly stations?: ReadonlyMap<RoadId, LayerStations>
+  /**
+   * Batters and wall limit for the whole network. Required for retaining
+   * walls; bridges do not need it.
+   *
+   * Deliberately not a full `CorridorTemplate`: formation width is a property
+   * of the road class, and a network holds several. Each road's own width is
+   * filled in here from `ROAD_CLASSES`, so a gravel branch cannot have its
+   * walls measured against a rural road's formation.
+   */
+  readonly corridorBatters?: CorridorBatters
 }
+
+/**
+ * Natural ground for structures, and the fill allowance it was graded to.
+ *
+ * The two travel together deliberately. Whether a station is carried on earth
+ * or on a structure is `design − ground > maxFillHeight`, and `maxFillHeight`
+ * is not the mesh layer's to choose: it is whatever the caller handed
+ * `solveGradeProfile`. Restating it here as a constant — which is what this
+ * used to do — means any caller who grades to a different allowance silently
+ * gets the wrong answer, fabricating bridges under ordinary embankments or
+ * suppressing real ones. Supplying a terrain without it is therefore a type
+ * error, not a defaulted-away detail.
+ *
+ * `terrain` must be NATURAL ground, before any corridor excavation. Ground
+ * already cut and filled to the design surface sits at the design line by
+ * construction, so every station reads as level and neither trigger can fire.
+ */
+type StructureGround =
+  | { readonly terrain: TerrainSampler; readonly maxFillHeight: number }
+  | { readonly terrain?: never; readonly maxFillHeight?: never }
+
+export type NetworkMeshOptions = NetworkMeshCommon & StructureGround
 
 export type NetworkMesh = {
   readonly roads: ReadonlyMap<RoadId, RoadMesh>
@@ -22,6 +62,18 @@ export type NetworkMesh = {
   readonly infeasibleJunctions: ReadonlyMap<NodeId, JunctionInfeasibility>
   /** Nodes whose legs disagree about elevation, and by how much (metres). */
   readonly elevationMismatches: ReadonlyMap<NodeId, number>
+  /** Walls and bridges per road. Empty when no terrain was supplied. */
+  readonly structures: ReadonlyMap<RoadId, MeshData>
+  /**
+   * Crossings too tight for one road to pass over the other, keyed
+   * `"upperId:lowerId@upperStation"`, with the measured clearance in metres.
+   * Keyed per crossing, not per road pair: a pair that crosses twice, both
+   * times too tight, is two entries.
+   *
+   * A crossing between roads with no design profile is not reported at all —
+   * there is no elevation to measure a gap between.
+   */
+  readonly tightCrossings: ReadonlyMap<string, number>
 }
 
 /**
@@ -55,6 +107,15 @@ export const buildNetworkMesh = (
   options: NetworkMeshOptions = {},
 ): NetworkMesh => {
   const { spacing = 4, stations } = options
+
+  const terrain: TerrainSampler | undefined = options.terrain
+  const maxFillHeight: number | undefined = options.maxFillHeight
+  if (terrain !== undefined && maxFillHeight === undefined) {
+    throw new RangeError(
+      'maxFillHeight is required with terrain: structures are classified ' +
+        'against the fill allowance the design line was graded to',
+    )
+  }
 
   const junctions = new Map<NodeId, MeshData>()
   const infeasibleJunctions = new Map<NodeId, JunctionInfeasibility>()
@@ -163,5 +224,127 @@ export const buildNetworkMesh = (
     )
   }
 
-  return { roads, junctions, infeasibleJunctions, elevationMismatches }
+  const structures = new Map<RoadId, MeshData>()
+
+  // Bridges need ground and a fill allowance; walls additionally need a
+  // corridor cross-section to know where a batter runs out of room. Gating
+  // both on the template would silently cost a terrain-only caller its
+  // bridges, so the two triggers are gated independently.
+  if (terrain !== undefined && maxFillHeight !== undefined) {
+    const batters = options.corridorBatters
+
+    for (const road of network.roads) {
+      const design = designs.get(road.id) ?? []
+      const parts: MeshData[] = []
+
+      if (design.length >= 2) {
+        const halfWidth = formationHalfWidth(ROAD_CLASSES[road.className])
+        const ground = sampleGroundProfile(road.alignment, terrain, spacing)
+
+        // Resample the design onto the ground profile's own stations, so
+        // classifySupport compares like with like. The two profiles are
+        // sampled independently and will not otherwise share stations.
+        const designAtGround = ground.map((g) => ({
+          s: g.s,
+          z: designElevationAtStation(design, g.s),
+        }))
+
+        const support = classifySupport(ground, designAtGround, maxFillHeight)
+        const spans = structureSpans(designAtGround, support, ground)
+        for (const span of spans) {
+          parts.push(buildBridgeMesh(road.alignment, terrain, design, span, halfWidth))
+        }
+
+        if (batters !== undefined) {
+          // This road's own formation width, not the network's — the wall
+          // stands at `formationHalfWidth + maxBatterWidth` from the
+          // centreline, so borrowing another class's width puts it in the
+          // wrong place.
+          const template = { ...batters, formationHalfWidth: halfWidth }
+          // Stations inside a span are dropped: a retaining wall holds back
+          // an earthwork, and where a bridge carries the road there is no
+          // earthwork to hold. `retainingWall()` cannot know that — it is
+          // handed one station's design and ground elevation and nothing
+          // else, and a design line standing 17m over a valley floor looks
+          // to it exactly like one standing on a 17m embankment. Only here,
+          // where the spans are already in hand, is the difference visible.
+          const carried = (s: number) =>
+            spans.some((span) => s >= span.fromStation && s <= span.toStation)
+          parts.push(
+            buildRetainingWallMesh(
+              road.alignment,
+              wallSegments(road.alignment, terrain, design, template, spacing)
+                .filter((segment) => !carried(segment.s)),
+            ),
+          )
+        }
+      }
+
+      structures.set(road.id, mergeMeshes(parts))
+    }
+  }
+
+  const tightCrossings = new Map<string, number>()
+  for (const crossing of findCrossings(network, designs)) {
+    if (crossing.clearance < MIN_OVERPASS_CLEARANCE) {
+      tightCrossings.set(tightCrossingKey(crossing), crossing.clearance)
+    }
+  }
+
+  return {
+    roads, junctions, infeasibleJunctions, elevationMismatches, structures, tightCrossings,
+  }
+}
+
+/**
+ * Report key for one tight crossing: `"upperId:lowerId@upperStation"`.
+ *
+ * The station is what makes it a crossing rather than a pair. Two roads can
+ * cross twice — `findCrossings` reports both, deliberately — and keying on the
+ * road pair alone silently discards all but one of them, which is the bug the
+ * layer below was fixed for. The upper road's station identifies the crossing
+ * on its own: a station is one point on one alignment, so no two crossings of
+ * the same pair can share it.
+ */
+const tightCrossingKey = (crossing: Crossing): string =>
+  `${crossing.upper}:${crossing.lower}@${crossing.upperStation.toFixed(2)}`
+
+/**
+ * Concatenate several meshes into one, renumbering indices.
+ *
+ * Typed arrays are copied with `set` rather than spread — spreading a large
+ * `Float32Array` into a function call blows the argument limit, and these
+ * meshes are unbounded in size.
+ */
+const mergeMeshes = (meshes: readonly MeshData[]): MeshData => {
+  let vertexCount = 0
+  let indexCount = 0
+  for (const mesh of meshes) {
+    vertexCount += mesh.vertexCount
+    indexCount += mesh.indices.length
+  }
+
+  const positions = new Float32Array(vertexCount * 3)
+  const normals = new Float32Array(vertexCount * 3)
+  const uvs = new Float32Array(vertexCount * 2)
+  const indices = new Uint32Array(indexCount)
+
+  let vertexBase = 0
+  let indexBase = 0
+  for (const mesh of meshes) {
+    positions.set(mesh.positions, vertexBase * 3)
+    normals.set(mesh.normals, vertexBase * 3)
+    uvs.set(mesh.uvs, vertexBase * 2)
+    for (let i = 0; i < mesh.indices.length; i++) {
+      indices[indexBase + i] = mesh.indices[i]! + vertexBase
+    }
+    vertexBase += mesh.vertexCount
+    indexBase += mesh.indices.length
+  }
+
+  return {
+    positions, normals, uvs, indices,
+    vertexCount,
+    triangleCount: indexCount / 3,
+  }
 }

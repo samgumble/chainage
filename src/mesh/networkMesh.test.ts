@@ -278,3 +278,204 @@ describe('buildNetworkMesh', () => {
     }
   })
 })
+
+import { Heightmap } from '../terrain/heightmap'
+import type { CorridorBatters } from '../terrain/corridor'
+
+const flatGround = (z: number) => Heightmap.flat(-1000, -1000, 100, 41, 41, z)
+const template: CorridorBatters = { cutSlope: 2, fillSlope: 3, maxBatterWidth: 1 }
+
+describe('buildNetworkMesh structures', () => {
+  it('builds no structures without a terrain', () => {
+    const { net, designs } = tJunction()
+    const m = buildNetworkMesh(net, designs, { spacing: 10 })
+    expect(m.structures.size).toBe(0)
+  })
+
+  it('builds a structure entry per road when a terrain is given', () => {
+    const { net, designs } = tJunction()
+    const m = buildNetworkMesh(net, designs, {
+      spacing: 10, terrain: flatGround(50), maxFillHeight: 10, corridorBatters: template,
+    })
+    expect(m.structures.size).toBe(3)
+  })
+
+  it('builds a bridge where the design stands high above ground', () => {
+    const { net, designs, west } = tJunction()
+    // Ground 40m below the roads, so every station needs a structure.
+    const m = buildNetworkMesh(net, designs, {
+      spacing: 10, terrain: flatGround(10), maxFillHeight: 10, corridorBatters: template,
+    })
+    expect(m.structures.get(west)!.vertexCount).toBeGreaterThan(0)
+  })
+
+  it('builds nothing where the road sits on the ground', () => {
+    const { net, designs, west } = tJunction()
+    const m = buildNetworkMesh(net, designs, {
+      spacing: 10,
+      terrain: flatGround(50),
+      maxFillHeight: 10,
+      corridorBatters: { cutSlope: 2, fillSlope: 3 },
+    })
+    expect(m.structures.get(west)!.vertexCount).toBe(0)
+  })
+
+  // A retaining wall holds back an earthwork. Where a bridge carries the
+  // road there is no earthwork to hold, so a wall there would stand in mid
+  // air beside the deck, retaining nothing.
+  it('builds no retaining wall where a bridge carries the road', () => {
+    const { net, designs, west } = tJunction()
+    const options = { spacing: 10, terrain: flatGround(10), maxFillHeight: 10 } as const
+    // 40m of fill puts the whole road on a structure. Without the span, this
+    // template would wall every station of it.
+    const withWalls = buildNetworkMesh(net, designs, { ...options, corridorBatters: template })
+    const bridgeOnly = buildNetworkMesh(net, designs, options)
+    expect(bridgeOnly.structures.get(west)!.vertexCount).toBeGreaterThan(0)
+    expect(withWalls.structures.get(west)!.vertexCount)
+      .toBe(bridgeOnly.structures.get(west)!.vertexCount)
+  })
+
+  // A wall stands at `formationHalfWidth + maxBatterWidth` from the
+  // centreline, and formation width is a property of the road class. One
+  // network-wide template made every road's wall stand where the rural road's
+  // would, so the gravel branch's walls floated 3m clear of its own formation.
+  it('stands each road wall against its own class formation width', () => {
+    const net = new RoadNetwork()
+    // Two parallel roads far enough apart to share no node.
+    const main = net.addRoad(new Alignment([new Line(vec2(0, 0), 0, 200)]), 'rural')
+    const track = net.addRoad(new Alignment([new Line(vec2(0, 1000), 0, 200)]), 'gravel')
+    const designs = new Map<RoadId, ProfilePoint[]>([
+      [main, level(200, 50)], [track, level(200, 50)],
+    ])
+    // 10m of fill at 3H:1V wants a 30m batter; 4m of room means a wall.
+    // maxFillHeight of 20 keeps the fill well short of a bridge.
+    const m = buildNetworkMesh(net, designs, {
+      spacing: 10,
+      terrain: flatGround(40),
+      maxFillHeight: 20,
+      corridorBatters: { cutSlope: 2, fillSlope: 3, maxBatterWidth: 4 },
+    })
+
+    /** Furthest a road's structure vertices sit from its own centreline. */
+    const reach = (id: RoadId, centreY: number) => {
+      const mesh = m.structures.get(id)!
+      let furthest = 0
+      for (let i = 0; i < mesh.vertexCount; i++) {
+        furthest = Math.max(furthest, Math.abs(mesh.positions[i * 3 + 1]! - centreY))
+      }
+      return furthest
+    }
+
+    expect(reach(main, 0)).toBeCloseTo(formationHalfWidth(ROAD_CLASSES.rural) + 4, 6)
+    expect(reach(track, 1000)).toBeCloseTo(formationHalfWidth(ROAD_CLASSES.gravel) + 4, 6)
+  })
+
+  // The fill allowance is the caller's, not the mesh layer's: it is whatever
+  // the caller solved the design line with. The same terrain and the same
+  // design must classify differently under different allowances, or a caller
+  // who grades to a different allowance silently gets the wrong answer.
+  it('classifies a bridge against the caller-supplied fill allowance', () => {
+    const { net, designs, west } = tJunction()
+    // Roads at z=50 over ground at z=45: a 5m embankment.
+    const generous = buildNetworkMesh(net, designs, {
+      spacing: 10, terrain: flatGround(45), maxFillHeight: 10,
+    })
+    const mean = buildNetworkMesh(net, designs, {
+      spacing: 10, terrain: flatGround(45), maxFillHeight: 3,
+    })
+    expect(generous.structures.get(west)!.vertexCount).toBe(0)
+    expect(mean.structures.get(west)!.vertexCount).toBeGreaterThan(0)
+  })
+
+  // A bridge needs ground and a fill allowance; only a wall needs to know
+  // where the batter runs out of room. Coupling them cost the terrain-only
+  // caller its bridges.
+  it('still builds bridges for a caller who supplies no corridor template', () => {
+    const { net, designs, west } = tJunction()
+    const m = buildNetworkMesh(net, designs, {
+      spacing: 10, terrain: flatGround(10), maxFillHeight: 10,
+    })
+    expect(m.structures.get(west)!.vertexCount).toBeGreaterThan(0)
+  })
+
+  it('refuses a terrain without the fill allowance it was graded to', () => {
+    const { net, designs } = tJunction()
+    expect(() =>
+      // @ts-expect-error terrain without maxFillHeight is exactly the mistake
+      buildNetworkMesh(net, designs, { spacing: 10, terrain: flatGround(45) }),
+    ).toThrow(RangeError)
+  })
+
+  it('reports a crossing that is too tight', () => {
+    const net = new RoadNetwork()
+    const a = net.addRoad(new Alignment([new Line(vec2(0, 0), 0, 200)]), 'rural')
+    const b = net.addRoad(new Alignment([new Line(vec2(100, -100), Math.PI / 2, 200)]), 'rural')
+    const designs = new Map<RoadId, ProfilePoint[]>([
+      [a, level(200, 50)], [b, level(200, 51)],
+    ])
+    const m = buildNetworkMesh(net, designs, { spacing: 10 })
+    expect(m.tightCrossings.size).toBe(1)
+  })
+
+  it('does not report a crossing with adequate clearance', () => {
+    const net = new RoadNetwork()
+    const a = net.addRoad(new Alignment([new Line(vec2(0, 0), 0, 200)]), 'rural')
+    const b = net.addRoad(new Alignment([new Line(vec2(100, -100), Math.PI / 2, 200)]), 'rural')
+    const designs = new Map<RoadId, ProfilePoint[]>([
+      [a, level(200, 50)], [b, level(200, 60)],
+    ])
+    const m = buildNetworkMesh(net, designs, { spacing: 10 })
+    expect(m.tightCrossings.size).toBe(0)
+  })
+
+  // `findCrossings` was fixed to report every crossing of a pair, not just
+  // the first; keying the report by "upper:lower" collapsed them again.
+  it('reports both tight crossings of a pair that crosses twice', () => {
+    const net = new RoadNetwork()
+    const a = net.addRoad(new Alignment([new Line(vec2(0, 0), 0, 400)]), 'rural')
+
+    // A zigzag that crosses the spine up and then back down again.
+    const q0 = vec2(100, -50), q1 = vec2(150, 50), q2 = vec2(300, -50)
+    const leg = (from: typeof q0, to: typeof q0) => ({
+      heading: Math.atan2(to.y - from.y, to.x - from.x),
+      length: Math.hypot(to.x - from.x, to.y - from.y),
+    })
+    const leg1 = leg(q0, q1)
+    const leg2 = leg(q1, q2)
+    const b = net.addRoad(
+      new Alignment([
+        new Line(q0, leg1.heading, leg1.length),
+        new Line(q1, leg2.heading, leg2.length),
+      ]),
+      'rural',
+    )
+
+    const designs = new Map<RoadId, ProfilePoint[]>([
+      [a, level(400, 100)],
+      [b, level(leg1.length + leg2.length, 100.5)],
+    ])
+
+    const m = buildNetworkMesh(net, designs, { spacing: 10 })
+    expect(m.tightCrossings.size).toBe(2)
+    for (const clearance of m.tightCrossings.values()) {
+      expect(clearance).toBeCloseTo(0.5, 6)
+    }
+  })
+
+  // An absent design profile reads as elevation 0 in `designElevationAtStation`.
+  // Two undesigned roads therefore both read 0, compute a 0m gap, and get
+  // reported as a collision that nobody has yet had the chance to cause.
+  it('does not report a crossing between roads with no design profile', () => {
+    const net = new RoadNetwork()
+    net.addRoad(new Alignment([new Line(vec2(0, 0), 0, 200)]), 'rural')
+    net.addRoad(new Alignment([new Line(vec2(100, -100), Math.PI / 2, 200)]), 'rural')
+    const m = buildNetworkMesh(net, new Map(), { spacing: 10 })
+    expect(m.tightCrossings.size).toBe(0)
+  })
+
+  it('does not report roads meeting at a junction as a tight crossing', () => {
+    const { net, designs } = tJunction()
+    const m = buildNetworkMesh(net, designs, { spacing: 10 })
+    expect(m.tightCrossings.size).toBe(0)
+  })
+})
