@@ -613,7 +613,18 @@ export const wallSegments = (
     const wall = retainingWall(designZ, groundZ, template)
     if (!wall || wall.height < MIN_WALL_HEIGHT) continue
 
-    const topZ = designSurfaceAtOffset(wall.offset, designZ, groundZ, template)
+    // The wall spans between where the truncated batter ends and natural
+    // ground — whichever of the two is higher is the top.
+    //
+    // In CUT the batter climbs from the formation edge and the wall holds the
+    // remaining height UP to natural ground. In FILL the batter descends and
+    // the wall carries the fill DOWN to natural ground. Deriving both bounds
+    // from min/max handles the two without a branch; subtracting the height
+    // from the batter end gets cut exactly backwards, placing the wall below
+    // the face it is meant to retain.
+    const batterEnd = designSurfaceAtOffset(wall.offset, designZ, groundZ, template)
+    const topZ = Math.max(batterEnd, groundZ)
+    const bottomZ = Math.min(batterEnd, groundZ)
 
     for (const side of ['left', 'right'] as const) {
       segments.push({
@@ -621,26 +632,30 @@ export const wallSegments = (
         side,
         offset: side === 'left' ? -wall.offset : wall.offset,
         topZ,
-        bottomZ: topZ - wall.height,
+        bottomZ,
       })
     }
   }
 
-  // The stepped loop can stop short of the alignment end; include it.
+  // The stepped loop can stop short of the alignment end; include it. Only
+  // when the loop actually took a step — with spacing coarser than the whole
+  // alignment there is a single station and no panel to build.
   const last = segments[segments.length - 1]
-  if (last && last.s < alignment.length) {
+  if (steps >= 1 && last && last.s < alignment.length) {
     const s = alignment.length
     const pose = alignment.poseAt(s)
     const groundZ = terrain.sample(pose.position.x, pose.position.y)
     const designZ = designElevationAtStation(design, s)
     const wall = retainingWall(designZ, groundZ, template)
     if (wall && wall.height >= MIN_WALL_HEIGHT) {
-      const topZ = designSurfaceAtOffset(wall.offset, designZ, groundZ, template)
+      const batterEnd = designSurfaceAtOffset(wall.offset, designZ, groundZ, template)
+      const topZ = Math.max(batterEnd, groundZ)
+      const bottomZ = Math.min(batterEnd, groundZ)
       for (const side of ['left', 'right'] as const) {
         segments.push({
           s, side,
           offset: side === 'left' ? -wall.offset : wall.offset,
-          topZ, bottomZ: topZ - wall.height,
+          topZ, bottomZ,
         })
       }
     }
