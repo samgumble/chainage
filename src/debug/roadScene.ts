@@ -1182,23 +1182,25 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   // scales with it too, unlike `normalBias`, which offsets in world units
   // directly rather than as a fraction of the depth range.
   //
-  // The MAGNITUDE, though, was left over from before `normalBias` was
-  // derived from texel size, when this constant was carrying the whole job
-  // of suppressing acne on its own. `bias` is a fraction of the depth range,
-  // and `updateSunShadow` builds a range of `halfSize * 6 - 1` — about 1799m
-  // at the default framing. The old `-0.0002` therefore offset roughly
-  // **0.36m in world space**, which does not merely waste precision: a depth
-  // bias that large detaches every shadow from its caster and suppresses the
-  // shadow of anything shorter than it outright. Kerbs, retaining walls and
-  // the shallower embankments all cast nothing.
+  // The magnitude is EMPIRICAL and must stay that way. It was once cut to
+  // -1e-5 on the following argument: `bias` is a fraction of a depth range
+  // of `halfSize * 6 - 1` (~1799m at the default framing), so -0.0002 offsets
+  // ~0.36m in world space, while depth-buffer quantisation over that range is
+  // ~1e-4m on a 24-bit texture — apparently three orders of magnitude of
+  // slack, and 0.36m is enough to detach a shadow from anything shorter.
   //
-  // With `normalBias` handling surface acne, all this needs to cover is
-  // depth-buffer quantisation — about 1e-4 m over that range on a 24-bit
-  // depth texture. Two centimetres is more than two orders of magnitude of
-  // headroom over that while being far below the height of the smallest
-  // thing in the scene that ought to cast a shadow, so `0.02 / 1799` rounds
-  // to the value below.
-  sun.shadow.bias = -1e-5
+  // The arithmetic is right and the conclusion was wrong: at -1e-5 acne
+  // returns across the whole terrain, in fine contour-following moire, dark
+  // enough to visibly desaturate the scene. Quantisation is not the only
+  // error being covered — PCF taps, the interpolated depth across a texel
+  // that spans ~0.15m of ground, and the shallow angle between a low sun and
+  // a gently sloping surface all contribute, and none of them appear in that
+  // calculation. -0.0002 is the value an earlier fix wave arrived at BY
+  // LOOKING AT THE SCENE, and re-derivation is not evidence against it.
+  //
+  // If this is ever changed again, change it in the browser with the terrain
+  // in view, not on paper.
+  sun.shadow.bias = -0.0002
   // The fraction of one shadow-map texel `normalBias` offsets by, set once
   // here (`updateSunShadow` computes the bias itself, every frame). Derived,
   // not tuned fresh: at the frustum size this scene used to fix `normalBias`
