@@ -185,6 +185,23 @@ describe('findCrossings', () => {
     expect(findCrossings(net, designs)).toHaveLength(1)
   })
 
+  it('omits a crossing where neither road has a design profile', () => {
+    const { net } = crossingPair(100, 108)
+    expect(findCrossings(net, new Map())).toHaveLength(0)
+  })
+
+  it('omits a crossing where only one road has a design profile', () => {
+    const { net, a } = crossingPair(100, 108)
+    const designs = new Map<RoadId, ProfilePoint[]>([[a, level(200, 100)]])
+    expect(findCrossings(net, designs)).toHaveLength(0)
+  })
+
+  it('omits a crossing where a road has an empty design profile', () => {
+    const { net, a, b } = crossingPair(100, 108)
+    const designs = new Map<RoadId, ProfilePoint[]>([[a, level(200, 100)], [b, []]])
+    expect(findCrossings(net, designs)).toHaveLength(0)
+  })
+
   it('rejects non-positive spacing', () => {
     const { net, designs } = crossingPair(100, 108)
     expect(() => findCrossings(net, designs, 0)).toThrow(RangeError)

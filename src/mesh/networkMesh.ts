@@ -15,7 +15,7 @@ import { sampleGroundProfile } from '../terrain/groundProfile'
 import { structureSpans } from './structures/spans'
 import { buildBridgeMesh } from './structures/bridgeMesh'
 import { wallSegments, buildRetainingWallMesh } from './structures/retainingWallMesh'
-import { findCrossings, MIN_OVERPASS_CLEARANCE } from '../network/crossings'
+import { findCrossings, MIN_OVERPASS_CLEARANCE, type Crossing } from '../network/crossings'
 
 type NetworkMeshCommon = {
   readonly spacing?: number
@@ -66,7 +66,12 @@ export type NetworkMesh = {
   readonly structures: ReadonlyMap<RoadId, MeshData>
   /**
    * Crossings too tight for one road to pass over the other, keyed
-   * `"upperId:lowerId"`, with the measured clearance in metres.
+   * `"upperId:lowerId@upperStation"`, with the measured clearance in metres.
+   * Keyed per crossing, not per road pair: a pair that crosses twice, both
+   * times too tight, is two entries.
+   *
+   * A crossing between roads with no design profile is not reported at all —
+   * there is no elevation to measure a gap between.
    */
   readonly tightCrossings: ReadonlyMap<string, number>
 }
@@ -272,7 +277,7 @@ export const buildNetworkMesh = (
   const tightCrossings = new Map<string, number>()
   for (const crossing of findCrossings(network, designs)) {
     if (crossing.clearance < MIN_OVERPASS_CLEARANCE) {
-      tightCrossings.set(`${crossing.upper}:${crossing.lower}`, crossing.clearance)
+      tightCrossings.set(tightCrossingKey(crossing), crossing.clearance)
     }
   }
 
@@ -280,6 +285,19 @@ export const buildNetworkMesh = (
     roads, junctions, infeasibleJunctions, elevationMismatches, structures, tightCrossings,
   }
 }
+
+/**
+ * Report key for one tight crossing: `"upperId:lowerId@upperStation"`.
+ *
+ * The station is what makes it a crossing rather than a pair. Two roads can
+ * cross twice — `findCrossings` reports both, deliberately — and keying on the
+ * road pair alone silently discards all but one of them, which is the bug the
+ * layer below was fixed for. The upper road's station identifies the crossing
+ * on its own: a station is one point on one alignment, so no two crossings of
+ * the same pair can share it.
+ */
+const tightCrossingKey = (crossing: Crossing): string =>
+  `${crossing.upper}:${crossing.lower}@${crossing.upperStation.toFixed(2)}`
 
 /**
  * Concatenate several meshes into one, renumbering indices.

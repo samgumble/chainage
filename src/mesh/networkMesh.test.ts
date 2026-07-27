@@ -413,6 +413,51 @@ describe('buildNetworkMesh structures', () => {
     expect(m.tightCrossings.size).toBe(0)
   })
 
+  // `findCrossings` was fixed to report every crossing of a pair, not just
+  // the first; keying the report by "upper:lower" collapsed them again.
+  it('reports both tight crossings of a pair that crosses twice', () => {
+    const net = new RoadNetwork()
+    const a = net.addRoad(new Alignment([new Line(vec2(0, 0), 0, 400)]), 'rural')
+
+    // A zigzag that crosses the spine up and then back down again.
+    const q0 = vec2(100, -50), q1 = vec2(150, 50), q2 = vec2(300, -50)
+    const leg = (from: typeof q0, to: typeof q0) => ({
+      heading: Math.atan2(to.y - from.y, to.x - from.x),
+      length: Math.hypot(to.x - from.x, to.y - from.y),
+    })
+    const leg1 = leg(q0, q1)
+    const leg2 = leg(q1, q2)
+    const b = net.addRoad(
+      new Alignment([
+        new Line(q0, leg1.heading, leg1.length),
+        new Line(q1, leg2.heading, leg2.length),
+      ]),
+      'rural',
+    )
+
+    const designs = new Map<RoadId, ProfilePoint[]>([
+      [a, level(400, 100)],
+      [b, level(leg1.length + leg2.length, 100.5)],
+    ])
+
+    const m = buildNetworkMesh(net, designs, { spacing: 10 })
+    expect(m.tightCrossings.size).toBe(2)
+    for (const clearance of m.tightCrossings.values()) {
+      expect(clearance).toBeCloseTo(0.5, 6)
+    }
+  })
+
+  // An absent design profile reads as elevation 0 in `designElevationAtStation`.
+  // Two undesigned roads therefore both read 0, compute a 0m gap, and get
+  // reported as a collision that nobody has yet had the chance to cause.
+  it('does not report a crossing between roads with no design profile', () => {
+    const net = new RoadNetwork()
+    net.addRoad(new Alignment([new Line(vec2(0, 0), 0, 200)]), 'rural')
+    net.addRoad(new Alignment([new Line(vec2(100, -100), Math.PI / 2, 200)]), 'rural')
+    const m = buildNetworkMesh(net, new Map(), { spacing: 10 })
+    expect(m.tightCrossings.size).toBe(0)
+  })
+
   it('does not report roads meeting at a junction as a tight crossing', () => {
     const { net, designs } = tJunction()
     const m = buildNetworkMesh(net, designs, { spacing: 10 })

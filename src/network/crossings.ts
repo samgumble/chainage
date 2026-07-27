@@ -36,6 +36,9 @@ export const MIN_OVERPASS_CLEARANCE = 5.0
  * silently lose it, so every intersection is computed first and only the
  * ones sitting on a shared node are discarded.
  *
+ * A pair where either road has no design profile is omitted entirely: without
+ * a profile there is no elevation, so there is no clearance to report.
+ *
  * Detection is by sampling: each alignment becomes a polyline and every pair
  * of segments is tested. That is quadratic in sample count and fine for the
  * network sizes this game reaches; a spatial index belongs with the
@@ -81,6 +84,20 @@ export const findCrossings = (
       }
       const sharedNodePositions = [...sharedNodeIds].map((id) => network.node(id).position)
 
+      // A road with no design profile has no elevation to compare.
+      // `designElevationAtStation` answers 0 for an empty profile, so two
+      // ungraded roads would read a 0m gap and be reported as a collision —
+      // a measurement fabricated out of missing information. Report rather
+      // than approximate cuts the other way here: the honest answer is that
+      // there is no clearance to report, so the crossing is omitted rather
+      // than pushed into a channel that means "measured, and too tight".
+      // Nothing is lost by it — every caller holds the `designs` map and can
+      // see for itself which roads are ungraded.
+      const designA = designs.get(roadA.id)
+      const designB = designs.get(roadB.id)
+      if (!designA || designA.length === 0) continue
+      if (!designB || designB.length === 0) continue
+
       const hits = allIntersections(polylines.get(roadA.id)!, polylines.get(roadB.id)!)
 
       for (const hit of hits) {
@@ -89,8 +106,8 @@ export const findCrossings = (
         )
         if (atSharedNode) continue
 
-        const zA = designElevationAtStation(designs.get(roadA.id) ?? [], hit.sA)
-        const zB = designElevationAtStation(designs.get(roadB.id) ?? [], hit.sB)
+        const zA = designElevationAtStation(designA, hit.sA)
+        const zB = designElevationAtStation(designB, hit.sB)
         const aIsUpper = zA >= zB
 
         crossings.push({
