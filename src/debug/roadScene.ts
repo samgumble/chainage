@@ -1,31 +1,36 @@
 import * as THREE from 'three'
 import { Alignment } from '../geometry/alignment'
 import { Line } from '../geometry/primitives'
-import { filletCorner } from '../geometry/fillet'
-import { vec2, angleOf, sub, distance, fromAngle, type Vec2 } from '../geometry/vec2'
+import { vec2, fromAngle } from '../geometry/vec2'
 import { generateValley } from '../terrain/generate'
-import type { Heightmap } from '../terrain/heightmap'
 import { sampleGroundProfile, designElevationAtStation, type ProfilePoint } from '../terrain/groundProfile'
 import { solveGradeProfile } from '../terrain/gradeSolver'
 import { TerrainEditLayer } from '../terrain/editLayer'
 import { designSurfaceAtOffset, type CorridorTemplate } from '../terrain/corridor'
-import { ROAD_CLASSES, formationHalfWidth, totalPavementThickness } from '../mesh/roadClass'
-import { buildRoadMesh } from '../mesh/roadMesh'
+import { ROAD_CLASSES, formationHalfWidth, totalPavementThickness, type RoadClassName } from '../mesh/roadClass'
 import { toBufferGeometry } from '../render/meshAdapter'
 import { terrainGeometry } from '../render/terrainMesh'
+import { RoadNetwork, type RoadId } from '../network/graph'
+import { buildNetworkMesh } from '../mesh/networkMesh'
 
-const CURVE_RADIUS = 400
 const MAX_GRADE = 0.07
 const MAX_CUT_DEPTH = 12
 const MAX_FILL_HEIGHT = 10
 
-/** Earthworks cross-section used to carve the corridor into the terrain,
- * consistent with the road actually being drawn (see ROAD_CLASSES.rural). */
-const CORRIDOR_TEMPLATE: CorridorTemplate = {
-  formationHalfWidth: formationHalfWidth(ROAD_CLASSES.rural),
-  cutSlope: 2,
-  fillSlope: 3,
-}
+/** Cut and fill batters, horizontal-to-vertical — a property of how the
+ * ground stands, not of the pavement built on it, so shared across every
+ * road class rather than varying per class the way formation width does. */
+const CORRIDOR_CUT_SLOPE = 2
+const CORRIDOR_FILL_SLOPE = 3
+
+/** Earthworks cross-section used to carve the corridor into the terrain for
+ * a given road class — each class has its own formation width, so the
+ * gravel branch excavates a narrower footprint than the rural main road. */
+const corridorTemplateFor = (className: RoadClassName): CorridorTemplate => ({
+  formationHalfWidth: formationHalfWidth(ROAD_CLASSES[className]),
+  cutSlope: CORRIDOR_CUT_SLOPE,
+  fillSlope: CORRIDOR_FILL_SLOPE,
+})
 
 /** How far apart, along the alignment, the excavation walk takes stations. */
 const EXCAVATION_STATION_SPACING = 5
@@ -62,21 +67,6 @@ const ORBIT_RADIUS = 1400
 const ORBIT_HEIGHT = 700
 const ORBIT_PERIOD_S = 40
 
-const buildAlignment = (a: Vec2, corner: Vec2, b: Vec2): Alignment | null => {
-  const dIn = sub(corner, a)
-  const dOut = sub(b, corner)
-  const fillet = filletCorner(corner, dIn, dOut, CURVE_RADIUS)
-  if (!fillet) return null
-  const inLength = distance(a, fillet.tangentIn)
-  const outLength = distance(fillet.tangentOut, b)
-  if (inLength <= 0 || outLength <= 0) return null
-  return new Alignment([
-    new Line(a, angleOf(dIn), inLength),
-    fillet.arc,
-    new Line(fillet.tangentOut, angleOf(dOut), outLength),
-  ])
-}
-
 /**
  * Cut and fill the terrain down to the design surface along the corridor.
  *
@@ -108,16 +98,21 @@ const buildAlignment = (a: Vec2, corner: Vec2, b: Vec2): Alignment | null => {
  * continuous from an orbiting camera" is the bar, but it is not fine for
  * computing quantities — that needs the exact transverse integration in
  * `src/terrain/volumes.ts`, not this grid-snapped approximation.
+ *
+ * Writes into a caller-supplied `layer` rather than returning a fresh one, so
+ * that calling this once per road in a network accumulates every corridor's
+ * deltas onto the same terrain instead of each excavation clobbering the last.
  */
 const excavateCorridor = (
-  terrain: Heightmap,
+  layer: TerrainEditLayer,
   alignment: Alignment,
   profile: readonly ProfilePoint[],
-  template: CorridorTemplate,
-): TerrainEditLayer => {
-  const layer = new TerrainEditLayer(terrain)
-  if (alignment.isEmpty || profile.length === 0) return layer
+  className: RoadClassName,
+): void => {
+  if (alignment.isEmpty || profile.length === 0) return
 
+  const terrain = layer.base
+  const template = corridorTemplateFor(className)
   const transverseStep = terrain.cellSize
   const maxSlope = Math.max(template.cutSlope, template.fillSlope)
   const steps = Math.max(1, Math.ceil(alignment.length / EXCAVATION_STATION_SPACING))
@@ -128,7 +123,7 @@ const excavateCorridor = (
   // the full pavement stack — plus a small margin against z-fighting. Using
   // an arbitrary clearance instead of this would either bury the pavement in
   // cut sections or leave it floating above the embankment in fill sections.
-  const pavementDepth = totalPavementThickness(ROAD_CLASSES.rural)
+  const pavementDepth = totalPavementThickness(ROAD_CLASSES[className])
 
   for (let i = 0; i <= steps; i++) {
     const s = Math.min(i * EXCAVATION_STATION_SPACING, alignment.length)
@@ -156,8 +151,6 @@ const excavateCorridor = (
       layer.setDelta(col, row, targetZ - groundZ)
     }
   }
-
-  return layer
 }
 
 export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
@@ -190,47 +183,94 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     floorElevation: 100, ridgeHeight: 70, valleyHalfWidth: 400, seed: 7,
   })
 
-  const alignment = buildAlignment(vec2(200, 1300), vec2(1400, 1200), vec2(2400, 1340))
+  // A T junction on the valley floor: a main road running east-west with a
+  // narrower gravel branch heading north. Three straight roads meeting at one
+  // point, which is exactly what a junction needs and nothing more.
+  //
+  // All three alignments are built starting FROM the junction rather than
+  // arriving at it. `solveGradeProfile`'s forward greedy sweep pins station 0
+  // to natural ground but can drift away from it by the far end of a long
+  // alignment (the terrain here is rough enough that it does): starting every
+  // leg at the junction means every leg's own elevation there is natural
+  // ground, so the three legs agree and the junction sits flush without
+  // needing `elevationMismatches` to paper over a drifted arrival station.
+  const JUNCTION = vec2(900, 1280)
 
-  // Falls back to the raw heightmap when there is no alignment (or no
-  // feasible grade solution) to excavate against.
-  let terrainSource: { sample(x: number, y: number): number } = terrain
+  const network = new RoadNetwork()
+  const designs = new Map<RoadId, ProfilePoint[]>()
 
-  if (alignment) {
+  const solveFor = (alignment: Alignment): ProfilePoint[] | null => {
     const ground = sampleGroundProfile(alignment, terrain, 10)
     const solution = solveGradeProfile(ground, {
       maxGrade: MAX_GRADE,
       maxCutDepth: MAX_CUT_DEPTH,
       maxFillHeight: MAX_FILL_HEIGHT,
     })
+    return solution.feasible ? solution.profile : null
+  }
 
-    if (solution.feasible) {
-      // Excavate the terrain down to the design line before anything is
-      // rendered, so the road sits in a real cutting/embankment rather than
-      // buried inside (or floating above) untouched ground.
-      const editLayer = excavateCorridor(terrain, alignment, solution.profile, CORRIDOR_TEMPLATE)
-      terrainSource = editLayer
+  // West and east arms both start at the junction, heading opposite ways
+  // along the valley; the branch starts there too, heading north.
+  const westArm = new Alignment([new Line(JUNCTION, Math.PI, 750)])
+  const eastArm = new Alignment([new Line(JUNCTION, 0, 750)])
+  const branch = new Alignment([new Line(JUNCTION, Math.PI / 2, 300)])
 
-      // Deliberately part-built, so all three layers are visible at once.
-      const total = alignment.length
-      const road = buildRoadMesh(
-        alignment, solution.profile, ROAD_CLASSES.rural,
-        { subgrade: total, base: total * 0.72, wearing: total * 0.45 },
-        { spacing: 4 },
-      )
+  const arms: [Alignment, 'rural' | 'gravel'][] = [
+    [westArm, 'rural'], [eastArm, 'rural'], [branch, 'gravel'],
+  ]
 
-      for (const layer of road.layers) {
-        if (layer.mesh.vertexCount === 0) continue
-        scene.add(new THREE.Mesh(
-          toBufferGeometry(layer.mesh),
-          new THREE.MeshStandardMaterial({
-            color: LAYER_COLOURS[layer.name] ?? 0x888888,
-            roughness: 0.9,
-            side: THREE.DoubleSide,
-          }),
-        ))
-      }
+  for (const [alignment, className] of arms) {
+    const design = solveFor(alignment)
+    if (!design) continue
+    designs.set(network.addRoad(alignment, className), design)
+  }
+
+  // Excavate the terrain down to every road's design line before anything is
+  // rendered, so each road sits in a real cutting/embankment rather than
+  // buried inside (or floating above) untouched ground. All three roads
+  // accumulate onto the same edit layer so the junction area — where more
+  // than one corridor's footprint overlaps — is carved consistently.
+  const editLayer = new TerrainEditLayer(terrain)
+  for (const road of network.roads) {
+    const design = designs.get(road.id)
+    if (!design || design.length === 0) continue
+    excavateCorridor(editLayer, road.alignment, design, road.className)
+  }
+  const terrainSource: { sample(x: number, y: number): number } = editLayer
+
+  const built = buildNetworkMesh(network, designs, { spacing: 4 })
+
+  for (const [, roadMesh] of built.roads) {
+    for (const layer of roadMesh.layers) {
+      if (layer.mesh.vertexCount === 0) continue
+      scene.add(new THREE.Mesh(
+        toBufferGeometry(layer.mesh),
+        new THREE.MeshStandardMaterial({
+          color: LAYER_COLOURS[layer.name] ?? 0x888888,
+          roughness: 0.9,
+          side: THREE.DoubleSide,
+        }),
+      ))
     }
+  }
+
+  for (const [, junctionMesh] of built.junctions) {
+    if (junctionMesh.vertexCount === 0) continue
+    scene.add(new THREE.Mesh(
+      toBufferGeometry(junctionMesh),
+      new THREE.MeshStandardMaterial({
+        color: LAYER_COLOURS.wearing ?? 0x2e3033,
+        roughness: 0.9,
+        side: THREE.DoubleSide,
+      }),
+    ))
+  }
+
+  if (built.infeasibleJunctions.size > 0) {
+    console.warn('infeasible junctions', [...built.infeasibleJunctions.entries()])
+  }
+  if (built.elevationMismatches.size > 0) {
+    console.warn('junction elevation mismatches', [...built.elevationMismatches.entries()])
   }
 
   scene.add(new THREE.Mesh(
