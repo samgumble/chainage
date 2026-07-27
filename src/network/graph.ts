@@ -61,7 +61,7 @@ export class RoadNetwork {
   road(id: RoadId): Road {
     const found = this.roadList[id]
     if (!found) throw new RangeError(`no road with id ${id}`)
-    return found
+    return { ...found }
   }
 
   node(id: NodeId): NetworkNode {

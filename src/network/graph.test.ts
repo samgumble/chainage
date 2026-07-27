@@ -171,6 +171,18 @@ describe('RoadNetwork internal state protection', () => {
     expect(net.nodeAt(vec2(100, 0))!.ends).toHaveLength(originalEndsLength)
   })
 
+  it('does not leak mutable state through road()', () => {
+    const net = new RoadNetwork()
+    const id = net.addRoad(straight(0, 0, 0, 100), 'rural')
+
+    const road = net.road(id)
+    const mutableRoad = road as { className: string }
+    mutableRoad.className = 'highway'
+
+    // The network's own view should be unchanged
+    expect(net.road(id).className).toBe('rural')
+  })
+
   it('does not leak mutable state through get roads()', () => {
     const net = new RoadNetwork()
     const id = net.addRoad(straight(0, 0, 0, 100), 'rural')

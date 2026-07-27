@@ -13,7 +13,7 @@ const EMPTY: MeshData = {
 }
 
 /** Two boundary points closer than this are the same point. */
-const BOUNDARY_TOLERANCE = 1e-6
+export const BOUNDARY_TOLERANCE = 1e-6
 
 /** Drop consecutive duplicates, including the wrap from last back to first. */
 const dedupeConsecutive = (points: readonly Vec2[]): Vec2[] => {
