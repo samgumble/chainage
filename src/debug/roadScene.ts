@@ -671,13 +671,13 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   renderer.toneMappingExposure = 1
   renderer.outputColorSpace = THREE.SRGBColorSpace
 
-  // Soft shadows (PCFSoftShadowMap) rather than the hard-edged default: a
-  // model lit by a single directional sun wants shadows soft enough to read
-  // as daylight, not a laser-cut silhouette.
+  // A model lit by a single directional sun wants a real shadow, not a flat
+  // unlit render.
   renderer.shadowMap.enabled = true
-  // PCFSoftShadowMap is deprecated in three 0.185 and silently falls back to
-  // PCFShadowMap with a console warning on every compile, so ask for what is
-  // actually going to be used rather than for a soft filter that is not.
+  // Not PCFSoftShadowMap: it is deprecated in three 0.185 and silently falls
+  // back to PCFShadowMap with a console warning on every compile, so this
+  // asks for what is actually going to be used (a filtered, though not
+  // softened, PCF shadow) rather than for a soft filter that is not.
   renderer.shadowMap.type = THREE.PCFShadowMap
 
   const scene = new THREE.Scene()
@@ -1619,7 +1619,13 @@ void main() {
   // ever ran. `OutputPass` exists for exactly this: it applies the renderer's
   // tone mapping and output colour space as the last thing before the screen,
   // so it must stay last in the chain.
-  composer.addPass(new OutputPass())
+  //
+  // Kept in a named variable (rather than passed anonymously, as every other
+  // pass here is) only so the teardown at the bottom of this function can
+  // call its own `dispose()` — see that teardown's comment for why that
+  // matters in three 0.185.
+  const outputPass = new OutputPass()
+  composer.addPass(outputPass)
 
   // `ShaderPass` deep-clones the uniforms object passed to its constructor
   // (`UniformsUtils.cloneUniforms`, called on the object literal above) into
@@ -1739,14 +1745,18 @@ void main() {
     marker.geometry.dispose()
     ;(marker.material as THREE.MeshBasicMaterial).dispose()
 
-    // The post-processing chain's own GPU resources: `EffectComposer` has no
-    // `dispose` of its own, so its two render targets (one supplied here, one
-    // its own clone — each carrying a depth texture) are freed directly, and
-    // the tilt-shift pass's shader material and full-screen quad go with
-    // `tiltShiftPass.dispose()`. Left undone, every mount of this scene would
-    // leak a pair of full-resolution colour+depth render targets.
-    composer.renderTarget1.dispose()
-    composer.renderTarget2.dispose()
+    // The post-processing chain's own GPU resources. `EffectComposer.dispose()`
+    // (present in three 0.185, whatever an older comment here used to claim)
+    // frees its own two render targets — one supplied here, one its own clone,
+    // each carrying a depth texture — and its internal `copyPass`'s material
+    // and full-screen quad, but it does not reach into the passes *this scene*
+    // added via `addPass`: `RenderPass` owns nothing further to free, but
+    // `OutputPass` and `tiltShiftPass` each carry their own shader material
+    // and full-screen quad, so each needs its own `dispose()` call too. Left
+    // undone, every mount of this scene would leak a pair of full-resolution
+    // colour+depth render targets plus two materials and full-screen quads.
+    composer.dispose()
+    outputPass.dispose()
     tiltShiftPass.dispose()
 
     // The sun's shadow map is a render target the renderer allocates lazily
