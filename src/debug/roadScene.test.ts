@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   buildSceneContent, solveNetwork, terrainBounds,
   CORRIDOR_MAX_BATTER_WIDTH, EXCAVATION_STATION_SPACING,
+  DEFAULT_DRAW_CLASS, RIG_INITIAL_DISTANCE,
 } from './roadScene'
 import { buildNetworkMesh } from '../mesh/networkMesh'
 import type { RoadMesh } from '../mesh/roadMesh'
@@ -14,8 +15,10 @@ import { solveGradeProfile } from '../terrain/gradeSolver'
 import { Heightmap } from '../terrain/heightmap'
 import type { TerrainEditLayer } from '../terrain/editLayer'
 import { SelectTool } from '../tool/selectTool'
+import { minimumRadiusForSpeed } from '../geometry/designSpeed'
 import {
-  ROAD_CLASSES, formationHalfWidth, totalPavementThickness, type RoadClassName,
+  ROAD_CLASSES, ROAD_CLASS_ORDER, formationHalfWidth, totalPavementThickness,
+  type RoadClassName,
 } from '../network/roadClass'
 import { MIN_OVERPASS_CLEARANCE } from '../network/crossings'
 import { DECK_DEPTH } from '../mesh/structures/bridgeMesh'
@@ -782,5 +785,89 @@ describe('an overpass deck', () => {
     // Precision 4: positions round-trip through a Float32Array, whose ~7
     // significant digits hold values near 100 to about 1e-5.
     expect(highest).toBeCloseTo(deckTop, 4)
+  })
+})
+
+/**
+ * The class the draw tool opens in.
+ *
+ * This is the defect the player actually reported — "roads that won't
+ * connect" — in its first and simplest form: a default class whose corners are
+ * bigger than the visible world, so the first road they draw is refused for
+ * curve overlap and nothing they can see explains why. The whole rest of this
+ * branch is downstream of getting past that.
+ *
+ * `drawRoadScene` needs a canvas and a GPU, so the default is a module
+ * constant rather than a literal buried in it, and what is asserted here is
+ * not the choice but the property that forces it.
+ */
+describe('the default draw class', () => {
+  /** A corner needs its own radius' worth of straight either side of it, so
+   * the shortest road that can turn at all is twice the corner radius. */
+  const shortestRoadWithACorner = (className: RoadClassName): number =>
+    2 * minimumRadiusForSpeed(ROAD_CLASSES[className].designSpeedKph)
+
+  it('fits inside the ground the camera frames', () => {
+    expect(shortestRoadWithACorner(DEFAULT_DRAW_CLASS)).toBeLessThan(RIG_INITIAL_DISTANCE)
+  })
+
+  it('is the only class that does', () => {
+    // Not "is the smallest": smallest-but-still-too-big would satisfy that and
+    // still refuse the player's first road. Every other class must actually
+    // fail to fit.
+    for (const className of ROAD_CLASS_ORDER) {
+      if (className === DEFAULT_DRAW_CLASS) continue
+      expect(shortestRoadWithACorner(className)).toBeGreaterThan(RIG_INITIAL_DISTANCE)
+    }
+  })
+
+  it('is gravel', () => {
+    // The two assertions above say what the default has to be; this says what
+    // it is, so that a change to either the framing or the class speeds shows
+    // up here as a decision to re-make rather than as a silent re-derivation.
+    expect(DEFAULT_DRAW_CLASS).toBe('gravel')
+  })
+})
+
+/**
+ * A known limitation, pinned so its description cannot quietly stop matching.
+ *
+ * `solveNetwork` lifts the NEWER road over the older one, and "newer" is the
+ * road id. `splitRoad` allocates both halves of a split road ids above every
+ * existing road, so splitting a road makes its halves the newest roads in the
+ * network — younger than anything ever built over them — and any crossing on
+ * either half reverses.
+ *
+ * This asserts the WRONG behaviour on purpose. Fixing it wants creation
+ * provenance on `Road`, separate from the id, which is a graph change; what is
+ * in scope is that `solveNetwork`'s docstring describes what actually happens,
+ * and that is what this holds it to. When the ordering is fixed, this test
+ * fails, and that failure is the reminder to rewrite the docstring with it.
+ */
+describe('splitting a road under an existing overpass', () => {
+  it('inverts the crossing, because both halves get ids above every other road', () => {
+    const terrain = new Heightmap(0, 0, 10, 61, 61, new Float32Array(61 * 61).fill(100))
+    const network = new RoadNetwork()
+    const a = network.addRoad(new Alignment([new Line(vec2(100, 300), 0, 400)]), 'rural')
+    const c = network.addRoad(
+      new Alignment([new Line(vec2(300, 100), Math.PI / 2, 400)]), 'rural',
+    )
+
+    const before = solveNetwork(terrain, network)
+    const lifted = 100 + MIN_OVERPASS_CLEARANCE + ruralStructureDepth
+    expect(designElevationAtStation(before.designs.get(a)!, 200)).toBeCloseTo(100, 6)
+    expect(designElevationAtStation(before.designs.get(c)!, 200)).toBeCloseTo(lifted, 6)
+
+    // Two hundred metres from the crossing — what `DrawTool.commit` does when
+    // a player ends a third road on A, and nothing to do with C at all.
+    const split = network.splitRoad(a, 100)
+    expect(split.second).toBeGreaterThan(c)
+
+    const after = solveNetwork(terrain, network)
+    // The half of A that carries the crossing is now the newer road, so it is
+    // the one that climbs, and the overpass the player already had drops to
+    // grade underneath it.
+    expect(designElevationAtStation(after.designs.get(split.second)!, 100)).toBeCloseTo(lifted, 6)
+    expect(designElevationAtStation(after.designs.get(c)!, 200)).toBeCloseTo(100, 6)
   })
 })

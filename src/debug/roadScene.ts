@@ -197,6 +197,39 @@ const EXCAVATION_MARGIN = 5
 const EXCAVATION_ZFIGHT_MARGIN = 0.05
 
 /**
+ * How far back the camera starts, metres.
+ *
+ * Close enough that the junction — three formation widths meeting at one
+ * point — fills a useful part of the screen, rather than the old ~1565m that
+ * read every road as a hairline across a map (Step 6).
+ *
+ * Module scope, and exported, because it is not only a camera number: it is
+ * the width of ground the player can actually see to draw a road in, and
+ * `DEFAULT_DRAW_CLASS` is chosen against it. A test that pinned the default
+ * class without being able to see this would be pinning a preference rather
+ * than the reason for it.
+ */
+export const RIG_INITIAL_DISTANCE = 300
+
+/**
+ * The road class the draw tool starts in.
+ *
+ * Gravel, because its ~43m minimum corner radius is the only one that fits
+ * inside the `RIG_INITIAL_DISTANCE` metres of ground the camera frames. A
+ * corner needs its radius' worth of straight on each side of it, so the
+ * shortest road with a bend in it is twice the corner radius: 87m for gravel,
+ * but 504m for rural, 671m for arterial and 1121m for highway. Defaulting to
+ * any of those three means the player's very first road — drawn, reasonably,
+ * inside the part of the world they can see — is REFUSED, with a message
+ * about curve overlap, before they have any idea that road class is a thing
+ * they can change.
+ *
+ * Faster classes are drawn zoomed out, which is honest: a 252m-radius rural
+ * road genuinely is a larger object than a farm track.
+ */
+export const DEFAULT_DRAW_CLASS: RoadClassName = 'gravel'
+
+/**
  * Where the demo network's three arms meet — a T junction on the valley
  * floor, main road running east-west with a narrower gravel branch heading
  * north. Module scope (not local to `buildSceneContent`) because
@@ -542,13 +575,34 @@ const clearanceFloorsAt = (
  * infeasible solve and lands in `infeasibleCrossings`, rather than as a
  * profile that reaches the clearance by way of a grade the class forbids.
  *
- * Known limitation: `splitRoad` gives both halves of a split road NEW ids, so
- * a half of an older road is "newer" than the road that split it. If that
- * same pair also crosses somewhere else, the half is the one lifted. Rare
- * (it needs two roads to both meet at a placed point and cross away from it)
- * and still deterministic, but it is the one case where the road that moves
- * is not the road most recently drawn. Fixing it wants creation provenance on
- * `Road`, which is a graph change rather than a scene one.
+ * Known limitation, and it is not rare. "Age" here is the road id, and
+ * `splitRoad` allocates BOTH halves of a split road ids above every road that
+ * already exists. Splitting a road therefore makes both of its halves the
+ * newest roads in the network — younger than anything that was ever built
+ * over it — and any crossing on either half reverses. Nothing about the split
+ * has to be anywhere near the crossing for this to happen.
+ *
+ * Three clicks reach it, and the third is an ordinary thing to do:
+ *
+ *   1. Draw road A, east-west.
+ *   2. Draw road C across it. C is newer, so C is lifted over A: measured on
+ *      flat ground at 100m, C sits at 106.70 at the crossing and A stays at
+ *      100.00.
+ *   3. Draw road D ending ON A, anywhere — `DrawTool.commit` splits A there to
+ *      make the junction. Two hundred metres from the crossing is enough.
+ *
+ * On the next solve the half of A carrying the crossing is the newer road, so
+ * it is the one lifted: measured, A's half comes back at 106.70 and C drops to
+ * 100.00. An already-built overpass visibly inverts because the player made a
+ * junction somewhere else on the road underneath it.
+ *
+ * Everything above this paragraph is still true — the solve is still a strict
+ * order with no cycle to iterate, and it is still deterministic. What is not
+ * true is that the road which moves is the road most recently drawn. Fixing
+ * that wants creation provenance on `Road`, separate from the id, which is a
+ * graph change rather than a scene one; until then this is documented rather
+ * than papered over, and pinned by a test in `roadScene.test.ts` so the
+ * description cannot quietly stop matching the behaviour.
  */
 export const solveNetwork = (
   terrain: Heightmap,
@@ -1483,12 +1537,8 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
 
   scene.add(sun)
 
-  // Gravel by default: its 43m minimum radius is the only class drawable
-  // within the ~300m the camera frames, so any other default rejects the
-  // player's first road outright. Faster classes are drawn zoomed out,
-  // which is honest — a 252m-radius rural road genuinely is a larger
-  // object than a farm track.
-  let drawClassIndex = ROAD_CLASS_ORDER.indexOf('gravel')
+  // See `DEFAULT_DRAW_CLASS` for why this class and not another.
+  let drawClassIndex = ROAD_CLASS_ORDER.indexOf(DEFAULT_DRAW_CLASS)
   let tool = new DrawTool(network, ROAD_CLASS_ORDER[drawClassIndex]!)
   const selectTool = new SelectTool(network)
 
@@ -1591,10 +1641,6 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     z: terrain.sample(JUNCTION.x, JUNCTION.y),
   }
 
-  // Close enough that the junction — three formation widths meeting at one
-  // point — fills a useful part of the screen, rather than the old ~1565m
-  // that read every road as a hairline across a map (Step 6).
-  const RIG_INITIAL_DISTANCE = 300
   const rig = new CameraRig(RIG_TARGET, RIG_INITIAL_DISTANCE)
   // Lower than `CameraRig`'s own default elevation (`Math.PI / 5`, 36°): a
   // diorama is looked across at a raised, comfortable angle, not down at from
