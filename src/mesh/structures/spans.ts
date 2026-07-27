@@ -1,4 +1,5 @@
 import type { Alignment } from '../../geometry/alignment'
+import type { RoadId } from '../../network/graph'
 import type { TerrainSampler } from '../../terrain/heightmap'
 import {
   type ProfilePoint,
@@ -219,4 +220,64 @@ export const roadStructureSpans = (inputs: RoadSpanInputs): StructureSpan[] => {
   }
 
   return structureSpans(designAtGround, support, ground)
+}
+
+/** A station range something other than height demands a structure over. */
+export type StructureRange = {
+  readonly fromStation: number
+  readonly toStation: number
+}
+
+/** Everything a whole network's spans are a function of. */
+export type NetworkSpanInputs = {
+  readonly designs: ReadonlyMap<RoadId, readonly ProfilePoint[]>
+  /** NATURAL ground, before any corridor excavation — see `RoadSpanInputs`. */
+  readonly terrain: TerrainSampler
+  readonly maxFillHeight: number
+  readonly spacing: number
+  /**
+   * Per road, the ranges that must be on a structure whatever their height —
+   * an overpass's deck, in practice. See `RoadSpanInputs`.
+   */
+  readonly requiredStructureRanges?: ReadonlyMap<RoadId, readonly StructureRange[]>
+}
+
+/**
+ * Every road's spans, in one place.
+ *
+ * The reason this exists rather than each consumer looping over
+ * `roadStructureSpans` itself: there are three consumers — the corridor
+ * excavation, which must stop earthwork at the abutment face; the mesh build,
+ * which puts the bridges there; and the scene, which owns the required ranges
+ * neither of the other two can derive — and every pair of them that derived
+ * the answer separately has, at some point on this branch, disagreed. The mesh
+ * build no longer derives it at all; it is handed this.
+ *
+ * Roads with fewer than two design stations are absent from the result rather
+ * than present with an empty list: they did not grade, so their spans are not
+ * "none", they are unknown.
+ */
+export const networkStructureSpans = (
+  roads: readonly { readonly id: RoadId; readonly alignment: Alignment }[],
+  inputs: NetworkSpanInputs,
+): Map<RoadId, readonly StructureSpan[]> => {
+  const { designs, terrain, maxFillHeight, spacing, requiredStructureRanges } = inputs
+
+  const spans = new Map<RoadId, readonly StructureSpan[]>()
+  for (const road of roads) {
+    const design = designs.get(road.id)
+    if (!design || design.length < 2) continue
+    spans.set(
+      road.id,
+      roadStructureSpans({
+        alignment: road.alignment,
+        design,
+        terrain,
+        maxFillHeight,
+        spacing,
+        requiredStructureRanges: requiredStructureRanges?.get(road.id),
+      }),
+    )
+  }
+  return spans
 }

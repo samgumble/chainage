@@ -22,7 +22,7 @@ import {
 } from '../network/roadClass'
 import { MIN_OVERPASS_CLEARANCE } from '../network/crossings'
 import { DECK_DEPTH } from '../mesh/structures/bridgeMesh'
-import type { StructureSpan } from '../mesh/structures/spans'
+import { networkStructureSpans, type StructureSpan } from '../mesh/structures/spans'
 
 /**
  * The demo scene is the only end-to-end evidence the structures pipeline
@@ -45,6 +45,28 @@ const content = buildSceneContent()
  * gets built would fail here.
  */
 const ruralStructureDepth = totalPavementThickness(ROAD_CLASSES.rural) + DECK_DEPTH
+
+/**
+ * The demo scene rebuilt with no corridor template, so no wall can be built
+ * and every structure vertex left is a bridge.
+ *
+ * `structureSpans` is required alongside `terrain` (see `NetworkMeshOptions`),
+ * and derived here from the same function `solveNetwork` uses. The demo scene
+ * has no crossings, so it forces no decks, and this list is identical to the
+ * one the scene excavated to — which is the point: these comparisons are
+ * against the scene's own structures, not against a second derivation of them.
+ */
+const demoBridgesOnly = () => ({
+  spacing: 4,
+  terrain: content.terrain,
+  maxFillHeight: 10,
+  structureSpans: networkStructureSpans(content.network.roads, {
+    designs: content.designs,
+    terrain: content.terrain,
+    maxFillHeight: 10,
+    spacing: 4,
+  }),
+})
 
 /** Total structure vertices across every road. */
 const structureVertices = (built: { structures: ReadonlyMap<number, { vertexCount: number }> }) => {
@@ -101,22 +123,14 @@ describe('the demo scene', () => {
     // Rebuilt with no corridor template, so walls are off and every vertex
     // left is a bridge. A count taken from the full scene could not tell the
     // two structure types apart.
-    const bridgesOnly = buildNetworkMesh(content.network, content.designs, {
-      spacing: 4,
-      terrain: content.terrain,
-      maxFillHeight: 10,
-    })
+    const bridgesOnly = buildNetworkMesh(content.network, content.designs, demoBridgesOnly())
     expect(structureVertices(bridgesOnly)).toBeGreaterThan(0)
   })
 
   it('produces retaining walls as well as bridges', () => {
     // Same scene minus the batter limit: no wall can be built without one, so
     // whatever the full scene has beyond this is wall.
-    const bridgesOnly = buildNetworkMesh(content.network, content.designs, {
-      spacing: 4,
-      terrain: content.terrain,
-      maxFillHeight: 10,
-    })
+    const bridgesOnly = buildNetworkMesh(content.network, content.designs, demoBridgesOnly())
     expect(structureVertices(content.built)).toBeGreaterThan(structureVertices(bridgesOnly))
   })
 
@@ -132,11 +146,7 @@ describe('the demo scene', () => {
     // the excavation ran through the span, the deck would be buried in its
     // own embankment: somewhere under a bridge the edit layer must still
     // read as natural ground.
-    const bridgesOnly = buildNetworkMesh(content.network, content.designs, {
-      spacing: 4,
-      terrain: content.terrain,
-      maxFillHeight: 10,
-    })
+    const bridgesOnly = buildNetworkMesh(content.network, content.designs, demoBridgesOnly())
 
     let sampled = 0
     let untouched = 0

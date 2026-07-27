@@ -88,7 +88,7 @@ const OVERPASS_DECK_MARGIN = 10
 const MIN_DECKABLE_CROSSING_ANGLE = (20 * Math.PI) / 180
 import { classifyCrossing, type InfeasibleCrossing, type ShallowCrossing } from '../network/crossingKind'
 import { buildNetworkMesh, type NetworkMesh } from '../mesh/networkMesh'
-import { roadStructureSpans, type StructureSpan } from '../mesh/structures/spans'
+import { networkStructureSpans, type StructureSpan } from '../mesh/structures/spans'
 import { DECK_DEPTH } from '../mesh/structures/bridgeMesh'
 import { DrawTool, SNAP_RADIUS } from '../tool/drawTool'
 import { resolveSnap, type SnapTarget } from '../tool/snap'
@@ -843,7 +843,13 @@ export const solveNetwork = (
   // abutments included, ran 273-423, leaving a bare terrain cliff and an
   // unsupported notch in the seven stations at each end where the two
   // disagreed.
-  const spans = new Map<RoadId, readonly StructureSpan[]>()
+  const spans = networkStructureSpans(network.roads, {
+    designs,
+    terrain,
+    maxFillHeight: MAX_FILL_HEIGHT,
+    spacing: STRUCTURE_STATION_SPACING,
+    requiredStructureRanges: liftedRanges,
+  })
 
   // Excavate the terrain down to every road's design line before anything is
   // rendered, so each road sits in a real cutting/embankment rather than
@@ -865,19 +871,13 @@ export const solveNetwork = (
     // either against ground.
     if (!design || design.length === 0) continue
 
-    // Derived and swept in one pass, so the spans a road's earthworks stop
-    // at cannot become a different list from the one its bridges are built
-    // on: it is the same array, put in the map and passed to the sweep.
-    const roadSpans = roadStructureSpans({
-      alignment: road.alignment,
-      design,
-      terrain,
-      maxFillHeight: MAX_FILL_HEIGHT,
-      spacing: STRUCTURE_STATION_SPACING,
-      requiredStructureRanges: liftedRanges.get(road.id),
-    })
-    spans.set(road.id, roadSpans)
-    excavateCorridor(excavation, terrain, road.alignment, design, road.className, roadSpans)
+    // The very list `buildNetworkMesh` is handed below — read out of the same
+    // map, not derived a second time. That is the whole point of `spans`
+    // existing above rather than being computed at each of the two places it
+    // is needed.
+    excavateCorridor(
+      excavation, terrain, road.alignment, design, road.className, spans.get(road.id) ?? [],
+    )
   }
   excavation.applyTo(editLayer)
 

@@ -10,7 +10,7 @@ import { type ProfilePoint, designElevationAtStation } from '../terrain/groundPr
 import type { MeshData } from './ribbon'
 import type { TerrainSampler } from '../terrain/heightmap'
 import { type CorridorBatters } from '../terrain/corridor'
-import { roadStructureSpans, type StructureSpan } from './structures/spans'
+import type { StructureSpan } from './structures/spans'
 import { buildBridgeMesh } from './structures/bridgeMesh'
 import { wallSegments, buildRetainingWallMesh } from './structures/retainingWallMesh'
 import { findCrossings, MIN_OVERPASS_CLEARANCE, type Crossing } from '../network/crossings'
@@ -29,21 +29,6 @@ type NetworkMeshCommon = {
    * walls measured against a rural road's formation.
    */
   readonly corridorBatters?: CorridorBatters
-  /**
-   * Per-road structure spans, if the caller already has them.
-   *
-   * A caller that excavates terrain must derive these BEFORE it excavates —
-   * earthwork has to stop at the abutment face, and it cannot ask a mesh that
-   * has not been built yet where that is. Passing the very list it used here
-   * is what guarantees the bridge sits on the ground the earthworks left it,
-   * rather than on a second derivation that agrees only by luck (it did not:
-   * the two disagreed by seven stations at each end of the demo scene's span).
-   *
-   * A road absent from the map has its spans derived here from the same
-   * `roadStructureSpans`, so omitting this option costs nothing but the
-   * duplicated work.
-   */
-  readonly structureSpans?: ReadonlyMap<RoadId, readonly StructureSpan[]>
 }
 
 /**
@@ -61,10 +46,32 @@ type NetworkMeshCommon = {
  * `terrain` must be NATURAL ground, before any corridor excavation. Ground
  * already cut and filled to the design surface sits at the design line by
  * construction, so every station reads as level and neither trigger can fire.
+ *
+ * `structureSpans` travels with them for a third reason, and it is required
+ * rather than defaulted because there is no honest default. This used to fall
+ * back to deriving the spans here, from `roadStructureSpans` — the same
+ * function, so it looked like a free convenience. It was not: the fallback
+ * cannot see `requiredStructureRanges`, which is where an overpass's deck
+ * comes from, so for any road carrying a lift the two derivations differ BY
+ * CONSTRUCTION. Measured on this codebase's own crossing fixture, the same
+ * network and the same designs gave 296 structure vertices through
+ * `solveNetwork` and 208 through the fallback: a bridge deck, silently absent.
+ *
+ * "Remove the fallback only for roads carrying a lift" is not available, since
+ * the only thing that says a road carries one is the very list being fallen
+ * back for. So a caller that wants structures says what they stand on.
  */
 type StructureGround =
-  | { readonly terrain: TerrainSampler; readonly maxFillHeight: number }
-  | { readonly terrain?: never; readonly maxFillHeight?: never }
+  | {
+      readonly terrain: TerrainSampler
+      readonly maxFillHeight: number
+      readonly structureSpans: ReadonlyMap<RoadId, readonly StructureSpan[]>
+    }
+  | {
+      readonly terrain?: never
+      readonly maxFillHeight?: never
+      readonly structureSpans?: never
+    }
 
 export type NetworkMeshOptions = NetworkMeshCommon & StructureGround
 
@@ -123,10 +130,19 @@ export const buildNetworkMesh = (
 
   const terrain: TerrainSampler | undefined = options.terrain
   const maxFillHeight: number | undefined = options.maxFillHeight
+  const structureSpans: ReadonlyMap<RoadId, readonly StructureSpan[]> | undefined =
+    options.structureSpans
   if (terrain !== undefined && maxFillHeight === undefined) {
     throw new RangeError(
       'maxFillHeight is required with terrain: structures are classified ' +
         'against the fill allowance the design line was graded to',
+    )
+  }
+  if (terrain !== undefined && structureSpans === undefined) {
+    throw new RangeError(
+      'structureSpans is required with terrain: a span derived here cannot ' +
+        'know about a deck the caller forced, so it would differ from the one ' +
+        'the earthworks were stopped at',
     )
   }
 
@@ -243,7 +259,7 @@ export const buildNetworkMesh = (
   // corridor cross-section to know where a batter runs out of room. Gating
   // both on the template would silently cost a terrain-only caller its
   // bridges, so the two triggers are gated independently.
-  if (terrain !== undefined && maxFillHeight !== undefined) {
+  if (terrain !== undefined && maxFillHeight !== undefined && structureSpans !== undefined) {
     const batters = options.corridorBatters
 
     for (const road of network.roads) {
@@ -254,14 +270,13 @@ export const buildNetworkMesh = (
         const rc = ROAD_CLASSES[road.className]
         const halfWidth = formationHalfWidth(rc)
 
-        // The caller's spans if it has any — the corridor excavation needs
-        // the same list, and handing it down is what stops the two from
-        // drifting apart. Derived here otherwise, by the same function the
-        // caller would have used, so there is one derivation either way and
-        // a caller with no interest in earthworks still gets its bridges.
-        const spans =
-          options.structureSpans?.get(road.id) ??
-          roadStructureSpans({ alignment: road.alignment, design, terrain, maxFillHeight, spacing })
+        // The caller's spans, always. Handing the very list the corridor
+        // excavation stopped at down to the thing that builds the bridge is
+        // what stops the two from drifting apart. A road absent from the map
+        // has no spans: for a road that never graded that is the truthful
+        // answer, and for one that did it is the caller saying "none". What
+        // is no longer expressible is a caller who never said.
+        const spans = structureSpans.get(road.id) ?? []
 
         for (const span of spans) {
           parts.push(buildBridgeMesh(road.alignment, terrain, design, span, halfWidth, rc))

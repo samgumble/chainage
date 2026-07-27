@@ -281,9 +281,33 @@ describe('buildNetworkMesh', () => {
 
 import { Heightmap } from '../terrain/heightmap'
 import type { CorridorBatters } from '../terrain/corridor'
+import { networkStructureSpans } from './structures/spans'
 
 const flatGround = (z: number) => Heightmap.flat(-1000, -1000, 100, 41, 41, z)
 const template: CorridorBatters = { cutSlope: 2, fillSlope: 3, maxBatterWidth: 1 }
+
+/**
+ * The ground-and-spans half of a structures build.
+ *
+ * `structureSpans` is required alongside `terrain` (see `NetworkMeshOptions`),
+ * and deriving it here rather than letting `buildNetworkMesh` do it is the
+ * point of the requirement: a caller who excavates has to derive spans first
+ * and hand over the very list it stopped its earthworks at. These tests do not
+ * excavate, so they derive the same list from the same function the scene
+ * uses, which is exactly the arrangement the option asks for.
+ */
+const onGround = (
+  net: RoadNetwork,
+  designs: ReadonlyMap<RoadId, readonly ProfilePoint[]>,
+  terrain: Heightmap,
+  maxFillHeight: number,
+  spacing = 10,
+) => ({
+  spacing,
+  terrain,
+  maxFillHeight,
+  structureSpans: networkStructureSpans(net.roads, { designs, terrain, maxFillHeight, spacing }),
+})
 
 describe('buildNetworkMesh structures', () => {
   it('builds no structures without a terrain', () => {
@@ -295,7 +319,7 @@ describe('buildNetworkMesh structures', () => {
   it('builds a structure entry per road when a terrain is given', () => {
     const { net, designs } = tJunction()
     const m = buildNetworkMesh(net, designs, {
-      spacing: 10, terrain: flatGround(50), maxFillHeight: 10, corridorBatters: template,
+      ...onGround(net, designs, flatGround(50), 10), corridorBatters: template,
     })
     expect(m.structures.size).toBe(3)
   })
@@ -304,7 +328,7 @@ describe('buildNetworkMesh structures', () => {
     const { net, designs, west } = tJunction()
     // Ground 40m below the roads, so every station needs a structure.
     const m = buildNetworkMesh(net, designs, {
-      spacing: 10, terrain: flatGround(10), maxFillHeight: 10, corridorBatters: template,
+      ...onGround(net, designs, flatGround(10), 10), corridorBatters: template,
     })
     expect(m.structures.get(west)!.vertexCount).toBeGreaterThan(0)
   })
@@ -312,9 +336,7 @@ describe('buildNetworkMesh structures', () => {
   it('builds nothing where the road sits on the ground', () => {
     const { net, designs, west } = tJunction()
     const m = buildNetworkMesh(net, designs, {
-      spacing: 10,
-      terrain: flatGround(50),
-      maxFillHeight: 10,
+      ...onGround(net, designs, flatGround(50), 10),
       corridorBatters: { cutSlope: 2, fillSlope: 3 },
     })
     expect(m.structures.get(west)!.vertexCount).toBe(0)
@@ -325,7 +347,7 @@ describe('buildNetworkMesh structures', () => {
   // air beside the deck, retaining nothing.
   it('builds no retaining wall where a bridge carries the road', () => {
     const { net, designs, west } = tJunction()
-    const options = { spacing: 10, terrain: flatGround(10), maxFillHeight: 10 } as const
+    const options = onGround(net, designs, flatGround(10), 10)
     // 40m of fill puts the whole road on a structure. Without the span, this
     // template would wall every station of it.
     const withWalls = buildNetworkMesh(net, designs, { ...options, corridorBatters: template })
@@ -350,9 +372,7 @@ describe('buildNetworkMesh structures', () => {
     // 10m of fill at 3H:1V wants a 30m batter; 4m of room means a wall.
     // maxFillHeight of 20 keeps the fill well short of a bridge.
     const m = buildNetworkMesh(net, designs, {
-      spacing: 10,
-      terrain: flatGround(40),
-      maxFillHeight: 20,
+      ...onGround(net, designs, flatGround(40), 20),
       corridorBatters: { cutSlope: 2, fillSlope: 3, maxBatterWidth: 4 },
     })
 
@@ -377,12 +397,8 @@ describe('buildNetworkMesh structures', () => {
   it('classifies a bridge against the caller-supplied fill allowance', () => {
     const { net, designs, west } = tJunction()
     // Roads at z=50 over ground at z=45: a 5m embankment.
-    const generous = buildNetworkMesh(net, designs, {
-      spacing: 10, terrain: flatGround(45), maxFillHeight: 10,
-    })
-    const mean = buildNetworkMesh(net, designs, {
-      spacing: 10, terrain: flatGround(45), maxFillHeight: 3,
-    })
+    const generous = buildNetworkMesh(net, designs, onGround(net, designs, flatGround(45), 10))
+    const mean = buildNetworkMesh(net, designs, onGround(net, designs, flatGround(45), 3))
     expect(generous.structures.get(west)!.vertexCount).toBe(0)
     expect(mean.structures.get(west)!.vertexCount).toBeGreaterThan(0)
   })
@@ -392,9 +408,7 @@ describe('buildNetworkMesh structures', () => {
   // caller its bridges.
   it('still builds bridges for a caller who supplies no corridor template', () => {
     const { net, designs, west } = tJunction()
-    const m = buildNetworkMesh(net, designs, {
-      spacing: 10, terrain: flatGround(10), maxFillHeight: 10,
-    })
+    const m = buildNetworkMesh(net, designs, onGround(net, designs, flatGround(10), 10))
     expect(m.structures.get(west)!.vertexCount).toBeGreaterThan(0)
   })
 
@@ -403,6 +417,18 @@ describe('buildNetworkMesh structures', () => {
     expect(() =>
       // @ts-expect-error terrain without maxFillHeight is exactly the mistake
       buildNetworkMesh(net, designs, { spacing: 10, terrain: flatGround(45) }),
+    ).toThrow(RangeError)
+  })
+
+  // The other half of the same requirement, and the one that had teeth: this
+  // used to fall back to deriving the spans here, which cannot see a deck the
+  // caller forced onto a lifted road. Same network, same designs, 296
+  // structure vertices one way and 208 the other.
+  it('refuses a terrain without the spans its earthworks were stopped at', () => {
+    const { net, designs } = tJunction()
+    expect(() =>
+      // @ts-expect-error terrain without structureSpans is the same mistake
+      buildNetworkMesh(net, designs, { spacing: 10, terrain: flatGround(45), maxFillHeight: 10 }),
     ).toThrow(RangeError)
   })
 
