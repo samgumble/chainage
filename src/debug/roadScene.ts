@@ -5,7 +5,7 @@ import { vec2, fromAngle, type Vec2 } from '../geometry/vec2'
 import type { PolylineRejection } from '../geometry/polyline'
 import { generateValley } from '../terrain/generate'
 import { sampleGroundProfile, designElevationAtStation, type ProfilePoint } from '../terrain/groundProfile'
-import { solveGradeProfile } from '../terrain/gradeSolver'
+import { solveGradeProfile, type GradeSolution } from '../terrain/gradeSolver'
 import { TerrainEditLayer } from '../terrain/editLayer'
 import { designSurfaceAtOffset, type CorridorTemplate, type CorridorBatters } from '../terrain/corridor'
 import { rayTerrainIntersection, type Ray3 } from '../terrain/rayCast'
@@ -220,19 +220,36 @@ export type SceneContent = {
   /** Natural ground plus every corridor's cut and fill. What gets drawn. */
   readonly editLayer: TerrainEditLayer
   readonly built: NetworkMesh
+  /**
+   * Roads in the network with no feasible vertical alignment, keyed to the
+   * station along the alignment where the grade solve ran out of room.
+   *
+   * Such a road still exists in the graph — `commit` only validates
+   * horizontal geometry, so it is already snappable, splittable and part of
+   * every future junction solve — but has no entry in `designs`. Without a
+   * design profile, `designElevationAtStation` (see `groundProfile.ts`)
+   * treats it as flat at z=0, so `built.roads` still gets a mesh for it, just
+   * a degenerate one sitting at absolute elevation zero — buried tens of
+   * metres underground on terrain like this scene's, not because the road
+   * has genuinely no geometry, but because nothing upstream noticed the
+   * grade solve failed. Recorded here rather than left to that coincidence:
+   * see `drawRoadScene`'s use of this for the console warning that
+   * accompanies it.
+   */
+  readonly infeasibleRoads: ReadonlyMap<RoadId, number>
 }
 
-/** Grade a single alignment against natural ground, or `null` if no profile
- * within the constraints exists. */
-const solveFor = (alignment: Alignment, terrain: Heightmap): ProfilePoint[] | null => {
+/** Grade a single alignment against natural ground: the full solver result,
+ * feasible or not, so a caller that needs to know why can see the station
+ * where the solve ran out of room. */
+const solveFor = (alignment: Alignment, terrain: Heightmap): GradeSolution => {
   const ground = sampleGroundProfile(alignment, terrain, 10)
-  const solution = solveGradeProfile(ground, {
+  return solveGradeProfile(ground, {
     maxGrade: MAX_GRADE,
     maxCutDepth: MAX_CUT_DEPTH,
     maxFillHeight: MAX_FILL_HEIGHT,
     maxStructureHeight: MAX_STRUCTURE_HEIGHT,
   })
-  return solution.feasible ? solution.profile : null
 }
 
 /**
@@ -248,14 +265,24 @@ const solveFor = (alignment: Alignment, terrain: Heightmap): ProfilePoint[] | nu
  * Correct, and slow once the network is large — measure before making it
  * incremental.
  */
-const solveNetwork = (
+export const solveNetwork = (
   terrain: Heightmap,
   network: RoadNetwork,
-): { designs: Map<RoadId, ProfilePoint[]>; editLayer: TerrainEditLayer; built: NetworkMesh } => {
+): {
+  designs: Map<RoadId, ProfilePoint[]>
+  editLayer: TerrainEditLayer
+  built: NetworkMesh
+  infeasibleRoads: Map<RoadId, number>
+} => {
   const designs = new Map<RoadId, ProfilePoint[]>()
+  const infeasibleRoads = new Map<RoadId, number>()
   for (const road of network.roads) {
-    const design = solveFor(road.alignment, terrain)
-    if (design) designs.set(road.id, design)
+    const solution = solveFor(road.alignment, terrain)
+    if (solution.feasible) {
+      designs.set(road.id, solution.profile)
+    } else {
+      infeasibleRoads.set(road.id, solution.failedAtStation)
+    }
   }
 
   // Excavate the terrain down to every road's design line before anything is
@@ -282,7 +309,7 @@ const solveNetwork = (
     corridorBatters: CORRIDOR_BATTERS,
   })
 
-  return { designs, editLayer, built }
+  return { designs, editLayer, built, infeasibleRoads }
 }
 
 /**
@@ -333,12 +360,12 @@ export const buildSceneContent = (): SceneContent => {
   // would otherwise sit in the network with no design profile and an empty
   // mesh, which is not what this fixed demo layout wants.
   for (const [alignment, className] of arms) {
-    if (!solveFor(alignment, terrain)) continue
+    if (!solveFor(alignment, terrain).feasible) continue
     network.addRoad(alignment, className)
   }
 
-  const { designs, editLayer, built } = solveNetwork(terrain, network)
-  return { terrain, network, designs, editLayer, built }
+  const { designs, editLayer, built, infeasibleRoads } = solveNetwork(terrain, network)
+  return { terrain, network, designs, editLayer, built, infeasibleRoads }
 }
 
 /**
@@ -347,15 +374,31 @@ export const buildSceneContent = (): SceneContent => {
  * caller can remove and dispose them later (see `disposeMesh`).
  *
  * Also logs the same warnings the scene has always logged: infeasible
- * junctions, elevation mismatches and tight crossings.
+ * junctions, elevation mismatches and tight crossings — plus, now, roads
+ * with no feasible vertical alignment at all (see `SceneContent.infeasibleRoads`).
  */
 const addNetworkMeshes = (
   scene: THREE.Scene,
   terrain: Heightmap,
   editLayer: TerrainEditLayer,
   built: NetworkMesh,
+  infeasibleRoads: ReadonlyMap<RoadId, number>,
 ): THREE.Mesh[] => {
   const meshes: THREE.Mesh[] = []
+
+  if (infeasibleRoads.size > 0) {
+    // A road that fails to grade still commits — `DrawTool.commit` validates
+    // only horizontal geometry — so without this it sits in the network,
+    // snappable and splittable, its mesh flattened to elevation zero (see
+    // `SceneContent.infeasibleRoads`) and buried out of sight with nothing
+    // said about it anywhere. Reported here rather than refused at commit
+    // time: see the fix-wave report for why (the commit path would
+    // otherwise need terrain).
+    console.warn(
+      'roads with no feasible vertical alignment (committed to the graph, mesh flattened to z=0):',
+      [...infeasibleRoads.entries()],
+    )
+  }
 
   for (const [, roadMesh] of built.roads) {
     for (const layer of roadMesh.layers) {
@@ -466,13 +509,14 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   const { terrain, network } = content
   let editLayer = content.editLayer
   let built = content.built
+  let infeasibleRoads = content.infeasibleRoads
   let terrainSampler: TerrainSampler = editLayer
 
   // The tool draws in whatever class the player picked; there is no class
   // picker yet, so it draws rural roads until the selection UI exists.
   const tool = new DrawTool(network, 'rural')
 
-  let networkMeshes = addNetworkMeshes(scene, terrain, editLayer, built)
+  let networkMeshes = addNetworkMeshes(scene, terrain, editLayer, built, infeasibleRoads)
 
   /**
    * Regrade, re-excavate and rebuild every mesh from the network's current
@@ -486,13 +530,14 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     const result = solveNetwork(terrain, network)
     editLayer = result.editLayer
     built = result.built
+    infeasibleRoads = result.infeasibleRoads
     terrainSampler = editLayer
 
     for (const mesh of networkMeshes) {
       scene.remove(mesh)
       disposeMesh(mesh)
     }
-    networkMeshes = addNetworkMeshes(scene, terrain, editLayer, built)
+    networkMeshes = addNetworkMeshes(scene, terrain, editLayer, built, infeasibleRoads)
   }
 
   const attemptCommit = (): void => {

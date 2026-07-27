@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildSceneContent } from './roadScene'
+import { buildSceneContent, solveNetwork } from './roadScene'
 import { buildNetworkMesh } from '../mesh/networkMesh'
 import { RoadNetwork } from '../network/graph'
 import { Alignment } from '../geometry/alignment'
@@ -7,6 +7,7 @@ import { Line } from '../geometry/primitives'
 import { vec2 } from '../geometry/vec2'
 import { sampleGroundProfile } from '../terrain/groundProfile'
 import { solveGradeProfile } from '../terrain/gradeSolver'
+import { Heightmap } from '../terrain/heightmap'
 
 /**
  * The demo scene is the only end-to-end evidence the structures pipeline
@@ -126,5 +127,51 @@ describe('rebuilding after the network changes', () => {
     expect(roadMesh).toBeDefined()
     const totalVertices = roadMesh!.layers.reduce((sum, l) => sum + l.mesh.vertexCount, 0)
     expect(totalVertices).toBeGreaterThan(0)
+  })
+})
+
+/**
+ * `DrawTool.commit` validates only horizontal geometry (segment lengths,
+ * curvature, self-intersection) — it never checks whether the terrain
+ * permits a vertical alignment at all. A road can therefore commit into the
+ * network and then fail to grade, at which point `designElevationAtStation`
+ * treats its (empty) design profile as flat at z=0 — so it still gets a
+ * mesh, just one sitting at absolute elevation zero, typically buried far
+ * underground on real terrain. Silently dropping that road from `designs`
+ * with no further report would be a graph/render divergence: the road is
+ * still snappable and splittable, part of every future junction solve, but
+ * invisible with no indication why.
+ *
+ * `solveNetwork` is exported so this is checkable directly against a network
+ * built for the purpose, rather than only via a console.warn a test cannot
+ * observe.
+ */
+describe('a road with no feasible vertical alignment', () => {
+  it('is recorded in infeasibleRoads instead of silently dropped', () => {
+    // A heightmap that climbs 20m every 10m along x — far steeper than any
+    // grade/cut/fill allowance this scene solves against, so a road running
+    // along it cannot be graded no matter what the solver does.
+    const cols = 10
+    const rows = 2
+    const elevations = new Float32Array(cols * rows)
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        elevations[row * cols + col] = col * 20
+      }
+    }
+    const cliff = new Heightmap(0, 0, 10, cols, rows, elevations)
+
+    const network = new RoadNetwork()
+    const alignment = new Alignment([new Line(vec2(5, 5), 0, 50)])
+    const roadId = network.addRoad(alignment, 'rural')
+
+    const { designs, infeasibleRoads } = solveNetwork(cliff, network)
+
+    // The core of the fix: this road has no entry in `designs` (nothing to
+    // grade it against), but that must not mean it vanishes without a trace —
+    // it has to show up somewhere a caller can act on.
+    expect(designs.has(roadId)).toBe(false)
+    expect(infeasibleRoads.has(roadId)).toBe(true)
+    expect(infeasibleRoads.get(roadId)).toBeGreaterThanOrEqual(0)
   })
 })
