@@ -13,7 +13,7 @@ import { solveGradeProfile, type GradeSolution } from '../terrain/gradeSolver'
 import { TerrainEditLayer } from '../terrain/editLayer'
 import { designSurfaceAtOffset, type CorridorTemplate, type CorridorBatters } from '../terrain/corridor'
 import { rayTerrainIntersection, type Ray3, type Vec3 as GroundVec3 } from '../terrain/rayCast'
-import type { Heightmap, TerrainSampler } from '../terrain/heightmap'
+import { clampNumber, type Heightmap, type TerrainSampler } from '../terrain/heightmap'
 import { ROAD_CLASSES, formationHalfWidth, totalPavementThickness, type RoadClassName } from '../network/roadClass'
 import { toBufferGeometry } from '../render/meshAdapter'
 import { terrainGeometry } from '../render/terrainMesh'
@@ -732,11 +732,48 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   // The shadow camera is orthographic and, left at its default, has a
   // frustum a couple of units across — on terrain at this scene's scale that
   // produces either no shadows or a small square of them near the origin, and
-  // looks exactly like a terrain bug rather than an unsized camera. Sized
-  // instead from the terrain's own bounding sphere (see `terrainBounds`), with
-  // a small margin so the frustum's edge is not razor-tight against it.
+  // looks exactly like a terrain bug rather than an unsized camera.
+  // `updateSunShadow`, below, sizes it from the camera rig every frame; the
+  // terrain's own bounding sphere (`bounds`, from `terrainBounds`) is used
+  // only as that sizing's ceiling, not its everyday source — see the two
+  // constants right after it.
   const bounds = terrainBounds(terrain)
   const shadowCamera = sun.shadow.camera
+
+  /** Shadow map resolution, one edge. Read here and by `updateSunShadow`
+   * (for `normalBias`'s texel-size calculation, below) so the two can never
+   * disagree about what the map is actually sized to. */
+  const SHADOW_MAP_SIZE = 4096
+
+  /**
+   * Shadow frustum half-size floor and ceiling, world units.
+   *
+   * The floor keeps close zooms from shrinking the frustum to nothing.
+   *
+   * The ceiling is `bounds.radius` — the terrain's own bounding sphere —
+   * because nothing beyond the terrain's footprint ever needs a shadow in
+   * this scene: every caster and receiver here sits on or above it. Without
+   * it, zooming out toward `MAX_DISTANCE` (6000m) grows the frustum without
+   * bound, spending a 4096 map on a box wide enough to reproduce the exact
+   * self-shadowing acne `71c2d1f` fixed — and worse, now that `normalBias`
+   * itself scales down with a *smaller* frustum (see below), a `normalBias`
+   * left at that smaller frustum's scale would be far too tight for a
+   * frustum this size. Clamping the ceiling to the terrain's own extent
+   * keeps the worst-case texel bounded to what the terrain can actually show:
+   * `2 * bounds.radius / SHADOW_MAP_SIZE`, worked out in the fix-wave report.
+   *
+   * This ceiling does not, by itself, fix every case of the frustum being
+   * too *small*: at a shallow rig elevation the camera's own view frustum
+   * reaches ground kilometres away (see the `updateSunShadow` docstring),
+   * far beyond any frustum this scene can afford full-resolution shadows
+   * over. Past that point a shadow terminator is unavoidable without
+   * sacrificing the near-field resolution this whole scheme exists for; the
+   * fix-wave report says where it falls and why it is not visually
+   * prominent at the rig's default framing (the tilt-shift pass' own full
+   * blur distance falls close to it).
+   */
+  const MIN_SHADOW_HALF_SIZE = 150
+  const MAX_SHADOW_HALF_SIZE = bounds.radius
 
   /**
    * Fit the shadow frustum to what the camera can actually see.
@@ -755,9 +792,10 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
    */
   const updateSunShadow = (): void => {
     // The camera sees roughly its own distance in ground height at this field
-    // of view, so a frustum of that order covers the frame with margin. The
-    // floor keeps close zooms from shrinking it to nothing.
-    const halfSize = Math.max(150, rig.distance)
+    // of view, so a frustum of that order covers the frame with margin.
+    // Clamped both ways: see `MIN_SHADOW_HALF_SIZE`/`MAX_SHADOW_HALF_SIZE`,
+    // above, for why each bound exists.
+    const halfSize = clampNumber(rig.distance, MIN_SHADOW_HALF_SIZE, MAX_SHADOW_HALF_SIZE)
     shadowCamera.left = -halfSize
     shadowCamera.right = halfSize
     shadowCamera.top = halfSize
@@ -779,6 +817,21 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
         z: target.z + sunlight.direction.z * lightDistance,
       }),
     )
+
+    // Shadow acne (self-shadowing noise on a lit face) and peter-panning (the
+    // shadow visibly detached from what casts it) pull in opposite directions
+    // from the same knob. `normalBias` offsets the sampled position along the
+    // surface normal in world units, so the value it wants is set by how much
+    // ground a shadow texel covers — a fixed value tuned for one frustum size
+    // is exactly what let acne back in on zoom-out (see `MAX_SHADOW_HALF_SIZE`
+    // above): a bias tuned for a ~300m frustum's ~0.15m texels is twelve times
+    // too small once the frustum (pre-ceiling) grew wide enough for ~2m ones.
+    // Deriving it from the texel size this frustum actually has, every frame,
+    // means it tracks whatever `halfSize` the clamp above produced instead of
+    // being right for only the size it was tuned against.
+    const texelSize = (2 * halfSize) / SHADOW_MAP_SIZE
+    sun.shadow.normalBias = texelSize * NORMAL_BIAS_TEXEL_FRACTION
+
     shadowCamera.updateProjectionMatrix()
   }
   // The light's target must be in the scene graph for its world matrix to
@@ -786,17 +839,22 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   // near the terrain regardless of where `sun.position` is set.
   scene.add(sun.target)
 
-  // Shadow acne (self-shadowing noise on a lit face) and peter-panning (the
-  // shadow visibly detached from what casts it) pull in opposite directions
-  // from the same knob. `normalBias` offsets the sampled position along the
-  // surface normal in world units, so the value it wants is set by how much
-  // ground a shadow texel covers — which is why these are far smaller than
-  // they would be for a terrain-wide frustum. `updateSunShadow` keeps the
-  // frustum a few hundred metres across, giving texels on the order of a
-  // tenth of a metre, and the bias follows that scale rather than a metre's.
+  // Constant depth bias, not texel-scaled like `normalBias`: the shadow
+  // camera is orthographic, so its depth range is linear in world units and
+  // `near`/`far` already grow with `halfSize` (see `updateSunShadow`) — a
+  // fixed fraction of a range that itself scales with the frustum already
+  // scales with it too, unlike `normalBias`, which offsets in world units
+  // directly rather than as a fraction of the depth range.
   sun.shadow.bias = -0.0002
-  sun.shadow.normalBias = 0.05
-  sun.shadow.mapSize.set(4096, 4096)
+  // The fraction of one shadow-map texel `normalBias` offsets by, set once
+  // here (`updateSunShadow` computes the bias itself, every frame). Derived,
+  // not tuned fresh: at the frustum size this scene used to fix `normalBias`
+  // at (halfSize ~= 300, giving a ~0.1465m texel on a 4096 map),
+  // `0.05 / 0.1465 ~= 0.34` is the fraction that reproduces that original,
+  // already-working value — so this keeps the old tuning at the old scale
+  // and extrapolates it, rather than guessing a new number from nothing.
+  const NORMAL_BIAS_TEXEL_FRACTION = 1 / 3
+  sun.shadow.mapSize.set(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE)
   // Deliberately not fitted here: `updateSunShadow` reads the camera rig,
   // which is constructed further down, and calling it now would touch `rig`
   // in its temporal dead zone and throw before the scene ever renders. The
