@@ -20,6 +20,7 @@ import {
   ROAD_CLASS_ORDER,
   formationHalfWidth,
   totalPavementThickness,
+  type LayerName,
   type RoadClassName,
 } from '../network/roadClass'
 import { toBufferGeometry } from '../render/meshAdapter'
@@ -489,6 +490,35 @@ const terrainVertexColours = (terrain: Heightmap, editLayer: TerrainEditLayer): 
  * junctions, elevation mismatches and tight crossings — plus, now, roads
  * with no feasible vertical alignment at all (see `SceneContent.infeasibleRoads`).
  */
+/**
+ * Depth-test rank for the pavement stack, top layer first.
+ *
+ * The three layers are separately-built meshes stacked over an identical
+ * footprint, and the gap between them is the layer thickness itself — five
+ * centimetres between wearing course and base on the thinner classes.
+ * Nothing else in the scene separates coplanar surfaces, and depth-buffer
+ * resolution is not a constant: with `near = 1` and `far = 6000` it is about
+ * five millimetres at the default framing, but roughly sixty at a kilometre
+ * out. So the stack holds together close in and the base begins punching
+ * through the seal as the player zooms away — a defect that only appears at
+ * the range where it is least likely to be tested.
+ *
+ * `polygonOffset` fixes it in depth rather than in geometry: each lower layer
+ * is pushed further from the camera by its rank, so a lower layer can never
+ * win the depth test against the one sealing it, at any distance. Raising the
+ * layers apart in world space would have worked too and been wrong — the
+ * thicknesses are real pavement dimensions that the cut-and-fill volumes and
+ * the excavation depth are both computed from.
+ *
+ * Keyed by `LayerName` rather than `string` so that adding a fourth layer is
+ * a type error here instead of a silently-zero rank at runtime.
+ */
+const PAVEMENT_DEPTH_RANK: Record<LayerName, number> = {
+  wearing: 0,
+  base: 1,
+  subgrade: 2,
+}
+
 const addNetworkMeshes = (
   scene: THREE.Scene,
   terrain: Heightmap,
@@ -527,6 +557,9 @@ const addNetworkMeshes = (
           roughness: surface.roughness,
           metalness: surface.metalness,
           side: THREE.DoubleSide,
+          polygonOffset: true,
+          polygonOffsetFactor: PAVEMENT_DEPTH_RANK[layer.name],
+          polygonOffsetUnits: PAVEMENT_DEPTH_RANK[layer.name],
         }),
       )
       mesh.castShadow = true
@@ -870,7 +903,24 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   // fixed fraction of a range that itself scales with the frustum already
   // scales with it too, unlike `normalBias`, which offsets in world units
   // directly rather than as a fraction of the depth range.
-  sun.shadow.bias = -0.0002
+  //
+  // The MAGNITUDE, though, was left over from before `normalBias` was
+  // derived from texel size, when this constant was carrying the whole job
+  // of suppressing acne on its own. `bias` is a fraction of the depth range,
+  // and `updateSunShadow` builds a range of `halfSize * 6 - 1` — about 1799m
+  // at the default framing. The old `-0.0002` therefore offset roughly
+  // **0.36m in world space**, which does not merely waste precision: a depth
+  // bias that large detaches every shadow from its caster and suppresses the
+  // shadow of anything shorter than it outright. Kerbs, retaining walls and
+  // the shallower embankments all cast nothing.
+  //
+  // With `normalBias` handling surface acne, all this needs to cover is
+  // depth-buffer quantisation — about 1e-4 m over that range on a 24-bit
+  // depth texture. Two centimetres is more than two orders of magnitude of
+  // headroom over that while being far below the height of the smallest
+  // thing in the scene that ought to cast a shadow, so `0.02 / 1799` rounds
+  // to the value below.
+  sun.shadow.bias = -1e-5
   // The fraction of one shadow-map texel `normalBias` offsets by, set once
   // here (`updateSunShadow` computes the bias itself, every frame). Derived,
   // not tuned fresh: at the frustum size this scene used to fix `normalBias`
