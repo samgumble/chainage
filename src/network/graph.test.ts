@@ -329,6 +329,42 @@ describe('removeRoad', () => {
     }
   })
 
+  it('removes the node from the spatial index, not only from the node map', () => {
+    // A direct check of the index/nodeMap invariant, reached past the public
+    // API the same way as the nodeAt robustness test above. A behavioural
+    // proxy — "does a new road end here get a new node id?" — no longer
+    // discriminates this on its own: nodeAt now tolerates a stale index
+    // entry by skipping it (see "skips a stale index entry" above), so even
+    // a RoadNetwork that forgot to call index.remove would still hand out a
+    // fresh node id here. The leak itself — the dangling entry never being
+    // cleared — is what this test pins directly.
+    const net = new RoadNetwork()
+    const a = net.addRoad(straight(0, 0, 0, 100), 'rural')
+    const removedNode = net.road(a).startNode
+
+    net.removeRoad(a)
+
+    const internals = net as unknown as {
+      index: { nearby(position: Vec2): number[] }
+    }
+    expect(internals.index.nearby(vec2(0, 0))).not.toContain(removedNode)
+  })
+
+  it('does not let a new road end snap to a node removed from the network', () => {
+    // The behavioural companion to the index check above: even though it no
+    // longer discriminates a dropped index.remove call by itself (see the
+    // comment there), it is still the actual player-facing guarantee this
+    // invariant protects, so it stays as a test in its own right.
+    const net = new RoadNetwork()
+    const a = net.addRoad(straight(0, 0, 0, 100), 'rural')
+    const removedNode = net.road(a).startNode
+
+    net.removeRoad(a)
+    const b = net.addRoad(straight(0, 0, 0, 100), 'rural')
+
+    expect(net.road(b).startNode).not.toBe(removedNode)
+  })
+
   it('keeps a node that another road still uses, and detaches only the removed end', () => {
     const net = new RoadNetwork()
     // Two roads meeting at the origin.
