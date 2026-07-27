@@ -726,6 +726,11 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   type DragState = {
     readonly mode: DragMode
     readonly pointerId: number
+    /** The button that started this drag (`PointerEvent.button`). A mouse
+     * reuses one `pointerId` for every button, so ending a drag has to check
+     * this too — otherwise releasing the right button while the left is
+     * still held is taken as ending the left-button drag. */
+    readonly button: number
     lastX: number
     lastY: number
     readonly startX: number
@@ -736,14 +741,26 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   let drag: DragState | undefined
   let pendingClickTimer: number | undefined
 
+  /**
+   * Suppress-snap modifier for §4.1's "a held modifier suppresses all
+   * snapping". Shift is already orbit's modifier (see `onPointerDown`), so
+   * this uses Alt/Option instead — the scene binds no other behaviour to it,
+   * and unlike Ctrl it carries no legacy "emulate a right click" meaning on
+   * any current platform.
+   */
+  const suppressSnapModifier = (event: MouseEvent): boolean => event.altKey
+
   const updateHover = (event: PointerEvent): void => {
     const worldPosition = worldPositionAt(event.clientX, event.clientY)
     if (!worldPosition) {
       hoverSnap = undefined
       return
     }
-    tool.hover(worldPosition)
-    hoverSnap = resolveSnap(network, worldPosition, SNAP_RADIUS)
+    const suppressSnap = suppressSnapModifier(event)
+    tool.hover(worldPosition, suppressSnap)
+    hoverSnap = suppressSnap
+      ? { kind: 'free', position: worldPosition }
+      : resolveSnap(network, worldPosition, SNAP_RADIUS)
   }
 
   const onPointerDown = (event: PointerEvent): void => {
@@ -759,6 +776,7 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     drag = {
       mode,
       pointerId: event.pointerId,
+      button: event.button,
       lastX: event.clientX,
       lastY: event.clientY,
       startX: event.clientX,
@@ -798,6 +816,11 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     updateHover(event)
   }
 
+  /**
+   * End the drag matching this pointer, regardless of which button the event
+   * reports — used by `pointercancel`, which is not tied to any one button
+   * and must always terminate whatever drag is in progress.
+   */
   const endDrag = (event: PointerEvent): DragState | undefined => {
     if (!drag || drag.pointerId !== event.pointerId) return undefined
     const finished = drag
@@ -808,23 +831,44 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     return finished
   }
 
+  /** Clear a pending single-click timer without running the deferred
+   * placement it guards — used wherever the pending gesture is resolved by
+   * some other action (a keyboard commit/cancel/undo) or superseded by a
+   * second click, so a click the player already moved on from cannot still
+   * land 300ms later as a phantom point. */
+  const cancelPendingClick = (): void => {
+    if (pendingClickTimer === undefined) return
+    window.clearTimeout(pendingClickTimer)
+    pendingClickTimer = undefined
+  }
+
   const onPointerUp = (event: PointerEvent): void => {
+    // A mouse reuses one pointerId across every button, so a right-button-up
+    // while the left button still holds this drag must not be mistaken for
+    // ending it — only the button that started the drag can end it. Leave
+    // the drag (and its pointer capture) exactly as it was.
+    if (drag && drag.pointerId === event.pointerId && drag.button !== event.button) return
+
     const finished = endDrag(event)
     if (!finished || finished.mode !== 'place' || finished.moved) return
 
     const worldPosition = worldPositionAt(event.clientX, event.clientY)
     if (!worldPosition) return
 
+    const suppressSnap = suppressSnapModifier(event)
+
     if (pendingClickTimer !== undefined) {
-      // Second click within the window: a double click, which commits rather
-      // than placing a third point.
-      window.clearTimeout(pendingClickTimer)
-      pendingClickTimer = undefined
+      // Second click within the window: a double click. It keeps the point
+      // this click itself was given — the road being committed should
+      // include where the player just clicked, not silently end one point
+      // short — then commits rather than placing a third point.
+      cancelPendingClick()
+      tool.place(worldPosition, suppressSnap)
       attemptCommit()
     } else {
       pendingClickTimer = window.setTimeout(() => {
         pendingClickTimer = undefined
-        tool.place(worldPosition)
+        tool.place(worldPosition, suppressSnap)
       }, DOUBLE_CLICK_MS)
     }
   }
@@ -846,14 +890,17 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     switch (event.key) {
       case 'Enter':
         event.preventDefault()
+        cancelPendingClick()
         attemptCommit()
         break
       case 'Escape':
         event.preventDefault()
+        cancelPendingClick()
         tool.cancel()
         break
       case 'Backspace':
         event.preventDefault()
+        cancelPendingClick()
         tool.undoLastPoint()
         break
       default:
@@ -927,7 +974,7 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     canvas.removeEventListener('wheel', onWheel)
     canvas.removeEventListener('contextmenu', onContextMenu)
     window.removeEventListener('keydown', onKeyDown)
-    if (pendingClickTimer !== undefined) window.clearTimeout(pendingClickTimer)
+    cancelPendingClick()
     renderer.dispose()
   }
 }
