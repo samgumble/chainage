@@ -91,7 +91,7 @@ describe('checkUpgrade', () => {
     const tight = minimumRadiusForSpeed(ROAD_CLASSES.highway.designSpeedKph) / 4
     const arc = new Arc({ x: 0, y: 0 }, 0, 200, 1 / tight)
     const id = net.addRoad(new Alignment([arc]), 'gravel')
-    net.addRoad(straight({ x: 0, y: 0 }, 0.03, 400), 'gravel')
+    net.addRoad(straight({ x: 0, y: 0 }, 0.15, 400), 'gravel')
     net.addRoad(straight({ x: 0, y: 0 }, Math.PI, 400), 'gravel')
 
     const result = checkUpgrade(net, id, 'highway')
