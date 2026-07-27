@@ -92,12 +92,7 @@ export const buildBridgeMesh = (
   }
 
   // --- Abutments and piers ---
-  const supports: number[] = [span.fromStation, span.toStation]
-  const pierCount = Math.floor(length / pierSpacing)
-  for (let i = 1; i <= pierCount; i++) {
-    const s = span.fromStation + (length * i) / (pierCount + 1)
-    supports.push(s)
-  }
+  const supports = supportStations(span.fromStation, span.toStation, pierSpacing)
 
   for (const s of supports) {
     const isAbutment = s === span.fromStation || s === span.toStation
@@ -120,6 +115,30 @@ export const buildBridgeMesh = (
   }
 
   return builder.build()
+}
+
+/**
+ * Stations for the abutments (span ends) and piers within a span.
+ *
+ * Piers are evenly spaced strictly inside the span. `pierCount` is chosen to
+ * land as close to the requested `pierSpacing` as an even split allows —
+ * rounding to the nearest whole number of gaps rather than flooring, so the
+ * achieved spacing does not come out systematically tighter than requested.
+ * For a 100m span at 25m spacing this gives 3 piers at exactly 25m gaps,
+ * rather than flooring to 4 piers at 20m gaps.
+ */
+export const supportStations = (
+  fromStation: number,
+  toStation: number,
+  pierSpacing: number,
+): number[] => {
+  const length = toStation - fromStation
+  const stations: number[] = [fromStation, toStation]
+  const pierCount = Math.max(0, Math.round(length / pierSpacing) - 1)
+  for (let i = 1; i <= pierCount; i++) {
+    stations.push(fromStation + (length * i) / (pierCount + 1))
+  }
+  return stations
 }
 
 /**
@@ -149,15 +168,23 @@ const addBox = (
     return { x: p.x, y: p.y, z }
   }
 
-  // Plan corners, counter-clockwise seen from above.
+  // Plan corners, clockwise seen from above (t[0..3] = NW, NE, SE, SW).
   const t = [corner(1, -1, topZ), corner(1, 1, topZ), corner(-1, 1, topZ), corner(-1, -1, topZ)]
   const b = [corner(1, -1, bottomZ), corner(1, 1, bottomZ), corner(-1, 1, bottomZ), corner(-1, -1, bottomZ)]
 
-  builder.addQuad(t[0]!, t[1]!, t[2]!, t[3]!)
-  builder.addQuad(b[3]!, b[2]!, b[1]!, b[0]!)
+  // Top face: walked in reverse (SW, SE, NE, NW) so it's counter-clockwise
+  // from above and its normal points up, out of the solid.
+  builder.addQuad(t[3]!, t[2]!, t[1]!, t[0]!)
+  // Bottom face: walked in plan order (NW, NE, SE, SW), clockwise from above,
+  // so its normal points down, out of the solid.
+  builder.addQuad(b[0]!, b[1]!, b[2]!, b[3]!)
 
+  // Side faces: top-then-bottom around each edge in plan order gives an
+  // outward-facing normal on every one of the four walls (verified per-wall,
+  // not by a general winding rule, since the top and bottom faces above
+  // deliberately use opposite traversal directions).
   for (let i = 0; i < 4; i++) {
     const j = (i + 1) % 4
-    builder.addQuad(b[i]!, b[j]!, t[j]!, t[i]!)
+    builder.addQuad(t[i]!, t[j]!, b[j]!, b[i]!)
   }
 }
