@@ -17,14 +17,34 @@ import { buildBridgeMesh } from './structures/bridgeMesh'
 import { wallSegments, buildRetainingWallMesh } from './structures/retainingWallMesh'
 import { findCrossings, MIN_OVERPASS_CLEARANCE } from '../network/crossings'
 
-export type NetworkMeshOptions = {
+type NetworkMeshCommon = {
   readonly spacing?: number
   /** Per-road construction stations. A road not listed is fully built. */
   readonly stations?: ReadonlyMap<RoadId, LayerStations>
-  /** Required for structures — walls and bridges both need ground elevation. */
-  readonly terrain?: TerrainSampler
   readonly corridorTemplate?: CorridorTemplate
 }
+
+/**
+ * Natural ground for structures, and the fill allowance it was graded to.
+ *
+ * The two travel together deliberately. Whether a station is carried on earth
+ * or on a structure is `design − ground > maxFillHeight`, and `maxFillHeight`
+ * is not the mesh layer's to choose: it is whatever the caller handed
+ * `solveGradeProfile`. Restating it here as a constant — which is what this
+ * used to do — means any caller who grades to a different allowance silently
+ * gets the wrong answer, fabricating bridges under ordinary embankments or
+ * suppressing real ones. Supplying a terrain without it is therefore a type
+ * error, not a defaulted-away detail.
+ *
+ * `terrain` must be NATURAL ground, before any corridor excavation. Ground
+ * already cut and filled to the design surface sits at the design line by
+ * construction, so every station reads as level and neither trigger can fire.
+ */
+type StructureGround =
+  | { readonly terrain: TerrainSampler; readonly maxFillHeight: number }
+  | { readonly terrain?: never; readonly maxFillHeight?: never }
+
+export type NetworkMeshOptions = NetworkMeshCommon & StructureGround
 
 export type NetworkMesh = {
   readonly roads: ReadonlyMap<RoadId, RoadMesh>
@@ -73,6 +93,15 @@ export const buildNetworkMesh = (
   options: NetworkMeshOptions = {},
 ): NetworkMesh => {
   const { spacing = 4, stations } = options
+
+  const terrain: TerrainSampler | undefined = options.terrain
+  const maxFillHeight: number | undefined = options.maxFillHeight
+  if (terrain !== undefined && maxFillHeight === undefined) {
+    throw new RangeError(
+      'maxFillHeight is required with terrain: structures are classified ' +
+        'against the fill allowance the design line was graded to',
+    )
+  }
 
   const junctions = new Map<NodeId, MeshData>()
   const infeasibleJunctions = new Map<NodeId, JunctionInfeasibility>()
@@ -183,8 +212,11 @@ export const buildNetworkMesh = (
 
   const structures = new Map<RoadId, MeshData>()
 
-  if (options.terrain && options.corridorTemplate) {
-    const terrain = options.terrain
+  // Bridges need ground and a fill allowance; walls additionally need a
+  // corridor cross-section to know where a batter runs out of room. Gating
+  // both on the template would silently cost a terrain-only caller its
+  // bridges, so the two triggers are gated independently.
+  if (terrain !== undefined && maxFillHeight !== undefined) {
     const template = options.corridorTemplate
 
     for (const road of network.roads) {
@@ -203,17 +235,20 @@ export const buildNetworkMesh = (
           z: designElevationAtStation(design, g.s),
         }))
 
-        const support = classifySupport(ground, designAtGround, MAX_FILL_FOR_STRUCTURE)
-        for (const span of structureSpans(designAtGround, support, ground)) {
+        const support = classifySupport(ground, designAtGround, maxFillHeight)
+        const spans = structureSpans(designAtGround, support, ground)
+        for (const span of spans) {
           parts.push(buildBridgeMesh(road.alignment, terrain, design, span, halfWidth))
         }
 
-        parts.push(
-          buildRetainingWallMesh(
-            road.alignment,
-            wallSegments(road.alignment, terrain, design, template, spacing),
-          ),
-        )
+        if (template !== undefined) {
+          parts.push(
+            buildRetainingWallMesh(
+              road.alignment,
+              wallSegments(road.alignment, terrain, design, template, spacing),
+            ),
+          )
+        }
       }
 
       structures.set(road.id, mergeMeshes(parts))
@@ -231,16 +266,6 @@ export const buildNetworkMesh = (
     roads, junctions, infeasibleJunctions, elevationMismatches, structures, tightCrossings,
   }
 }
-
-/**
- * How high the design line may stand above ground on fill before it becomes a
- * structure, metres.
- *
- * Above this an embankment stops being economic and starts looking absurd.
- * This mirrors the `maxFillHeight` a caller passes to the grade solver; it is
- * restated here because the network builder is not given those constraints.
- */
-export const MAX_FILL_FOR_STRUCTURE = 10
 
 /**
  * Concatenate several meshes into one, renumbering indices.

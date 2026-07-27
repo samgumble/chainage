@@ -297,7 +297,7 @@ describe('buildNetworkMesh structures', () => {
   it('builds a structure entry per road when a terrain is given', () => {
     const { net, designs } = tJunction()
     const m = buildNetworkMesh(net, designs, {
-      spacing: 10, terrain: flatGround(50), corridorTemplate: template,
+      spacing: 10, terrain: flatGround(50), maxFillHeight: 10, corridorTemplate: template,
     })
     expect(m.structures.size).toBe(3)
   })
@@ -306,7 +306,7 @@ describe('buildNetworkMesh structures', () => {
     const { net, designs, west } = tJunction()
     // Ground 40m below the roads, so every station needs a structure.
     const m = buildNetworkMesh(net, designs, {
-      spacing: 10, terrain: flatGround(10), corridorTemplate: template,
+      spacing: 10, terrain: flatGround(10), maxFillHeight: 10, corridorTemplate: template,
     })
     expect(m.structures.get(west)!.vertexCount).toBeGreaterThan(0)
   })
@@ -316,9 +316,46 @@ describe('buildNetworkMesh structures', () => {
     const m = buildNetworkMesh(net, designs, {
       spacing: 10,
       terrain: flatGround(50),
+      maxFillHeight: 10,
       corridorTemplate: { formationHalfWidth: 5, cutSlope: 2, fillSlope: 3 },
     })
     expect(m.structures.get(west)!.vertexCount).toBe(0)
+  })
+
+  // The fill allowance is the caller's, not the mesh layer's: it is whatever
+  // the caller solved the design line with. The same terrain and the same
+  // design must classify differently under different allowances, or a caller
+  // who grades to a different allowance silently gets the wrong answer.
+  it('classifies a bridge against the caller-supplied fill allowance', () => {
+    const { net, designs, west } = tJunction()
+    // Roads at z=50 over ground at z=45: a 5m embankment.
+    const generous = buildNetworkMesh(net, designs, {
+      spacing: 10, terrain: flatGround(45), maxFillHeight: 10,
+    })
+    const mean = buildNetworkMesh(net, designs, {
+      spacing: 10, terrain: flatGround(45), maxFillHeight: 3,
+    })
+    expect(generous.structures.get(west)!.vertexCount).toBe(0)
+    expect(mean.structures.get(west)!.vertexCount).toBeGreaterThan(0)
+  })
+
+  // A bridge needs ground and a fill allowance; only a wall needs to know
+  // where the batter runs out of room. Coupling them cost the terrain-only
+  // caller its bridges.
+  it('still builds bridges for a caller who supplies no corridor template', () => {
+    const { net, designs, west } = tJunction()
+    const m = buildNetworkMesh(net, designs, {
+      spacing: 10, terrain: flatGround(10), maxFillHeight: 10,
+    })
+    expect(m.structures.get(west)!.vertexCount).toBeGreaterThan(0)
+  })
+
+  it('refuses a terrain without the fill allowance it was graded to', () => {
+    const { net, designs } = tJunction()
+    expect(() =>
+      // @ts-expect-error terrain without maxFillHeight is exactly the mistake
+      buildNetworkMesh(net, designs, { spacing: 10, terrain: flatGround(45) }),
+    ).toThrow(RangeError)
   })
 
   it('reports a crossing that is too tight', () => {

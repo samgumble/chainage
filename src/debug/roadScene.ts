@@ -11,11 +11,28 @@ import { ROAD_CLASSES, formationHalfWidth, totalPavementThickness, type RoadClas
 import { toBufferGeometry } from '../render/meshAdapter'
 import { terrainGeometry } from '../render/terrainMesh'
 import { RoadNetwork, type RoadId } from '../network/graph'
-import { buildNetworkMesh } from '../mesh/networkMesh'
+import { buildNetworkMesh, type NetworkMesh } from '../mesh/networkMesh'
+import type { Heightmap } from '../terrain/heightmap'
 
 const MAX_GRADE = 0.07
 const MAX_CUT_DEPTH = 12
 const MAX_FILL_HEIGHT = 10
+
+/**
+ * How high the design line may stand above natural ground on a STRUCTURE.
+ *
+ * Without this the solver's band is capped at ground + `MAX_FILL_HEIGHT`, so
+ * no station can ever exceed the fill allowance and `classifySupport` can
+ * never return `'structure'` — the bridge trigger is unreachable no matter
+ * what the terrain does. 30m is deliberately well clear of the 10m fill
+ * allowance: the solver hugs natural ground and only climbs away from it
+ * where the grade limit forbids following the ground down, so the extra
+ * headroom is spent only where a bridge is genuinely wanted. Measured against
+ * this valley it produces one 146m span, 17.6m at its deepest, on the east
+ * arm; raising it further changes nothing, because the grade limit rather
+ * than the band is what holds the line up there.
+ */
+const MAX_STRUCTURE_HEIGHT = 30
 
 /** Cut and fill batters, horizontal-to-vertical — a property of how the
  * ground stands, not of the pavement built on it, so shared across every
@@ -142,9 +159,19 @@ const excavateCorridor = (
   for (let i = 0; i <= steps; i++) {
     const s = Math.min(i * EXCAVATION_STATION_SPACING, alignment.length)
     const pose = alignment.poseAt(s)
-    const designZ = designElevationAtStation(profile, s) - pavementDepth - EXCAVATION_ZFIGHT_MARGIN
+    const roadZ = designElevationAtStation(profile, s)
+    const designZ = roadZ - pavementDepth - EXCAVATION_ZFIGHT_MARGIN
 
     const centreGroundZ = terrain.sample(pose.position.x, pose.position.y)
+
+    // Where a structure carries the road there is no earthwork to build, so
+    // leave the ground alone — otherwise the embankment this loop would raise
+    // swallows the bridge whole. Same test `classifySupport` applies, but
+    // station by station: it does not know about `MIN_SPAN_LENGTH`, so an
+    // isolated high station would leave a short unfilled notch with no bridge
+    // over it. None occur in this valley, and this is a debug view.
+    if (roadZ - centreGroundZ > MAX_FILL_HEIGHT) continue
+
     const depth = Math.abs(centreGroundZ - designZ)
     const half = template.formationHalfWidth + maxSlope * depth + EXCAVATION_MARGIN
 
@@ -167,26 +194,26 @@ const excavateCorridor = (
   }
 }
 
-export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true })
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
-  renderer.setClearColor(0x14181d)
+/** Everything the scene draws, with no three.js anywhere in sight. */
+export type SceneContent = {
+  /** Natural ground, before any corridor excavation. */
+  readonly terrain: Heightmap
+  readonly network: RoadNetwork
+  readonly designs: ReadonlyMap<RoadId, ProfilePoint[]>
+  /** Natural ground plus every corridor's cut and fill. What gets drawn. */
+  readonly editLayer: TerrainEditLayer
+  readonly built: NetworkMesh
+}
 
-  const scene = new THREE.Scene()
-  // Pushed well past the orbit radius (~1400m) so it no longer greys out
-  // the terrain and road; kept as gentle depth cueing near the far clip.
-  scene.fog = new THREE.Fog(0x14181d, 3800, 6000)
-
-  const camera = new THREE.PerspectiveCamera(45, 1, 1, 6000)
-
-  // three r185 uses physically-based lighting, so intensities read very
-  // differently to older three.js versions — these are tuned by eye to
-  // give the terrain clear form and separate the three road layers.
-  scene.add(new THREE.HemisphereLight(0xbdd7ff, 0x3a3227, 3.5))
-  const sun = new THREE.DirectionalLight(0xfff2d8, 4.5)
-  sun.position.set(-600, 900, 400)
-  scene.add(sun)
-
+/**
+ * Terrain, roads, earthworks and meshes for the demo scene.
+ *
+ * Split out from `drawRoadScene` so the scene's parameters can be asserted
+ * against without a WebGL context. The bar those assertions hold is that this
+ * scene actually exercises the structures pipeline: a demo whose constants
+ * make every trigger unreachable looks exactly like one that works.
+ */
+export const buildSceneContent = (): SceneContent => {
   // Fine enough that the excavated corridor (a 10m-wide formation) isn't lost
   // between grid nodes: at the original 20m cellSize, a single cell spans the
   // whole formation width plus both batters, so the cut/fill dissolves into
@@ -219,6 +246,7 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
       maxGrade: MAX_GRADE,
       maxCutDepth: MAX_CUT_DEPTH,
       maxFillHeight: MAX_FILL_HEIGHT,
+      maxStructureHeight: MAX_STRUCTURE_HEIGHT,
     })
     return solution.feasible ? solution.profile : null
   }
@@ -250,13 +278,44 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     if (!design || design.length === 0) continue
     excavateCorridor(editLayer, road.alignment, design, road.className)
   }
-  const terrainSource: { sample(x: number, y: number): number } = editLayer
 
+  // Structures are measured against NATURAL ground, not `editLayer`. The edit
+  // layer has already been cut and filled to the design surface, so under the
+  // road it sits at the design line by construction: every station would read
+  // as level, no station could exceed the fill allowance, and neither the
+  // bridge nor the wall trigger could fire at all.
   const built = buildNetworkMesh(network, designs, {
     spacing: 4,
-    terrain: editLayer,
+    terrain,
+    maxFillHeight: MAX_FILL_HEIGHT,
     corridorTemplate: CORRIDOR_TEMPLATE,
   })
+
+  return { terrain, network, designs, editLayer, built }
+}
+
+export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true })
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+  renderer.setClearColor(0x14181d)
+
+  const scene = new THREE.Scene()
+  // Pushed well past the orbit radius (~1400m) so it no longer greys out
+  // the terrain and road; kept as gentle depth cueing near the far clip.
+  scene.fog = new THREE.Fog(0x14181d, 3800, 6000)
+
+  const camera = new THREE.PerspectiveCamera(45, 1, 1, 6000)
+
+  // three r185 uses physically-based lighting, so intensities read very
+  // differently to older three.js versions — these are tuned by eye to
+  // give the terrain clear form and separate the three road layers.
+  scene.add(new THREE.HemisphereLight(0xbdd7ff, 0x3a3227, 3.5))
+  const sun = new THREE.DirectionalLight(0xfff2d8, 4.5)
+  sun.position.set(-600, 900, 400)
+  scene.add(sun)
+
+  const { terrain, editLayer, built } = buildSceneContent()
+  const terrainSource: { sample(x: number, y: number): number } = editLayer
 
   for (const [, roadMesh] of built.roads) {
     for (const layer of roadMesh.layers) {
