@@ -166,6 +166,74 @@ describe('sweepCorridor', () => {
     }
   })
 
+  // THE DEFECT, in the shape it was measured in. The demo scene's east arm
+  // carries a span over stations 273-423 (a 279-417 structure run plus a 3m
+  // abutment extension at each end), while the earthworks it used to derive
+  // independently stopped at 280 and resumed at 420. Nodes in 273-280 and
+  // 420-423 were therefore claimed by earthwork AND covered by an abutment:
+  // a bare terrain cliff at each bridge end and an embankment standing over
+  // the west abutment. The property that forbids it is stated directly —
+  // nothing strictly inside a carried range may be claimed by the sweep.
+  it('leaves every node under a structure range unclaimed', () => {
+    // A 500m alignment over the same flat ground, sampled at the same 5m
+    // grid the fixture above uses. Every station is a multiple of the
+    // 5m cell size, so a swept sample's nearest grid column sits exactly on
+    // its own station — the nearest-station figures below carry no
+    // rounding slack that could hide a node just inside the range.
+    const longTerrain = new Heightmap(0, -50, 5, 121, 21, new Float32Array(121 * 21).fill(100))
+    const longAlignment = new Alignment([new Line(vec2(0, 0), 0, 500)])
+    const longProfile: ProfilePoint[] = [{ s: 0, z: 96 }, { s: 500, z: 96 }]
+
+    const params: Omit<SweepParams, 'structureRanges'> = {
+      ...baseParams,
+      alignment: longAlignment,
+      profile: longProfile,
+      terrain: longTerrain,
+      stationSpacing: 5,
+    }
+
+    /**
+     * The nearest station on the alignment to a claimed node.
+     *
+     * The alignment is a straight line east from the origin, so every point's
+     * nearest station is its own x clamped to the alignment's length — no
+     * projection machinery needed, and none of its approximation either.
+     */
+    const nearestStation = (col: number): number => {
+      const x = longTerrain.originX + col * longTerrain.cellSize
+      return Math.min(Math.max(x, 0), longAlignment.length)
+    }
+
+    const stationsClaimed = (x: CorridorExcavation): number[] => {
+      const stations = new Set<number>()
+      for (let row = 0; row < longTerrain.rows; row++) {
+        for (let col = 0; col < longTerrain.cols; col++) {
+          if (x.has(col, row)) stations.add(nearestStation(col))
+        }
+      }
+      return [...stations].sort((a, b) => a - b)
+    }
+
+    const carried = { fromStation: 273, toStation: 423 }
+    const inside = (s: number): boolean => s > carried.fromStation && s < carried.toStation
+
+    const covered = new CorridorExcavation(longTerrain.cols, longTerrain.rows)
+    sweepCorridor({ ...params, structureRanges: [carried] }, covered)
+
+    expect(stationsClaimed(covered).filter(inside)).toEqual([])
+
+    // Not vacuous twice over: the sweep did claim ground right up to both
+    // ends of the span, and the same sweep with no structure range claims
+    // the span's whole interior — so the assertion above is discriminating
+    // the guard, not an empty excavation or an alignment nothing reaches.
+    expect(stationsClaimed(covered)).toContain(270)
+    expect(stationsClaimed(covered)).toContain(425)
+
+    const unguarded = new CorridorExcavation(longTerrain.cols, longTerrain.rows)
+    sweepCorridor({ ...params, structureRanges: [] }, unguarded)
+    expect(stationsClaimed(unguarded).filter(inside).length).toBeGreaterThan(0)
+  })
+
   it('claims the station exactly at a structure range boundary as carried', () => {
     // fromStation and toStation are inclusive: a zero-width range at
     // exactly station 30 must still carry that one station, proving both

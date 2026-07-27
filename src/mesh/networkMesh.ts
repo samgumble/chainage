@@ -10,9 +10,7 @@ import { type ProfilePoint, designElevationAtStation } from '../terrain/groundPr
 import type { MeshData } from './ribbon'
 import type { TerrainSampler } from '../terrain/heightmap'
 import { type CorridorBatters } from '../terrain/corridor'
-import { classifySupport } from '../terrain/gradeSolver'
-import { sampleGroundProfile } from '../terrain/groundProfile'
-import { structureSpans } from './structures/spans'
+import { roadStructureSpans, type StructureSpan } from './structures/spans'
 import { buildBridgeMesh } from './structures/bridgeMesh'
 import { wallSegments, buildRetainingWallMesh } from './structures/retainingWallMesh'
 import { findCrossings, MIN_OVERPASS_CLEARANCE, type Crossing } from '../network/crossings'
@@ -31,6 +29,21 @@ type NetworkMeshCommon = {
    * walls measured against a rural road's formation.
    */
   readonly corridorBatters?: CorridorBatters
+  /**
+   * Per-road structure spans, if the caller already has them.
+   *
+   * A caller that excavates terrain must derive these BEFORE it excavates —
+   * earthwork has to stop at the abutment face, and it cannot ask a mesh that
+   * has not been built yet where that is. Passing the very list it used here
+   * is what guarantees the bridge sits on the ground the earthworks left it,
+   * rather than on a second derivation that agrees only by luck (it did not:
+   * the two disagreed by seven stations at each end of the demo scene's span).
+   *
+   * A road absent from the map has its spans derived here from the same
+   * `roadStructureSpans`, so omitting this option costs nothing but the
+   * duplicated work.
+   */
+  readonly structureSpans?: ReadonlyMap<RoadId, readonly StructureSpan[]>
 }
 
 /**
@@ -239,18 +252,16 @@ export const buildNetworkMesh = (
 
       if (design.length >= 2) {
         const halfWidth = formationHalfWidth(ROAD_CLASSES[road.className])
-        const ground = sampleGroundProfile(road.alignment, terrain, spacing)
 
-        // Resample the design onto the ground profile's own stations, so
-        // classifySupport compares like with like. The two profiles are
-        // sampled independently and will not otherwise share stations.
-        const designAtGround = ground.map((g) => ({
-          s: g.s,
-          z: designElevationAtStation(design, g.s),
-        }))
+        // The caller's spans if it has any — the corridor excavation needs
+        // the same list, and handing it down is what stops the two from
+        // drifting apart. Derived here otherwise, by the same function the
+        // caller would have used, so there is one derivation either way and
+        // a caller with no interest in earthworks still gets its bridges.
+        const spans =
+          options.structureSpans?.get(road.id) ??
+          roadStructureSpans({ alignment: road.alignment, design, terrain, maxFillHeight, spacing })
 
-        const support = classifySupport(ground, designAtGround, maxFillHeight)
-        const spans = structureSpans(designAtGround, support, ground)
         for (const span of spans) {
           parts.push(buildBridgeMesh(road.alignment, terrain, design, span, halfWidth))
         }

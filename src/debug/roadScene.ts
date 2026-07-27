@@ -30,6 +30,7 @@ import { surfaceFor } from '../render/materials'
 import { TILT_SHIFT_FRAGMENT_SHADER, createTiltShiftUniforms } from '../render/tiltShift'
 import { RoadNetwork, type RoadId } from '../network/graph'
 import { buildNetworkMesh, type NetworkMesh } from '../mesh/networkMesh'
+import { roadStructureSpans, type StructureSpan } from '../mesh/structures/spans'
 import { DrawTool, SNAP_RADIUS } from '../tool/drawTool'
 import { resolveSnap, type SnapTarget } from '../tool/snap'
 import { SelectTool, type SplitOutcome } from '../tool/selectTool'
@@ -105,6 +106,18 @@ const corridorTemplateFor = (className: RoadClassName): CorridorTemplate => ({
 
 /** How far apart, along the alignment, the excavation walk takes stations. */
 const EXCAVATION_STATION_SPACING = 5
+
+/**
+ * Station spacing for the mesh build and for the structure spans fed to it.
+ *
+ * One constant for both deliberately. `buildNetworkMesh` samples ground at
+ * its `spacing` when it has to derive spans itself, so a scene that computed
+ * its spans at one spacing and meshed at another would be handing the mesh
+ * layer a span list it would never have produced — the same class of
+ * disagreement, one level down, as the one this scene's earthworks and
+ * structures used to have with each other.
+ */
+const STRUCTURE_STATION_SPACING = 4
 /** Extra width beyond the computed batter run-out, so the daylight line is
  * never clipped by an undersized excavation footprint. */
 const EXCAVATION_MARGIN = 5
@@ -146,11 +159,12 @@ const JUNCTION = vec2(900, 1280)
  * at a junction is arbitrated by nearest centreline rather than by whichever
  * road happened to sweep that node last.
  *
- * Until structure spans are threaded through from Task 3, `structureRanges`
- * is empty: no station is treated as carried, so this sweep still cuts and
- * fills straight through where a bridge should leave the ground alone. That
- * is a known, temporary regression from the old per-station `MAX_FILL_HEIGHT`
- * check this replaced, not a silent gap.
+ * `spans` is required rather than defaulted: an empty list is a truthful
+ * answer for a road with no bridges and a silent catastrophe for a road with
+ * one (earthwork fills the valley the deck was meant to cross), and the two
+ * must not be spelled the same way at the call site. The caller passes the
+ * same list it gives `buildNetworkMesh`, so the abutment stands exactly where
+ * the earthwork stops.
  */
 const excavateCorridor = (
   into: CorridorExcavation,
@@ -158,6 +172,7 @@ const excavateCorridor = (
   alignment: Alignment,
   profile: readonly ProfilePoint[],
   className: RoadClassName,
+  spans: readonly StructureSpan[],
 ): void => {
   if (alignment.isEmpty || profile.length === 0) return
 
@@ -183,7 +198,7 @@ const excavateCorridor = (
       margin: EXCAVATION_MARGIN,
       stationSpacing: EXCAVATION_STATION_SPACING,
       transverseSpacing: terrain.cellSize,
-      structureRanges: [],
+      structureRanges: spans,
     },
     into,
   )
@@ -263,6 +278,24 @@ export const solveNetwork = (
     }
   }
 
+  // Where each road is carried on a structure rather than on earth — derived
+  // BEFORE any excavation, because the earthworks need it. Structures are
+  // measured against NATURAL ground, which is why this can run first at all:
+  // spans are a function of the alignment, the solved design line and the
+  // untouched terrain, and never of the excavation's own output. (Measuring
+  // them against the edit layer would not merely be circular, it would find
+  // nothing: cut and filled to the design surface, every station reads as
+  // level and neither the bridge nor the wall trigger could fire.)
+  //
+  // The list built here is handed to BOTH consumers — the sweep below and
+  // `buildNetworkMesh` — rather than derived twice. Two independent
+  // derivations is exactly the defect being fixed: the earthworks stopped
+  // where a per-station fill test tripped (stations 280-420) while the span,
+  // abutments included, ran 273-423, leaving a bare terrain cliff and an
+  // unsupported notch in the seven stations at each end where the two
+  // disagreed.
+  const spans = new Map<RoadId, readonly StructureSpan[]>()
+
   // Excavate the terrain down to every road's design line before anything is
   // rendered, so each road sits in a real cutting/embankment rather than
   // buried inside (or floating above) untouched ground. Every road sweeps
@@ -277,21 +310,37 @@ export const solveNetwork = (
   const excavation = new CorridorExcavation(terrain.cols, terrain.rows)
   for (const road of network.roads) {
     const design = designs.get(road.id)
+    // No design profile means the grade solve failed; that road is already
+    // recorded in `infeasibleRoads` above. Nothing is swept for it and no
+    // spans are claimed on its behalf — there is no design line to measure
+    // either against ground.
     if (!design || design.length === 0) continue
-    excavateCorridor(excavation, terrain, road.alignment, design, road.className)
+
+    // Derived and swept in one pass, so the spans a road's earthworks stop
+    // at cannot become a different list from the one its bridges are built
+    // on: it is the same array, put in the map and passed to the sweep.
+    const roadSpans = roadStructureSpans({
+      alignment: road.alignment,
+      design,
+      terrain,
+      maxFillHeight: MAX_FILL_HEIGHT,
+      spacing: STRUCTURE_STATION_SPACING,
+    })
+    spans.set(road.id, roadSpans)
+    excavateCorridor(excavation, terrain, road.alignment, design, road.className, roadSpans)
   }
   excavation.applyTo(editLayer)
 
-  // Structures are measured against NATURAL ground, not the edit layer. The
-  // edit layer has already been cut and filled to the design surface, so
-  // under the road it sits at the design line by construction: every station
-  // would read as level, no station could exceed the fill allowance, and
-  // neither the bridge nor the wall trigger could fire at all.
+  // Structures are measured against NATURAL ground, not the edit layer — see
+  // the spans comment above. `spans` is passed rather than left to be
+  // recomputed here so the deck and its abutments land on precisely the
+  // ground the sweep above left unexcavated for them.
   const built = buildNetworkMesh(network, designs, {
-    spacing: 4,
+    spacing: STRUCTURE_STATION_SPACING,
     terrain,
     maxFillHeight: MAX_FILL_HEIGHT,
     corridorBatters: CORRIDOR_BATTERS,
+    structureSpans: spans,
   })
 
   return { designs, editLayer, built, infeasibleRoads }

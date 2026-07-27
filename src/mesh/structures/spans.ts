@@ -1,5 +1,11 @@
-import type { ProfilePoint } from '../../terrain/groundProfile'
-import type { StationSupport } from '../../terrain/gradeSolver'
+import type { Alignment } from '../../geometry/alignment'
+import type { TerrainSampler } from '../../terrain/heightmap'
+import {
+  type ProfilePoint,
+  designElevationAtStation,
+  sampleGroundProfile,
+} from '../../terrain/groundProfile'
+import { classifySupport, type StationSupport } from '../../terrain/gradeSolver'
 
 export type StructureSpan = {
   readonly fromStation: number
@@ -109,4 +115,60 @@ export const structureSpans = (
   }
 
   return merged
+}
+
+/** Everything one road's spans are a function of. */
+export type RoadSpanInputs = {
+  readonly alignment: Alignment
+  /** The road's solved design profile — the grade line, not natural ground. */
+  readonly design: readonly ProfilePoint[]
+  /**
+   * NATURAL ground, before any corridor excavation.
+   *
+   * Ground already cut and filled to the design surface sits at the design
+   * line by construction, so every station would read as level and no span
+   * could ever be found. This is also what lets spans be derived before the
+   * earthworks run: they never depend on the excavation's own output.
+   */
+  readonly terrain: TerrainSampler
+  /** The fill allowance the design line was graded to. */
+  readonly maxFillHeight: number
+  /** Station spacing the ground and support profiles are sampled at. */
+  readonly spacing: number
+}
+
+/**
+ * The structure spans on one road: sample natural ground, classify each
+ * station, and group the structure stations into spans.
+ *
+ * The single derivation of a road's spans in this codebase. It exists as its
+ * own function because two consumers need the answer — the mesh build, which
+ * puts bridges on the spans and keeps retaining walls off them, and the
+ * corridor excavation, which must stop earthworks at the abutment face — and
+ * they used to derive it independently: the earthworks stopped where a
+ * per-station fill test happened to trip (measured: stations 280-420) while
+ * the structures covered 273-423. Everything wrong at the bridges lived in
+ * that seven-station disagreement, so there is now one function, called once
+ * per road, whose result is shared rather than recomputed.
+ *
+ * A road with fewer than two design stations has no spans: there is no design
+ * line to measure against ground, which is a road that did not grade, not a
+ * road whose spans are unknown.
+ */
+export const roadStructureSpans = (inputs: RoadSpanInputs): StructureSpan[] => {
+  const { alignment, design, terrain, maxFillHeight, spacing } = inputs
+  if (design.length < 2) return []
+
+  const ground = sampleGroundProfile(alignment, terrain, spacing)
+  if (ground.length === 0) return []
+
+  // Resample the design onto the ground profile's own stations, so
+  // `classifySupport` compares like with like. The two profiles are sampled
+  // independently and will not otherwise share stations.
+  const designAtGround = ground.map((g) => ({
+    s: g.s,
+    z: designElevationAtStation(design, g.s),
+  }))
+
+  return structureSpans(designAtGround, classifySupport(ground, designAtGround, maxFillHeight), ground)
 }

@@ -99,19 +99,14 @@ describe('the demo scene', () => {
     expect(structureVertices(content.built)).toBeGreaterThan(structureVertices(bridgesOnly))
   })
 
-  // KNOWN, TEMPORARY REGRESSION: `excavateCorridor` used to skip stations
-  // where `roadZ - centreGroundZ > MAX_FILL_HEIGHT`, which is what kept this
-  // assertion true. That per-station heuristic has been replaced by
-  // `sweepCorridor`'s `structureRanges` (see src/terrain/excavation.ts),
-  // which `roadScene.ts` currently calls with `structureRanges: []` because
-  // deriving the real spans is Task 3's job, not Task 2's — computing them
-  // here would be scope creep into work the plan explicitly defers. Until
-  // Task 3 wires the actual structure spans through, the earthworks sweep
-  // runs straight through a bridge's span and this test's premise is false.
-  // Skipped rather than deleted or weakened, so the coverage comes back
-  // automatically (as a real failure demanding attention) if Task 3 lands
-  // without actually threading spans into `solveNetwork`/`excavateCorridor`.
-  it.skip('leaves the ground unexcavated where a bridge carries the road', () => {
+  // What ties the earthworks to the structures. `solveNetwork` derives each
+  // road's spans once, before excavating, and hands the same list to both
+  // `sweepCorridor` (as `structureRanges`) and `buildNetworkMesh` — so the
+  // sweep stops at the abutment face rather than at whatever station a
+  // per-station fill test happened to trip. This assertion fails outright if
+  // that thread is ever cut: with `structureRanges: []` the sweep fills the
+  // valley the deck crosses and no bridge vertex stands over natural ground.
+  it('leaves the ground unexcavated where a bridge carries the road', () => {
     // The bridge spans a valley the earthworks would otherwise fill in. If
     // the excavation ran through the span, the deck would be buried in its
     // own embankment: somewhere under a bridge the edit layer must still
