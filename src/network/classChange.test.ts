@@ -118,6 +118,29 @@ describe('checkClassChange', () => {
     expect(result.rejection.station).toBeLessThanOrEqual(10.8)
   })
 
+  it("finds a Spiral's peak curvature at its start, off the sample grid", () => {
+    // Mirror of the test below: a road that OPENS with a spiral unwinding
+    // from an illegal curvature down to a legal one. This is how a road
+    // leaves a curve, so it is a realistic shape, not a contrived one. A
+    // scan that only checks each primitive's end station (dropping station 0
+    // entirely) would see curvature 0 at the spiral's end and 0 throughout
+    // the trailing line, and never see the illegal peak at station 0.
+    const required = minimumRadiusForSpeed(ROAD_CLASSES.highway.designSpeedKph)
+    const startCurvature = 1 / (0.99 * required)
+
+    const spiral = new Spiral({ x: 0, y: 0 }, 0, 10.5, startCurvature, 0)
+    const p = spiral.poseAt(10.5)
+    const line = new Line(p.position, p.heading, 10)
+
+    const road = roadWith(new Alignment([spiral, line]), 'gravel')
+
+    const result = checkClassChange(road, 'highway')
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.rejection.actualRadius).toBeCloseTo(0.99 * required, 3)
+    expect(result.rejection.station).toBeCloseTo(0, 6)
+  })
+
   it("finds a Spiral's peak curvature at its endpoint, off the sample grid", () => {
     const required = minimumRadiusForSpeed(ROAD_CLASSES.highway.designSpeedKph)
     // Just barely illegal at the very tip of the spiral; curvature scales
