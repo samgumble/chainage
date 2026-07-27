@@ -302,6 +302,10 @@ export const buildNetworkMesh = (
               road.alignment,
               wallSegments(road.alignment, terrain, design, template, spacing)
                 .filter((segment) => !carried(segment.s)),
+              // The same spacing the segments were just sampled at. This is
+              // the number `buildRetainingWallMesh` used to have to guess, and
+              // guessed wrong wherever the guess mattered most.
+              spacing,
             ),
           )
         }

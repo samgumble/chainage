@@ -125,20 +125,20 @@ describe('wallSegments elevations', () => {
 
 describe('buildRetainingWallMesh', () => {
   it('returns an empty mesh with no segments', () => {
-    const m = buildRetainingWallMesh(road(100), [])
+    const m = buildRetainingWallMesh(road(100), [], 25)
     expect(m.vertexCount).toBe(0)
     expect(m.triangleCount).toBe(0)
   })
 
   it('returns an empty mesh with a single segment per side', () => {
     const segments = wallSegments(road(100), flat(100), level(100, 95), walled, 1000)
-    const m = buildRetainingWallMesh(road(100), segments)
+    const m = buildRetainingWallMesh(road(100), segments, 1000)
     expect(m.triangleCount).toBe(0)
   })
 
   it('emits panels between consecutive segments', () => {
     const segments = wallSegments(road(100), flat(100), level(100, 95), walled, 25)
-    const m = buildRetainingWallMesh(road(100), segments)
+    const m = buildRetainingWallMesh(road(100), segments, 25)
     expect(m.triangleCount).toBeGreaterThan(0)
   })
 
@@ -146,7 +146,7 @@ describe('buildRetainingWallMesh', () => {
     const segments = wallSegments(road(100), flat(100), level(100, 95), walled, 25)
     const lowest = Math.min(...segments.map((w) => w.bottomZ))
     const highest = Math.max(...segments.map((w) => w.topZ))
-    const m = buildRetainingWallMesh(road(100), segments)
+    const m = buildRetainingWallMesh(road(100), segments, 25)
     for (let i = 0; i < m.vertexCount; i++) {
       const z = m.positions[i * 3 + 2]!
       expect(z).toBeGreaterThanOrEqual(lowest - 1e-6)
@@ -156,7 +156,7 @@ describe('buildRetainingWallMesh', () => {
 
   it('gives every panel a roughly horizontal normal', () => {
     const segments = wallSegments(road(100), flat(100), level(100, 95), walled, 25)
-    const m = buildRetainingWallMesh(road(100), segments)
+    const m = buildRetainingWallMesh(road(100), segments, 25)
     for (let i = 0; i < m.vertexCount; i++) {
       expect(Math.abs(m.normals[i * 3 + 2]!)).toBeLessThan(0.2)
     }
@@ -164,7 +164,7 @@ describe('buildRetainingWallMesh', () => {
 
   it('winds every triangle to agree with its normal', () => {
     const segments = wallSegments(road(100), flat(100), level(100, 95), walled, 25)
-    const m = buildRetainingWallMesh(road(100), segments)
+    const m = buildRetainingWallMesh(road(100), segments, 25)
     for (let t = 0; t < m.indices.length; t += 3) {
       const [i, j, k] = [m.indices[t]!, m.indices[t + 1]!, m.indices[t + 2]!]
       const ax = m.positions[i * 3]!, ay = m.positions[i * 3 + 1]!, az = m.positions[i * 3 + 2]!
@@ -186,7 +186,7 @@ describe('buildRetainingWallMesh', () => {
     // a genuinely non-planar quad.
     const curved = new Alignment([new Arc(vec2(0, 0), 0, 100, 0.01)])
     const segments = wallSegments(curved, flat(100), level(100, 95), walled, 10)
-    const m = buildRetainingWallMesh(curved, segments)
+    const m = buildRetainingWallMesh(curved, segments, 10)
     expect(m.triangleCount).toBeGreaterThan(0)
     for (let t = 0; t < m.indices.length; t += 3) {
       const [i, j, k] = [m.indices[t]!, m.indices[t + 1]!, m.indices[t + 2]!]
@@ -229,7 +229,7 @@ describe('buildRetainingWallMesh', () => {
       // sorted by station.
       const stations = [100, 105, 110, 300, 305, 310]
       const segments: WallSegment[] = stations.flatMap((s) => [seg(s, 'left'), seg(s, 'right')])
-      const mesh = buildRetainingWallMesh(straight, segments)
+      const mesh = buildRetainingWallMesh(straight, segments, 5)
 
       // The two small runs must still produce panels — this is not "does
       // the whole thing come out empty", it is specifically "is the 190m
@@ -248,6 +248,37 @@ describe('buildRetainingWallMesh', () => {
       }
     })
 
+    // The two cases the old median-derived spacing got wrong, and the reason
+    // the spacing is now an argument. Both are gaps that inflate the very
+    // median they were being compared against.
+
+    it('does not join the only two segments in a run', () => {
+      // One gap, so the median IS that gap: median([200]) = 200, and 200 is
+      // not greater than 1.5 * 200. The old code joined it and emitted a
+      // single 200m-wide triangle across ground with no wall under it.
+      const segments: WallSegment[] = [100, 300].flatMap((st) => [seg(st, 'left'), seg(st, 'right')])
+      const mesh = buildRetainingWallMesh(straight, segments, 5)
+      expect(mesh.triangleCount).toBe(0)
+    })
+
+    it('does not join across a single dropped sample', () => {
+      // Stations 100, 104, 112 on a 4m cadence: one sample missing at 108.
+      // Gaps are 4 and 8, so median([4, 8]) = 6 and 1.5 * 6 = 9 >= 8 — the old
+      // code joined the 8m gap and painted an 8m panel over the missing
+      // sample. With the real spacing the bound is 6m and the gap is 8m.
+      const segments: WallSegment[] = [100, 104, 112].flatMap((st) => [
+        seg(st, 'left'), seg(st, 'right'),
+      ])
+      const mesh = buildRetainingWallMesh(straight, segments, 4)
+
+      // The 100 -> 104 step is a genuine adjacency and must survive, so this
+      // is not "the whole thing came out empty".
+      expect(mesh.triangleCount).toBeGreaterThan(0)
+      const allStations = Array.from({ length: mesh.vertexCount }, (_, i) => stationOf(mesh, i))
+      expect(Math.min(...allStations)).toBeCloseTo(100, 6)
+      expect(Math.max(...allStations)).toBeCloseTo(104, 6)
+    })
+
     it('still joins genuinely adjacent segments into one panel', () => {
       // Segments at 100, 105, 110 with no gap must remain a single
       // continuous panel — the fix must not shatter every wall into
@@ -255,7 +286,7 @@ describe('buildRetainingWallMesh', () => {
       // change would produce while still passing the test above.
       const stations = [100, 105, 110]
       const segments: WallSegment[] = stations.flatMap((s) => [seg(s, 'left'), seg(s, 'right')])
-      const mesh = buildRetainingWallMesh(straight, segments)
+      const mesh = buildRetainingWallMesh(straight, segments, 5)
 
       expect(mesh.triangleCount).toBeGreaterThan(0)
 

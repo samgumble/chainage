@@ -115,51 +115,51 @@ export const wallSegments = (
  * The face points away from the road, so its winding runs bottom-to-top on the
  * near station and top-to-bottom on the far one for the right side, and the
  * reverse for the left — that is what keeps the outward face frontmost on both.
+ *
+ * `spacing` is the station spacing the segments were SAMPLED at, and it is a
+ * required argument rather than something recovered from the run. A run has
+ * gaps in it — `networkMesh` drops every segment inside a bridge span, and
+ * `wallSegments` only emits one where a wall is actually needed — and joining
+ * across a gap paints a solid panel over ground with no wall under it. Telling
+ * a gap from an ordinary step needs to know what an ordinary step is.
+ *
+ * This used to infer it, as the median of the run's own gaps, and the
+ * inference is unsound in exactly the case it exists for: a gap inflates the
+ * median it is then compared against. Two segments 200m apart give
+ * `median([200]) = 200`, and 200 is not more than 300, so a 200m triangle got
+ * emitted across the whole hole. One dropped sample on a 4m cadence gives
+ * `median([4, 8]) = 6`, and `1.5 * 6 = 9` is not less than 8, so that one got
+ * joined too. Both are confirmed defects, and both are tests now. The caller
+ * knows the spacing — `networkMesh` passes the very number it sampled at — so
+ * it is passed rather than guessed.
  */
 export const buildRetainingWallMesh = (
   alignment: Alignment,
   segments: readonly WallSegment[],
+  spacing: number,
 ): MeshData => {
+  if (spacing <= 0) {
+    throw new RangeError('spacing must be positive')
+  }
+
   const builder = new MeshBuilder()
+
+  // A gap opened by a dropped sample skips at least one whole sample, so it is
+  // a whole multiple of the spacing and at least twice it. 1.5x separates that
+  // from a genuine step while absorbing floating-point noise and the shorter
+  // final partial step `wallSegments` appends at the alignment's own end.
+  //
+  // The one gap this cannot judge is a dropped sample immediately before that
+  // final partial step, which measures `spacing + partial` and can land under
+  // 1.5x. That joins a panel over at most one partial step of un-walled
+  // ground, at the very end of a road, and closing it would mean carrying the
+  // segment list's provenance rather than its stations.
+  const maxJoinGap = spacing * 1.5
 
   for (const side of ['left', 'right'] as const) {
     const run = segments
       .filter((w) => w.side === side)
       .sort((a, b) => a.s - b.s)
-
-    // The caller (networkMesh.ts) drops any segment that falls inside a
-    // bridge span before handing segments here, and `wallSegments` itself
-    // only emits a segment where a wall is actually needed — so a run can
-    // have gaps for either reason, and joining across one paints a solid
-    // panel over ground that has no wall at all. The fix needs to know how
-    // far apart two adjacent samples are SUPPOSED to be, which is the
-    // sampling spacing the caller used — but that value isn't passed in and
-    // hardcoding it would silently misjudge every caller who samples at a
-    // different spacing. So it's derived from the run itself: the median of
-    // the gaps between consecutive stations. Median rather than the minimum,
-    // because the last sample can legitimately be a shorter partial step
-    // (see `wallSegments`, which appends the alignment's own end station
-    // even when it doesn't land on a multiple of the sampling spacing) — the
-    // minimum gap would then be that partial step, not the regular cadence,
-    // and would wrongly reject every ordinary join as "too far apart".
-    // Median is only meaningful with at least two gaps (three segments); a
-    // run of exactly two segments has nothing else to compare its one gap
-    // against and is always joined — see retainingWallMesh.test.ts for that
-    // limitation made explicit.
-    const gaps: number[] = []
-    for (let i = 1; i < run.length; i++) gaps.push(run[i]!.s - run[i - 1]!.s)
-    const sortedGaps = [...gaps].sort((a, b) => a - b)
-    const mid = Math.floor(sortedGaps.length / 2)
-    const expectedSpacing = sortedGaps.length === 0
-      ? 0
-      : sortedGaps.length % 2 === 0
-        ? (sortedGaps[mid - 1]! + sortedGaps[mid]!) / 2
-        : sortedGaps[mid]!
-    // Any gap opened by a dropped segment skips at least one whole sample,
-    // so it is at least twice the regular spacing; 1.5x the median cleanly
-    // separates that from a genuine step while absorbing a shorter final
-    // partial step and ordinary floating-point noise.
-    const maxJoinGap = expectedSpacing * 1.5
 
     for (let i = 1; i < run.length; i++) {
       const from = run[i - 1]!
