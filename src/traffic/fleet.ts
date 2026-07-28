@@ -56,26 +56,34 @@ export const spawnGap = (speed: number, params: IdmParams): number =>
   params.minimumGap + speed * params.headwayTime
 
 /**
- * Whether a lane has room at position 0 for a vehicle entering at `speed`.
+ * Whether a lane has room at `spawnPosition` for a vehicle entering at `speed`.
  *
  * `rearmostPosition` is the position of the vehicle furthest *back* in the
  * lane — the last index, since `Lane` sorts by descending position — or
  * `undefined` for an empty lane.
  *
  * This is the check that keeps a jammed lane from deadlocking. Spawning on
- * schedule regardless would stack vehicles on top of a stopped queue at
- * position 0; the IDM's interaction term divides by the gap, so a stack at
+ * schedule regardless would stack vehicles on top of a stopped queue at the
+ * entry point; the IDM's interaction term divides by the gap, so a stack at
  * zero separation produces enormous braking on everything behind it and the
  * lane never discharges. A lane that is full simply does not accept another
  * vehicle until one leaves, which is what a road at capacity does.
+ *
+ * `spawnPosition` defaults to 0 — where a lane with nothing in front of its
+ * start admits traffic — but the gate is measured from wherever the vehicle
+ * would actually appear, not from the lane's origin. A lane that enters its
+ * traffic 9.5m along (see `trafficEntryStations`) and asked this about
+ * position 0 would count that 9.5m as free space and admit a vehicle right on
+ * top of the queue standing in it.
  */
 export const hasSpawnRoom = (
   rearmostPosition: number | undefined,
   speed: number,
   params: IdmParams,
+  spawnPosition = 0,
 ): boolean => {
   if (rearmostPosition === undefined) return true
-  return rearmostPosition - VEHICLE_LENGTH >= spawnGap(speed, params)
+  return rearmostPosition - spawnPosition - VEHICLE_LENGTH >= spawnGap(speed, params)
 }
 
 /**
@@ -202,6 +210,22 @@ export type DrivableRoad = {
   readonly id: RoadId
   readonly alignment: Alignment
   readonly className: RoadClassName
+  /**
+   * Where along the road traffic enters, metres. Defaults to 0 — the start.
+   *
+   * Data, decided by whoever owns the road and passed in, because the reasons
+   * to enter somewhere other than the start are all about what is at the
+   * start, and nothing in here can see that. The demo scene's three legs all
+   * begin AT a junction, and a vehicle put on at station 0 there is a vehicle
+   * standing in the middle of the intersection with two other legs' traffic;
+   * `trafficEntryStations` works out how far clear of the plate that is, from
+   * the junction's own solved geometry.
+   *
+   * Only the entry point moves. The lane still runs `[0, length)` and a
+   * vehicle still retires at `length`, so a road with an entry station has a
+   * shorter *usable* lane and nothing else changes.
+   */
+  readonly spawnStation?: number
 }
 
 type LaneEntry = {
@@ -210,6 +234,7 @@ type LaneEntry = {
   /** What the lane was built from, so `sync` can tell a rebuild is needed. */
   readonly length: number
   readonly className: RoadClassName
+  readonly spawnStation: number
   sinceSpawn: number
 }
 
@@ -286,15 +311,30 @@ export class Fleet {
       // rejects it outright rather than being handed a degenerate lane.
       if (!(length > 0)) continue
 
+      const spawnStation = road.spawnStation ?? 0
+      // A road shorter than its own entry station has nowhere to put a vehicle
+      // that is not already past the end of it. That is a real case — a stub
+      // a few metres long joining a junction — and the honest answer is the
+      // same one an ungraded road gets: no lane, and no traffic. Admitting one
+      // anyway would spawn vehicles beyond `length`, where `removeBeyondEnd`
+      // retires them on the same step they appear.
+      if (!(spawnStation >= 0) || spawnStation >= length) continue
+
       seen.add(road.id)
       const existing = this.lanes.get(road.id)
-      if (existing && existing.length === length && existing.className === road.className) continue
+      if (
+        existing &&
+        existing.length === length &&
+        existing.className === road.className &&
+        existing.spawnStation === spawnStation
+      ) continue
 
       this.lanes.set(road.id, {
         lane: new Lane(length),
         params: driverParamsFor(road.className),
         length,
         className: road.className,
+        spawnStation,
         // Phased by road id: the lane's first vehicle enters on step
         // `1 + (id mod STEPS_PER_SPAWN)` and every `STEPS_PER_SPAWN`th step
         // after that, so the seed is whatever leaves exactly that many steps
@@ -369,8 +409,8 @@ export class Fleet {
         ? undefined
         : entry.lane.positionOf(entry.lane.count - 1)
 
-      if (hasSpawnRoom(rearmost, speed, entry.params)) {
-        entry.lane.add(0, speed)
+      if (hasSpawnRoom(rearmost, speed, entry.params, entry.spawnStation)) {
+        entry.lane.add(entry.spawnStation, speed)
         entry.sinceSpawn = 0
       } else {
         // Held at the threshold rather than allowed to keep counting.

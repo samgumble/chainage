@@ -133,6 +133,20 @@ describe('hasSpawnRoom', () => {
     // this, and spawn a car overlapping the one ahead by a whole car.
     expect(hasSpawnRoom(spawnGap(speed, params), speed, params)).toBe(false)
   })
+
+  it('measures the gap from where the vehicle would actually appear', () => {
+    // A lane that admits traffic 9.5m along (the demo's gravel branch, kept
+    // clear of the junction it starts at) has 9.5m of road behind its own entry
+    // point that is not room for anything. Measuring from 0 would count it and
+    // admit a vehicle on top of a queue standing right there.
+    expect(hasSpawnRoom(threshold, speed, params, 0)).toBe(true)
+    expect(hasSpawnRoom(threshold, speed, params, 9.5)).toBe(false)
+    expect(hasSpawnRoom(threshold + 9.5, speed, params, 9.5)).toBe(true)
+  })
+
+  it('still lets an empty lane accept a vehicle wherever it enters', () => {
+    expect(hasSpawnRoom(undefined, speed, params, 9.5)).toBe(true)
+  })
 })
 
 describe('planFixedSteps', () => {
@@ -269,6 +283,36 @@ describe('Fleet.sync', () => {
     fleet.sync([{ id: 0, alignment: new Alignment([]), className: 'rural' }])
     expect(fleet.laneCount).toBe(0)
   })
+
+  it('rebuilds a lane whose entry station moved under the same id', () => {
+    // A road whose start becomes a junction — a second and third road drawn
+    // onto its end — needs its traffic entering further along than it did. The
+    // length and the class are both unchanged, so nothing else here would
+    // notice.
+    const fleet = new Fleet()
+    fleet.sync([{ ...road(0, 500, 'rural'), spawnStation: 0 }])
+    fleet.advance(20)
+    fleet.sync([{ ...road(0, 500, 'rural'), spawnStation: 9.5 }])
+    expect(fleet.laneFor(0)?.count).toBe(0)
+
+    fleet.advance(FIXED_STEP * STEPS_PER_SPAWN)
+    expect(fleet.laneFor(0)?.positionOf(0)).toBeGreaterThanOrEqual(9.5)
+  })
+
+  it('refuses to build a lane whose entry station is past its own end', () => {
+    // A stub joining a junction can be shorter than the clearance the junction
+    // demands. Admitting a vehicle beyond `length` would have it retired by
+    // `removeBeyondEnd` on the step it appeared.
+    const fleet = new Fleet()
+    fleet.sync([{ ...road(0, 8, 'rural'), spawnStation: 9.5 }])
+    expect(fleet.laneCount).toBe(0)
+
+    fleet.sync([{ ...road(0, 9.5, 'rural'), spawnStation: 9.5 }])
+    expect(fleet.laneCount).toBe(0)
+
+    fleet.sync([{ ...road(0, 9.6, 'rural'), spawnStation: 9.5 }])
+    expect(fleet.laneCount).toBe(1)
+  })
 })
 
 describe('Fleet.advance', () => {
@@ -277,6 +321,31 @@ describe('Fleet.advance', () => {
     fleet.sync([road(0, 500, 'rural')])
     fleet.advance(FIXED_STEP)
     expect(fleet.vehicleCount).toBe(1)
+  })
+
+  it('puts it on at the road’s own entry station, not at zero', () => {
+    // The whole point of `spawnStation`: the demo's legs all start inside a
+    // junction, and a vehicle at station 0 there is a vehicle in the middle of
+    // the intersection. It enters at the station the road was given and drives
+    // on from there.
+    const fleet = new Fleet()
+    fleet.sync([{ ...road(0, 500, 'rural'), spawnStation: 9.5 }])
+    fleet.advance(FIXED_STEP)
+    expect(fleet.laneFor(0)!.count).toBe(1)
+    expect(fleet.laneFor(0)!.positionOf(0)).toBeCloseTo(9.5, 9)
+  })
+
+  it('never puts a vehicle behind the entry station, however long it runs', () => {
+    // Including under the spawn gate: a held spawn must not fall back to 0.
+    const fleet = new Fleet()
+    fleet.sync([{ ...road(0, 60, 'rural'), spawnStation: 9.5 }])
+    for (let n = 0; n < 2000; n++) {
+      fleet.advance(FIXED_STEP)
+      const lane = fleet.laneFor(0)!
+      for (let i = 0; i < lane.count; i++) {
+        expect(lane.positionOf(i)).toBeGreaterThanOrEqual(9.5)
+      }
+    }
   })
 
   it('does nothing at all below one step of accumulated time', () => {
