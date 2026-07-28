@@ -99,6 +99,13 @@ import { FINE_POINTER_SNAP_RADIUS_PX, clampedSnapRadiusInWorld } from '../tool/s
 import { resolveSnap, type SnapTarget } from '../tool/snap'
 import { SelectTool, type SplitOutcome } from '../tool/selectTool'
 import {
+  actionForKey,
+  modeLabel,
+  type SceneAction,
+  type ToolMode,
+} from '../tool/sceneActions'
+import { createControlBar } from '../render/controlBar'
+import {
   describePolylineRejection,
   describeSplitOutcome,
   describeUpgradeObstacles,
@@ -1285,10 +1292,6 @@ const disposeMesh = (mesh: THREE.Mesh): void => {
   }
 }
 
-/** The two things a player can be doing. Tab switches between them; see
- * `switchToolMode`. */
-type ToolMode = 'draw' | 'select'
-
 export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   // --- Message line --------------------------------------------------------
   //
@@ -1308,8 +1311,6 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   messageEl.style.pointerEvents = 'none'
   messageEl.style.whiteSpace = 'pre'
   messageHost.appendChild(messageEl)
-
-  const modeLabel = (toolMode: ToolMode): string => (toolMode === 'draw' ? 'Draw' : 'Select')
 
   /**
    * Set the message line's text, always prefixed with the current mode so the
@@ -1583,11 +1584,43 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     // label (see its docstring) — prefixing "Draw — " here too would
     // duplicate it, so this names only the class and radius.
     setMessage(`${ROAD_CLASS_ORDER[wrapped]!} (radius ${tool.cornerRadius.toFixed(0)}m)`, 'info')
+    // The message line says which class was just armed and is then replaced
+    // by the next thing that happens; the bar keeps showing it. That is the
+    // whole difference between a state a player can read and one they had to
+    // have been watching for.
+    syncControlBar()
   }
 
   /** Which of the two modes the player is currently in. Defaults to draw so
    * the scene opens exactly as it always has. */
   let toolMode: ToolMode = 'draw'
+
+  // --- On-screen controls ---------------------------------------------------
+  //
+  // A phone has no keyboard, so everything that was keyboard-only — the four
+  // road classes, the mode switch, build, undo and cancel — needs a button
+  // too. The bar is built from the same `SCENE_BINDINGS` table `onKeyDown`
+  // looks keys up in, and hands back the same `SceneAction` names, which
+  // `runAction` below turns into the same calls. There is no second
+  // implementation of anything on it; see `tool/sceneActions.ts`.
+  //
+  // `runAction` is defined further down (it needs `attemptCommit` and the
+  // select-mode handlers), so the callback defers to it rather than being it.
+  // That is safe because a click cannot arrive until this function has
+  // finished setting up.
+  const controlBar = createControlBar(
+    messageHost,
+    { mode: toolMode, drawClassIndex },
+    (action) => runAction(action),
+  )
+
+  /** Push the scene's current mode and armed class onto the bar. Called
+   * wherever either changes — the bar keeps no state of its own, precisely so
+   * it cannot disagree with these two variables. */
+  const syncControlBar = (): void => {
+    controlBar.setState({ mode: toolMode, drawClassIndex })
+  }
+
   // Not the bare mode label the scene used to open with: there are no roads on
   // screen now, so the opening frame has to say how to make one. See
   // `describeStartingHint` — it is replaced by the first thing that happens.
@@ -2169,6 +2202,11 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     }
     toolMode = next
     setMessage('')
+    // The bar swaps to the new mode's own controls, and its mode button
+    // relabels. Both matter on a phone, where the message line's mode prefix
+    // is the only other place the mode appears and is gone as soon as
+    // anything else is said.
+    syncControlBar()
   }
 
   const handleDeleteSelected = (): void => {
@@ -2229,77 +2267,86 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     }
   }
 
-  const onKeyDown = (event: KeyboardEvent): void => {
-    if (event.key === 'Tab') {
-      // The browser's own default would move focus off the canvas.
-      event.preventDefault()
-      switchToolMode(toolMode === 'draw' ? 'select' : 'draw')
-      return
-    }
-
-    // Every other key is mode-specific. Draw mode already used Backspace for
-    // "undo the last point"; select mode uses the same key for "delete the
-    // selected road". Branching on mode up front, rather than trying to fold
-    // both into one switch, is what keeps a key from firing in the mode it
-    // does not belong to.
-    if (toolMode === 'draw') {
-      switch (event.key) {
-        case 'Enter':
-          event.preventDefault()
-          cancelPendingClick()
-          attemptCommit()
-          break
-        case 'Escape':
-          event.preventDefault()
-          cancelPendingClick()
-          tool.cancel()
-          break
-        case 'Backspace':
-          event.preventDefault()
-          cancelPendingClick()
-          tool.undoLastPoint()
-          break
-        case '1':
-        case '2':
-        case '3':
-        case '4':
-          event.preventDefault()
-          cancelPendingClick()
-          setDrawClass(Number(event.key) - 1)
-          break
-        default:
-          break
-      }
-      return
-    }
-
-    switch (event.key) {
-      case 'Escape':
-        event.preventDefault()
+  /**
+   * Do one named action. THE dispatcher — the only place any of these are
+   * spelled out.
+   *
+   * Both input paths end here: `onKeyDown` looks a key up in
+   * `tool/sceneActions.ts` and calls this with what it finds, and every button
+   * on the control bar calls it with the action that button names. That is
+   * what makes "the button does exactly what the key does" a structural fact
+   * rather than a thing two implementations happen to agree on today.
+   *
+   * The body is a transcription of the `switch` statements that used to live
+   * in `onKeyDown`, `cancelPendingClick()` calls included and in the same
+   * places. Those calls are not incidental: draw mode's Enter/Escape/
+   * Backspace/class keys each cancelled the pending single-click timer so a
+   * click the player has already moved on from cannot land 300ms later as a
+   * phantom point (see `cancelPendingClick`), and select mode's actions never
+   * did, because select mode has no pending click to cancel. `toggleMode`
+   * does not call it either, because `switchToolMode` already does when it is
+   * draw mode being left.
+   *
+   * Never called with an action the current mode does not offer: `onKeyDown`
+   * asks `actionForKey` for this mode, and the bar shows only
+   * `controlsForMode(toolMode)`. Both read the same table.
+   */
+  const runAction = (action: SceneAction): void => {
+    switch (action.kind) {
+      case 'toggleMode':
+        switchToolMode(toolMode === 'draw' ? 'select' : 'draw')
+        return
+      case 'commit':
+        cancelPendingClick()
+        attemptCommit()
+        return
+      case 'cancelDrawing':
+        cancelPendingClick()
+        tool.cancel()
+        return
+      case 'undoLastPoint':
+        cancelPendingClick()
+        tool.undoLastPoint()
+        return
+      case 'setDrawClass':
+        cancelPendingClick()
+        setDrawClass(action.index)
+        return
+      case 'clearSelection':
         selectTool.clear()
         setMessage('')
-        break
-      case 'Delete':
-      case 'Backspace':
-        event.preventDefault()
+        return
+      case 'deleteSelected':
         handleDeleteSelected()
-        break
-      case 's':
-      case 'S':
-        event.preventDefault()
+        return
+      case 'splitSelected':
         handleSplitSelected()
-        break
-      case ']':
-        event.preventDefault()
-        handleReclassifySelected(1)
-        break
-      case '[':
-        event.preventDefault()
-        handleReclassifySelected(-1)
-        break
-      default:
-        break
+        return
+      case 'reclassifySelected':
+        handleReclassifySelected(action.direction)
+        return
     }
+  }
+
+  /**
+   * Turn a keypress into an action and run it.
+   *
+   * The mode branching and the per-mode key lists this used to hold now live
+   * in `tool/sceneActions.ts`, where they can be tested — this file has no
+   * unit tests, and the key map is exactly the part of it a regression would
+   * hide in. `sceneActions.test.ts` asserts every key this handler used to
+   * accept, in both modes, against the behaviour it had before the move.
+   *
+   * `preventDefault()` if and only if an action was found, which reproduces
+   * the old handler exactly: it called `preventDefault()` inside every `case`
+   * and did nothing in its `default`. So `[` while drawing, or Enter while
+   * selecting, still reach the browser untouched.
+   */
+  const onKeyDown = (event: KeyboardEvent): void => {
+    const action = actionForKey(event.key, toolMode)
+    if (action === undefined) return
+    event.preventDefault()
+    runAction(action)
   }
 
   canvas.addEventListener('pointerdown', onPointerDown)
@@ -2589,5 +2636,8 @@ void main() {
 
     renderer.dispose()
     messageEl.remove()
+    // Same reason as the line above: both overlays were appended to a host
+    // this function does not own, so both have to be taken back off it.
+    controlBar.dispose()
   }
 }
