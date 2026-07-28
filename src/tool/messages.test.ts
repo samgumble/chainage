@@ -312,10 +312,10 @@ describe('describeShallowCrossings', () => {
 /**
  * The line the game opens on.
  *
- * A blank canvas with nothing said on it is unusable: the scene ships no roads
- * now, so the opening frame is the only chance to say that clicking places a
- * point, that a double-click or Enter commits, and that road class exists at
- * all. What is asserted here is not the wording but the three facts the
+ * Nothing on screen says that clicking places a point, that a double-click or
+ * Enter commits, that road class exists at all, or that the one road already
+ * on the map can be joined onto. The opening frame is the only chance to say
+ * any of it. What is asserted here is not the wording but the four facts the
  * wording has to carry, plus the one thing that could silently go stale — the
  * key numbers, which are `ROAD_CLASS_ORDER` indices plus one.
  */
@@ -341,6 +341,16 @@ describe('describeStartingHint', () => {
     })
     // Every class, and no invented fifth key.
     expect(message).not.toContain(`${ROAD_CLASS_ORDER.length + 1} `)
+  })
+
+  it('says that the road already on the map can be joined', () => {
+    // The game no longer opens on bare ground: there is one road across the
+    // valley, it is the only thing in the world to build onto, and nothing on
+    // screen says that finishing a road on it splits it into a junction. That
+    // behaviour is asserted in `openingRoad.test.ts`, so this sentence is a
+    // claim the suite actually stands behind.
+    expect(hint()).toMatch(/finish on the existing road/i)
+    expect(hint()).toMatch(/join/i)
   })
 
   it('names the class to start in', () => {

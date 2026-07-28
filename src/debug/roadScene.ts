@@ -33,7 +33,8 @@ import { roadsWithTrafficEntry, type RoadWithEntry } from '../mesh/junctionClear
 import { VEHICLE_LENGTH } from '../traffic/lane'
 import { terrainGeometry } from '../render/terrainMesh'
 import { CameraRig, type Vec3 as RigVec3 } from '../render/cameraRig'
-import { terrainBounds, terrainFocus } from '../render/cameraFraming'
+import { terrainBounds, type Framing } from '../render/cameraFraming'
+import { buildOpeningNetwork, openingView } from './openingRoad'
 import { sunAt } from '../render/sunlight'
 import { surfaceFor } from '../render/materials'
 import { TILT_SHIFT_FRAGMENT_SHADER, createTiltShiftUniforms } from '../render/tiltShift'
@@ -201,35 +202,31 @@ const EXCAVATION_MARGIN = 5
 const EXCAVATION_ZFIGHT_MARGIN = 0.05
 
 /**
- * How far back the camera starts, metres.
+ * The camera's vertical field of view, degrees.
  *
- * Close enough that the junction — three formation widths meeting at one
- * point — fills a useful part of the screen, rather than the old ~1565m that
- * read every road as a hairline across a map (Step 6).
- *
- * Module scope, and exported, because it is not only a camera number: it is
- * the width of ground the player can actually see to draw a road in, and
- * `DEFAULT_DRAW_CLASS` is chosen against it. A test that pinned the default
- * class without being able to see this would be pinning a preference rather
- * than the reason for it.
+ * Exported and used twice — the `PerspectiveCamera` is built with it, and
+ * `openingView` needs it to work out how far back to stand — so the framing
+ * arithmetic and the projection it is framing for cannot disagree.
  */
-export const RIG_INITIAL_DISTANCE = 300
+export const CAMERA_VERTICAL_FOV = 45
 
 /**
  * The road class the draw tool starts in.
  *
  * Gravel, because its ~43m minimum corner radius is the only one that fits
- * inside the `RIG_INITIAL_DISTANCE` metres of ground the camera frames. A
- * corner needs its radius' worth of straight on each side of it, so the
- * shortest road with a bend in it is twice the corner radius: 87m for gravel,
- * but 504m for rural, 671m for arterial and 1121m for highway. Defaulting to
- * any of those three means the player's very first road — drawn, reasonably,
- * inside the part of the world they can see — is REFUSED, with a message
- * about curve overlap, before they have any idea that road class is a thing
- * they can change.
+ * inside the ground the opening camera frames (see `openingView`, which puts
+ * it 427m back). A corner needs its radius' worth of straight on each side of
+ * it, so the shortest road with a bend in it is twice the corner radius: 87m
+ * for gravel, but 504m for rural, 671m for arterial and 1121m for highway.
+ * Defaulting to any of those three means the player's very first road — drawn,
+ * reasonably, inside the part of the world they can see — is REFUSED, with a
+ * message about curve overlap, before they have any idea that road class is a
+ * thing they can change.
  *
  * Faster classes are drawn zoomed out, which is honest: a 252m-radius rural
- * road genuinely is a larger object than a farm track.
+ * road genuinely is a larger object than a farm track. The road the game opens
+ * on IS rural, and is not a counter-example: it is built, not drawn, and a
+ * built road has no corner needing to fit anywhere. See `OPENING_ROAD_CLASS`.
  */
 export const DEFAULT_DRAW_CLASS: RoadClassName = 'gravel'
 
@@ -406,6 +403,18 @@ export type SceneContent = {
   /** Natural ground plus every corridor's cut and fill. What gets drawn. */
   readonly editLayer: TerrainEditLayer
   readonly built: NetworkMesh
+  /**
+   * Where each road is carried on a structure rather than on earth.
+   *
+   * Passed straight out of `solveNetwork`, which already derives it once for
+   * the earthworks and the mesh build to share. Carried on `SceneContent` as
+   * well because two more callers need the same answer and neither can be
+   * allowed to derive its own: `openingView`, which aims the opening camera at
+   * the tallest deck in the scene, and the tests that assert the shipped road
+   * actually has a bridge on it. Three independent derivations of a road's
+   * spans is the exact defect `networkStructureSpans` exists to have stopped.
+   */
+  readonly spans: ReadonlyMap<RoadId, readonly StructureSpan[]>
   /**
    * Roads in the network with no feasible vertical alignment, keyed to the
    * station along the alignment where the grade solve ran out of room.
@@ -945,32 +954,38 @@ export const buildTerrain = (): Heightmap =>
   })
 
 /**
- * Terrain, and nothing built on it yet.
+ * The scene the game opens on: the terrain, and one road across the valley.
  *
- * The game opens as a blank canvas: real ground, an EMPTY `RoadNetwork`, and
- * every road in the world drawn by the player. It used to open on a fixed
- * three-arm T junction, which was doing two unrelated jobs at once — it was
- * the shipped starting state AND it was the fixture nearly every scene-level
- * test measured against. Those are now separate things: the arms live in
- * `demoNetwork.fixture.ts`, which tests build for themselves, and this
- * function ships nothing but the ground.
+ * It opened on a fixed three-arm T junction once, which was doing two
+ * unrelated jobs at once — the shipped starting state AND the fixture nearly
+ * every scene-level test measured against. Those are now separate: the arms
+ * live in `demoNetwork.fixture.ts`, which tests build for themselves.
+ *
+ * Then it opened on nothing at all, which was worse. Bare terrain reads as a
+ * loading screen: a green slope with no road, no scale and nothing built says
+ * nothing about what the game is. What ships now is the smallest thing that
+ * does — one existing road, carried over the valley on a viaduct, with traffic
+ * on it. See `openingRoad.ts` for where it goes and why.
+ *
+ * The layout is imported rather than written here for the same reason
+ * `terrainFocus` is: `roadScene.ts` has no unit tests, and every number in
+ * that road was measured against this terrain.
  *
  * Still routed through `solveNetwork` rather than short-circuited to a
- * hand-written empty `SceneContent`. An empty network is a state the game had
- * never once been in, and the way to find out whether the grade solve, the
- * excavation and the mesh build survive it is to run them, not to arrange for
- * them not to run. `roadScene.test.ts` pins the empty answer they give.
+ * hand-written `SceneContent`, and it must stay that way — the road grades,
+ * excavates and meshes through exactly the path a player's own road takes, so
+ * there is no second way for a road to come into existence.
  */
 export const buildSceneContent = (): SceneContent => {
   const terrain = buildTerrain()
-  const network = new RoadNetwork()
+  const network = buildOpeningNetwork()
 
   const {
-    designs, editLayer, built,
+    designs, editLayer, built, spans,
     infeasibleRoads, infeasibleCrossings, shallowCrossings, unsupportedFill,
   } = solveNetwork(terrain, network)
   return {
-    terrain, network, designs, editLayer, built,
+    terrain, network, designs, editLayer, built, spans,
     infeasibleRoads, infeasibleCrossings, shallowCrossings, unsupportedFill,
   }
 }
@@ -1345,7 +1360,7 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   // different ways of saying "distance" competing with each other rather than
   // one clear one.
 
-  const camera = new THREE.PerspectiveCamera(45, 1, 1, 6000)
+  const camera = new THREE.PerspectiveCamera(CAMERA_VERTICAL_FOV, 1, 1, 6000)
 
   /** Project convention `(x, y, z)`, `z` up, to three.js's `(x, z, -y)`. Must
    * stay the exact inverse of `threeToProject` below. Takes the camera rig's
@@ -1591,11 +1606,11 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   // `sync` is called again from `rebuildNetworkMeshes`, so a road committed,
   // split or deleted takes its traffic with it.
   //
-  // `drivableRoads` is what keeps cars out of the junction. All three demo legs
-  // START at it (see `buildSceneContent`), so a lane admitting traffic at
-  // station 0 would put every car in the scene inside the intersection on top
-  // of the other two legs'; that function reads the junction's own solved plate
-  // and says how far along each leg is clear of it.
+  // `drivableRoads` is what keeps cars out of a junction. The road the game
+  // opens on has none, so it admits traffic at station 0; the moment a player
+  // builds one, a lane still admitting at station 0 would put every car on a
+  // leg inside the intersection on top of the other legs'. That function reads
+  // the junction's own solved plate and says how far along each leg is clear.
   const traffic = new TrafficView()
   scene.add(traffic.mesh)
   traffic.sync(drivableRoads(network), designs)
@@ -1670,14 +1685,13 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
 
   // --- Camera rig ---------------------------------------------------------
   //
-  // The middle of the terrain, standing on the ground there — see
-  // `terrainFocus`. It used to be `JUNCTION`, the point the demo network's
-  // three arms were built around; the scene now opens with no roads at all,
-  // so there is no junction to aim at and a hardcoded coordinate would frame
-  // a spot for a reason that no longer exists.
-  const rigTarget: RigVec3 = terrainFocus(terrain)
+  // Aimed at the middle of the tallest bridge deck in the scene, standing back
+  // far enough for the valley under it to come too — see `openingView`, which
+  // owns every number in that sentence and is tested where this file is not.
+  // Falls back to the middle of the terrain when nothing is built.
+  const opening: Framing = openingView(content, CAMERA_VERTICAL_FOV)
 
-  const rig = new CameraRig(rigTarget, RIG_INITIAL_DISTANCE)
+  const rig = new CameraRig(opening.target, opening.distance)
   // Lower than `CameraRig`'s own default elevation (`Math.PI / 5`, 36°): a
   // diorama is looked across at a raised, comfortable angle, not down at from
   // near-plan.
