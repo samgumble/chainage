@@ -2,12 +2,36 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- `viewport-fit=cover` is what puts the page UNDER a notch and a home
+         indicator rather than inside a letterboxed safe rectangle — without
+         it, `env(safe-area-inset-*)` reports 0 on every device and the insets
+         the message line and the control bar apply would silently do nothing.
+         Taking the whole screen is the point (the canvas is the page), so the
+         insets, not the browser, are what keep the UI clear of the hardware. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Chainage</title>
     <style>
       html, body { margin: 0; height: 100%; background: #14181d; color: #e8e4dc;
         font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; }
-      #app { position: fixed; inset: 0; }
+      /* The canvas IS the page: there is nothing below the fold to reach, so
+         a scroll can only ever be an accident — a drag that was meant to pan
+         the camera dragging the document instead, or a rubber-band bounce
+         revealing the background behind it. `overflow: hidden` stops the
+         first, `overscroll-behavior: none` the second (and the pull-to-refresh
+         a downward drag from the top of the screen otherwise triggers, which
+         would reload the game mid-road). Both are no-ops on desktop, where
+         `#app` being fixed means the document never had anything to scroll. */
+      html, body { overflow: hidden; overscroll-behavior: none; }
+      /* `100dvh`, not `100vh`. On a mobile browser `100vh` is the LARGE
+         viewport — the height the page would have if the URL bar were hidden —
+         so a canvas sized to it extends behind the URL bar while the bar is
+         showing, and the bottom of the scene (where the control bar sits) is
+         off-screen until the player scrolls, which `overflow: hidden` above
+         has just forbidden. `100dvh` tracks the height actually visible right
+         now; the scene's ResizeObserver picks up each change as the bar hides
+         and shows. `100vh` first as the fallback for anything without `dvh`,
+         where the two are identical anyway. */
+      #app { position: fixed; top: 0; left: 0; width: 100%; height: 100vh; height: 100dvh; }
     </style>
   </head>
   <body>
