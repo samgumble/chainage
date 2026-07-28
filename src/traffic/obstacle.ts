@@ -45,6 +45,32 @@ export type StopLineApproach = {
  * measured from the same reference point, so a vehicle already past the line
  * (`d < 0`) always proceeds — including one at rest, for which the threshold
  * is zero.
+ *
+ * ## This cannot currently be composed with `Lane.setObstacle`
+ *
+ * This answers a PER-VEHICLE question — one speed, one distance, one verdict.
+ * `Lane.setObstacle` sets ONE stop line for the WHOLE lane, and every vehicle
+ * short of it brakes for it. The two do not meet, and there is no third
+ * option: a lane cannot be told "stop, except for the car already committed".
+ *
+ * Measured on a lane with a line at station 1000, a leader 72m short of it
+ * (this rule says proceed) and a follower 192m short (this rule says stop),
+ * both at 20 m/s with a comfortable deceleration of 2.0:
+ *
+ *   setObstacle(1000)      the leader decelerates at 5.09 m/s² — 2.5x
+ *                          comfortable, and precisely the emergency stop the
+ *                          paragraph above says this function exists to
+ *                          prevent.
+ *   setObstacle(undefined) the follower crosses the line at full speed, having
+ *                          been told nothing at all.
+ *
+ * So the honest state of things is that this function is correct and has no
+ * caller that can act on its answer — `setObstacle` has no caller either.
+ * Closing the gap needs a per-vehicle stopping mechanism inside `Lane`: a
+ * phantom leader admitted only for the vehicles this rule says should stop,
+ * rather than one parked in front of everybody. That is a signal-system change
+ * and is deliberately not made here. `obstacle.test.ts` pins the numbers above
+ * as characterised behaviour so this note cannot quietly stop being true.
  */
 export const canClearBeforeStopping = (
   approach: StopLineApproach,

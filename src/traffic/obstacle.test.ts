@@ -292,3 +292,112 @@ describe('the dilemma zone', () => {
     expect(lane.positionOf(0)).toBeCloseTo(line - p.minimumGap, 3)
   })
 })
+
+/**
+ * The two halves that do not compose, pinned as characterised behaviour.
+ *
+ * `canClearBeforeStopping` answers per vehicle; `Lane.setObstacle` acts on the
+ * whole lane. Put a leader inside the dilemma zone and a follower outside it
+ * and there is no call that is right for both — which is why `setObstacle`
+ * still has no caller anywhere in the codebase, and why this is written down
+ * rather than worked around at some call site.
+ *
+ * These tests assert the WRONG behaviour on purpose, in both directions. They
+ * are the marker for the later per-vehicle stopping work: when a signal system
+ * lands, exactly these are the expectations that have to change, and a version
+ * of them that merely said "TODO" in a comment would not.
+ */
+describe('the per-vehicle/whole-lane mismatch', () => {
+  const line = 1000
+  const v = 20
+
+  /** Inside the dilemma zone: the rule says proceed. */
+  const leaderDistance = 72
+  /** Outside it: the rule says stop. */
+  const followerDistance = 192
+
+  /** A lane with the leader and the follower on it at their desired speed. */
+  const twoVehicles = (): Lane => {
+    const lane = new Lane(20000)
+    lane.add(line - leaderDistance, v)
+    lane.add(line - followerDistance, v)
+    return lane
+  }
+
+  it('sets up one vehicle that should proceed and one that should stop', () => {
+    // The fixture is the claim. `stoppingDistance(20, p)` is 120m, so 72m is
+    // inside the zone and 192m is outside it, and no single stop line can be
+    // right for both.
+    expect(stoppingDistance(v, p)).toBeCloseTo(120, 9)
+    expect(canClearBeforeStopping({ speed: v, distance: leaderDistance }, p)).toBe(true)
+    expect(canClearBeforeStopping({ speed: v, distance: followerDistance }, p)).toBe(false)
+  })
+
+  it('emergency-brakes the vehicle the rule says should proceed', () => {
+    // WRONG, and pinned: 5.09 m/s² out of a driver whose comfortable figure is
+    // 2.0. `setObstacle` cannot exempt the one vehicle that is committed.
+    const lane = twoVehicles()
+    lane.setObstacle(line)
+
+    // Read off the model directly rather than through a step, so the number in
+    // the two docstrings is the acceleration itself, not a finite difference.
+    const phantomGap = line + VEHICLE_LENGTH - (line - leaderDistance) - VEHICLE_LENGTH
+    const leaderAcceleration = idmAcceleration(
+      { speed: v, gap: phantomGap, leaderSpeed: 0 },
+      p,
+    )
+    expect(leaderAcceleration).toBeCloseTo(-5.089, 3)
+    expect(-leaderAcceleration).toBeGreaterThan(2.5 * p.comfortableDeceleration)
+
+    // And it is not a one-frame artefact of the first step: the lane really
+    // does brake this hard.
+    expect(worstDeceleration(lane, 30)).toBeGreaterThan(2.5 * p.comfortableDeceleration)
+  })
+
+  it('lets the vehicle the rule says should stop cross the line at speed', () => {
+    // WRONG in the other direction, and the only other call available. The
+    // follower is 192m short of a line it has the room to stop at, and clearing
+    // the line is the only way to spare the leader — so the follower is never
+    // told anything.
+    const lane = twoVehicles()
+    lane.setObstacle(undefined)
+    run(lane, 30)
+
+    // Index 1 is the follower; ordering is by descending position.
+    expect(lane.count).toBe(2)
+    expect(lane.positionOf(1)).toBeGreaterThan(line)
+    expect(lane.speedOf(1)).toBeGreaterThan(v)
+  })
+
+  it('has no third call, at any position at all', () => {
+    // The completeness claim, and the reason this is a design gap rather than a
+    // tuning one. `setObstacle` takes one position or nothing, so the only
+    // escape from the two calls above would be to move the line somewhere else.
+    //
+    // Nowhere works, and the two conditions are exactly complementary:
+    //
+    // - The ONLY way a line spares the leader is to be behind it. A line ahead
+    //   of it brakes it whatever `canClearBeforeStopping` thinks; the rule's
+    //   verdict has no effect on `Lane.step`, which is the whole problem.
+    // - The follower stops only for a line at least its own stopping distance
+    //   ahead — 120m from 808, which is 928, which is precisely where the
+    //   leader is.
+    //
+    // The two sets touch and do not overlap. Sweeping at 10cm resolution over
+    // 800m of lane finds no position in both.
+    let both = 0
+    for (let at = line - 400; at <= line + 400; at += 0.1) {
+      // The phantom exists only for vehicles short of it — see `Lane.step`.
+      const leaderSpared = at < line - leaderDistance
+      const followerStopped = !canClearBeforeStopping(
+        { speed: v, distance: at - (line - followerDistance) }, p,
+      )
+      if (leaderSpared && followerStopped) both++
+    }
+    expect(both).toBe(0)
+
+    // And the touching point is not a loophole: a line exactly on the leader is
+    // a phantom inside the leader, which brakes it harder still.
+    expect(idmAcceleration({ speed: v, gap: 0, leaderSpeed: 0 }, p)).toBeLessThan(-5.089)
+  })
+})

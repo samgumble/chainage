@@ -117,6 +117,30 @@ export class Lane {
    * Clearing is likewise not a transition. The phantom stops existing and the
    * vehicle behind it simply has a further-away leader, so there is no
    * discontinuity in acceleration at the moment a light changes.
+   *
+   * ## All or nobody, which is why this has no caller yet
+   *
+   * The line applies to EVERY vehicle short of it. `canClearBeforeStopping` in
+   * `obstacle.ts` decides per vehicle whether stopping is even possible, and
+   * there is no way to act on a per-vehicle answer through this method: the two
+   * halves cannot be composed.
+   *
+   * Measured on a lane with the line at 1000, a leader 72m short of it (the
+   * dilemma-zone rule says proceed) and a follower 192m short (it says stop),
+   * both at their desired speed and a comfortable deceleration of 2.0:
+   *
+   *   setObstacle(1000)      the leader brakes at 5.09 m/s², 2.5x comfortable
+   *                          — the emergency stop `canClearBeforeStopping`
+   *                          exists to prevent.
+   *   setObstacle(undefined) the follower sails through the line at speed.
+   *
+   * There is no third call. The only lines that spare the leader are the ones
+   * behind it, and the only lines that stop the follower are at least its
+   * stopping distance ahead of it, which is exactly where the leader already
+   * is. A signal that behaves correctly needs a phantom admitted only for the
+   * vehicles that should stop — a per-vehicle stopping mechanism inside this
+   * class — which is a later plan and not something to invent at a call site.
+   * `obstacle.test.ts` pins all of the above so the mismatch stays on record.
    */
   setObstacle(position: number | undefined): void {
     if (position !== undefined && !Number.isFinite(position)) {
