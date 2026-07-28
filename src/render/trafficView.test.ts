@@ -208,6 +208,42 @@ describe('TrafficView', () => {
     run(view, 5)
     expect(() => view.dispose()).not.toThrow()
   })
+
+  it('draws no more instances than the buffer holds', () => {
+    // An `InstancedMesh`'s matrix buffer is allocated once at its declared
+    // count. Setting `mesh.count` above it does not grow the buffer — three
+    // uploads that many instances from a buffer that ends sooner, and the draw
+    // call reads past it. Every other test in this file runs well under
+    // `FLEET_CAPACITY`, so nothing else can reach the guard at all.
+    const warnings: string[] = []
+    const warn = console.warn
+    console.warn = (message: string): void => { warnings.push(message) }
+    try {
+      const view = new TrafficView(8)
+      const roads = Array.from({ length: 6 }, (_, i) => road(i, (i * Math.PI) / 6, 4000, 'rural'))
+      view.sync(roads, new Map(roads.map((r) => [r.id, level(4000, 100)])))
+      run(view, 100)
+
+      // Far more traffic than the buffer: the simulation is not capped, only
+      // the drawing is.
+      expect(view.vehicleCount).toBeGreaterThan(8)
+      expect(view.mesh.count).toBe(8)
+      expect(view.mesh.count).toBeLessThanOrEqual(view.mesh.instanceMatrix.count)
+
+      // Every drawn matrix is a real vehicle's, not a stale or zeroed slot.
+      for (const p of instancePositions(view)) {
+        expect(p.y).toBeCloseTo(100 - 1.75 * ROAD_CLASSES.rural.crossfall, 5)
+      }
+
+      // Once, not once per frame: six thousand identical console lines is its
+      // own bug.
+      expect(warnings).toHaveLength(1)
+      expect(warnings[0]).toContain('8')
+      view.dispose()
+    } finally {
+      console.warn = warn
+    }
+  })
 })
 
 const instancePositions = (view: TrafficView): THREE.Vector3[] => {

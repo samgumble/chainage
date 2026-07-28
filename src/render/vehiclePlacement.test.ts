@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { Alignment } from '../geometry/alignment'
 import { Line } from '../geometry/primitives'
 import { vec2 } from '../geometry/vec2'
-import { ROAD_CLASSES, carriagewayHalfWidth } from '../network/roadClass'
+import { ROAD_CLASSES, carriagewayHalfWidth, type RoadClass } from '../network/roadClass'
 import type { ProfilePoint } from '../terrain/groundProfile'
 import { DRIVING_SIDE, laneCentreOffset, placeVehicle } from './vehiclePlacement'
 
@@ -95,10 +95,70 @@ describe('placeVehicle', () => {
   it('sits on the crossfall, not on the crown', () => {
     const pose = placeVehicle(straight(0), level(100), rural, 120)
     expect(pose.z).toBeCloseTo(100 - 1.75 * rural.crossfall, 12)
-    // Below the crown, never above it — a vehicle floating over the seal is
-    // the failure this exists to avoid, on both sides of the road.
+    // Below the crown, never above it — a vehicle floating over the seal is the
+    // failure this exists to avoid.
     expect(pose.z).toBeLessThan(100)
-    expect(placeVehicle(straight(Math.PI), level(100), rural, 120).z).toBeLessThan(100)
+  })
+
+  /**
+   * A class whose lane centre falls on the OTHER side of the crown.
+   *
+   * `laneCentreOffset` is `DRIVING_SIDE * laneWidth * (laneCount - 1) / 2`, so
+   * replacing `laneCount` with `2 - laneCount` negates it exactly, for every
+   * class, leaving everything else the crossfall arithmetic reads untouched.
+   * That is the only way to drive `placeVehicle` with a negative offset from a
+   * test: `DRIVING_SIDE` is a module constant and cannot be flipped at runtime,
+   * and with it set to `+1` no real class produces one.
+   *
+   * The lane count itself is meaningless here and nothing asserts on it. What
+   * is being asserted is the sign of the offset the function is handed.
+   */
+  const mirrored = (rc: RoadClass): RoadClass => ({ ...rc, laneCount: 2 - rc.laneCount })
+
+  it('drops below the crown on either side of it, not only the nearside', () => {
+    // The `Math.abs` in the crossfall term. With `DRIVING_SIDE = +1` every real
+    // class's offset is non-negative, so dropping the `abs` changes nothing
+    // anyone can measure — until someone sets it to `-1` for right-hand drive,
+    // at which point every vehicle in the scene floats above the seal by twice
+    // the crossfall drop instead of sitting on it.
+    //
+    // Reversing the ROAD does not exercise this, which is what the version of
+    // this test being replaced tried: `straight(0)` and `straight(Math.PI)` are
+    // two headings, and the offset is measured FROM the heading, so both have
+    // the same +1.75m and the second assertion was the first one again.
+    for (const rc of Object.values(ROAD_CLASSES)) {
+      const nearside = laneCentreOffset(rc)
+      const offside = laneCentreOffset(mirrored(rc))
+      expect(offside).toBeCloseTo(-nearside, 12)
+
+      const left = placeVehicle(straight(0), level(100), rc, 120)
+      const right = placeVehicle(straight(0), level(100), mirrored(rc), 120)
+
+      // The two sit on opposite sides of the centreline...
+      expect(right.y).toBeCloseTo(-left.y, 12)
+      // ...at the same height, because a crown sheds both ways.
+      expect(right.z).toBeCloseTo(left.z, 12)
+      expect(right.z).toBeCloseTo(100 - Math.abs(nearside) * rc.crossfall, 12)
+      // And never above the crown. Without the `abs` this is the assertion that
+      // fails, by twice the drop.
+      expect(right.z).toBeLessThanOrEqual(100)
+    }
+  })
+
+  it('would put the offside vehicle measurably above the seal without the abs', () => {
+    // The size of the defect the `abs` prevents, so "provably dead code" and
+    // "harmless" are not confused. On a six-lane highway the offside lane centre
+    // is 9.25m from the crown: without the `abs` a vehicle there sits 23cm above
+    // the road instead of 23cm below it.
+    const highway = mirrored(ROAD_CLASSES.highway)
+    const offset = laneCentreOffset(highway)
+    const withAbs = placeVehicle(straight(0), level(100), highway, 120).z
+    const withoutAbs = 100 - offset * ROAD_CLASSES.highway.crossfall
+
+    expect(offset).toBeCloseTo(-9.25, 12)
+    expect(withAbs).toBeCloseTo(100 - 0.23125, 12)
+    expect(withoutAbs).toBeGreaterThan(100)
+    expect(withoutAbs - withAbs).toBeCloseTo(2 * 9.25 * ROAD_CLASSES.highway.crossfall, 12)
   })
 
   it('carries the alignment’s heading through unchanged', () => {
