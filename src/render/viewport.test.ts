@@ -129,11 +129,16 @@ describe('viewportMetrics', () => {
   })
 
   it('floors a fractional drawing buffer, as WebGLRenderer.setSize does', () => {
-    // 374.5 * 2 = 749; 811.5 * 3 = 2434.5 -> 2434. A render target that
-    // rounded the other way would be a pixel wider than the buffer the
+    // 374.3 * 2 = 748.6 -> 748; 811.5 * 3 = 2434.5 -> 2434. A render target
+    // that rounded the other way would be a pixel wider than the buffer the
     // renderer sizes itself to.
-    expect(viewportMetrics(374.5, 811.5, 2)?.bufferWidth).toBe(749)
-    expect(viewportMetrics(374.5, 811.5, 3)?.bufferHeight).toBe(2434)
+    //
+    // Both products have to land BETWEEN two integers for this to say
+    // anything. Written first with 374.5 x 2, which is exactly 749 either
+    // way — mutation testing found that a floor-to-ceil change passed it
+    // untouched, which is the whole reason the width factor is 374.3 now.
+    expect(viewportMetrics(374.3, 811.5, 2)?.bufferWidth).toBe(748)
+    expect(viewportMetrics(374.3, 811.5, 3)?.bufferHeight).toBe(2434)
   })
 
   it('keeps the drawing buffer at least one pixel for a sub-pixel canvas', () => {
