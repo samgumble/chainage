@@ -417,27 +417,35 @@ describe('the opening camera', () => {
     expect(view.distance).toBe(BARE_TERRAIN_DISTANCE)
   })
 
-  it('picks the tallest deck when there is more than one', () => {
+  it('picks the tallest deck, not the first one it finds', () => {
     // "First" would be an id ordering — whichever road happened to be added
     // earliest — and would re-aim the opening shot at a culvert. Height is a
     // property of the thing being looked at, so it is what decides.
+    //
+    // The fixture is built so those two answers DIFFER: a second crossing
+    // added AFTER the opening road, far enough east that the two never meet
+    // (so no overpass is forced and neither span is anything but the terrain's
+    // own doing), carrying a 23.41m span against the opening road's 21.11m.
+    // With the opening road still first by id, a "first span wins" rule aims
+    // at the wrong bridge and this fails.
     const terrain = buildTerrain()
     const network = buildOpeningNetwork()
-    // A second crossing, further west, whose own span is measurably lower.
-    network.addRoad(
-      new Alignment([new Line(vec2(1900, 1000), Math.PI / 4, 600)]), 'rural',
+    const tallerId = network.addRoad(
+      new Alignment([new Line(vec2(1900, 1000), Math.PI / 3, 600)]), 'rural',
     )
     const solved = solveNetwork(terrain, network)
 
-    const heights = [...solved.spans.values()].flatMap((list) => list.map((s) => s.maxHeight))
-    expect(heights.length).toBeGreaterThan(1)
+    expect(solved.infeasibleRoads.size).toBe(0)
+    expect(solved.shallowCrossings).toEqual([])
+    const first = solved.spans.get(network.roads[0]!.id)![0]!
+    const taller = solved.spans.get(tallerId)![0]!
+    expect(first.maxHeight).toBeCloseTo(21.1129, 4)
+    expect(taller.maxHeight).toBeCloseTo(23.4057, 4)
+    expect(tallerId).toBeGreaterThan(network.roads[0]!.id)
 
     const view = openingView({ terrain, network, ...solved }, CAMERA_VERTICAL_FOV)
-    const tallest = Math.max(...heights)
-    const chosen = [...solved.spans.entries()].find(([, list]) =>
-      list.some((s) => s.maxHeight === tallest))!
-    const mid = network.road(chosen[0]).alignment.poseAt(
-      (chosen[1][0]!.fromStation + chosen[1][0]!.toStation) / 2,
+    const mid = network.road(tallerId).alignment.poseAt(
+      (taller.fromStation + taller.toStation) / 2,
     ).position
     expect(view.target.x).toBeCloseTo(mid.x, 6)
     expect(view.target.y).toBeCloseTo(mid.y, 6)
