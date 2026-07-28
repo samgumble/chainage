@@ -95,7 +95,13 @@ import { buildNetworkMesh, type NetworkMesh } from '../mesh/networkMesh'
 import { networkStructureSpans, type StructureSpan } from '../mesh/structures/spans'
 import { DECK_DEPTH } from '../mesh/structures/bridgeMesh'
 import { DrawTool } from '../tool/drawTool'
-import { FINE_POINTER_SNAP_RADIUS_PX, clampedSnapRadiusInWorld } from '../tool/snapRadius'
+import {
+  COARSE_POINTER_SNAP_RADIUS_PX,
+  FINE_POINTER_SNAP_RADIUS_PX,
+  clampedSnapRadiusInWorld,
+} from '../tool/snapRadius'
+import { GestureRecogniser, type Gesture } from '../tool/gestures'
+import { cameraMoveForTwoFinger } from '../render/cameraGesture'
 import { resolveSnap, type SnapTarget } from '../tool/snap'
 import { SelectTool, type SplitOutcome } from '../tool/selectTool'
 import {
@@ -1775,20 +1781,35 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
    * those change: zooming the camera or resizing the window both change how
    * many world metres one screen pixel covers (see `tool/snapRadius.ts`).
    *
-   * `FINE_POINTER_SNAP_RADIUS_PX` throughout — every call site below is a
-   * mouse-or-pen interaction. There is no touch handling in this file yet
-   * (that is `mobile-controls`'s Task 4), so there is no `pointer: coarse`
-   * branch to take here either; when that wiring lands, this is the one
-   * place a coarse-pointer radius would be threaded in.
+   * `FINE_POINTER_SNAP_RADIUS_PX` by default, because every mouse-and-pen
+   * call site below wants it and passing it explicitly at each of them is how
+   * one of them quietly ends up with the other. The touch handlers pass
+   * `COARSE_POINTER_SNAP_RADIUS_PX` instead.
+   *
+   * Which one is decided PER EVENT, from `PointerEvent.pointerType`, not once
+   * from a `pointer: coarse` media query. The media query describes the
+   * device's *primary* pointer, and a laptop with a touchscreen has both: it
+   * matches `fine`, so a one-time query would hand a finger the mouse's
+   * tolerance on exactly the hardware where the two are used interchangeably.
+   * The event knows which of them is in the player's hand right now, and that
+   * is the only thing that decides how big a target has to be.
+   *
+   * Worth stating plainly: today the two constants are numerically EQUAL.
+   * `COARSE_POINTER_SNAP_RADIUS_PX` floors itself at the fine radius (a
+   * fingertip is never held to a tighter tolerance than a cursor), and the
+   * fine radius currently works out larger. So the branch below changes
+   * nothing measurable yet. It is still the right branch: it is where the
+   * difference appears the moment `SNAP_RADIUS` is tightened, which
+   * `FINE_POINTER_SNAP_RADIUS_PX`'s own docstring argues it may want to be.
    *
    * `clampedSnapRadiusInWorld`, not `snapRadiusInWorld` directly: screen-space
    * scaling is right for how snapping feels, but unbounded it is wrong for
    * what it means topologically at either end of the camera's zoom range —
    * see `tool/snapRadius.ts`'s `MIN_SNAP_RADIUS_M`/`MAX_SNAP_RADIUS_M`.
    */
-  const currentSnapRadius = (): number =>
+  const currentSnapRadius = (screenRadiusPx: number = FINE_POINTER_SNAP_RADIUS_PX): number =>
     clampedSnapRadiusInWorld(
-      FINE_POINTER_SNAP_RADIUS_PX,
+      screenRadiusPx,
       rig.distance,
       CAMERA_VERTICAL_FOV,
       Math.max(1, canvas.clientHeight),
@@ -2038,7 +2059,256 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
       : resolveSnap(network, worldPosition, snapRadius)
   }
 
+  /**
+   * Select mode's pick, and the message that goes with it.
+   *
+   * Extracted from `onPointerUp` so the touch path can reach the same two
+   * sentences rather than spelling them out a second time. Nothing about it
+   * changed in the move — this is the same call and the same strings the mouse
+   * click has always made, in the same order.
+   */
+  const pickRoadAt = (worldPosition: Vec2): void => {
+    const pickedRoadId = selectTool.select(worldPosition)
+    setMessage(pickedRoadId === undefined ? 'Nothing there to select.' : 'Selected a road.')
+  }
+
+  // --- Touch input: gestures ------------------------------------------------
+  //
+  // ## Why this is a second path rather than the same one
+  //
+  // The mouse handlers below are untouched. Every touch event is diverted into
+  // this block at the top of each of them and never reaches the code beneath,
+  // so "did the mouse change?" is answered by reading the diff rather than by
+  // reasoning about a unified state machine: no line the mouse executes was
+  // edited. That matters more than the duplication it costs, because this
+  // branch has already had to undo one unrequested change to how desktop
+  // feels, and a shared recogniser would have put every mouse click through
+  // new tap/drag arbitration to save perhaps thirty lines.
+  //
+  // A pen goes down the MOUSE path deliberately. A pen hovers — it reports
+  // position before it touches the glass — so the preview machinery below
+  // works for it exactly as it does for a cursor, which is the one thing a
+  // finger cannot do.
+  //
+  // ## There is no hover on touch, so: what does the player see, and when?
+  //
+  // Under a mouse the preview line, the snap marker and the rejection banner
+  // are all products of `hover()` running on every move, which is what lets a
+  // player see where a point will land BEFORE committing to it. A finger has
+  // no such state. Two moments therefore have to be decided rather than left
+  // to fall out of the code:
+  //
+  // 1. BEFORE THE FIRST TAP there is no pointer position at all, so: nothing.
+  //    No marker, no preview, no snap colour — only the terrain and the
+  //    starting hint, which already says what to tap. The alternative would be
+  //    to invent a position (the centre of the screen is the usual choice) and
+  //    put a marker on it; that marker would be a claim about where a tap
+  //    would land that the player never made, and the first tap would move it
+  //    somewhere else. Desktop behaves identically before the first mouse
+  //    move, so this is not a touch-only compromise.
+  //
+  // 2. BETWEEN TAPS, with a road part-drawn and no finger on the glass, the
+  //    marker STAYS where the last finger left it, in the colour of whatever
+  //    that point snapped to, and the preview line shows the road so far
+  //    through the placed points. What is deliberately NOT shown is a
+  //    provisional segment reaching out to a finger that is not there:
+  //    `place()` clears the tool's own hovered point, so the line stops at the
+  //    last point actually placed. The marker is the difference between a tool
+  //    that answered and one that looks asleep — after a first tap there are
+  //    fewer than two points and so no preview line at all, and without the
+  //    marker the screen would show nothing whatsoever in reply to the tap.
+  //    Again this is what desktop already does between a click and the next
+  //    mouse move; touch simply stays in that state for longer.
+  //
+  // The live preview the mouse gets before committing is not lost, it is moved
+  // to the drag: press, drag, and the provisional point follows the finger
+  // with its snap marker and any rejection message showing, and only the LIFT
+  // places it. A tap is the fast path for a player who already knows where the
+  // point goes; a drag is the aimed one.
+  const gestures = new GestureRecogniser()
+
+  /** Whether this event is a finger. Read per event rather than once from a
+   * `pointer: coarse` media query — see `currentSnapRadius` for why a hybrid
+   * device makes the query the wrong question. */
+  const isTouch = (event: PointerEvent): boolean => event.pointerType === 'touch'
+
+  /**
+   * The touch snap radius.
+   *
+   * No `suppressSnap` counterpart anywhere in this block, and that is a
+   * decision rather than an omission: suppressing snap is a held-modifier
+   * gesture (Alt, see `suppressSnapModifier`) and a phone has no modifier to
+   * hold. A finger therefore always snaps. If that ever needs an escape hatch
+   * it wants a control on the bar, not a second meaning for some touch.
+   */
+  const touchSnapRadius = (): number => currentSnapRadius(COARSE_POINTER_SNAP_RADIUS_PX)
+
+  /**
+   * Move the provisional point to where the finger is, and light the marker.
+   *
+   * The touch equivalent of `updateHover`, and it does the same three things
+   * for the same reasons: the tool gets the provisional point (so the preview
+   * line and any rejection follow the finger live), `hoverSnap` gets the same
+   * answer recomputed from the same pure function (so the marker can show its
+   * kind), and `lastPointerWorldPosition` gets the raw position — which on a
+   * phone is the ONLY way select mode's Split button ever gets a position to
+   * split at, there being no mouse move to have recorded one.
+   */
+  const updateTouchHover = (clientX: number, clientY: number): void => {
+    const worldPosition = worldPositionAt(clientX, clientY)
+    lastPointerWorldPosition = worldPosition
+    if (!worldPosition) {
+      tool.clearHover()
+      hoverSnap = undefined
+      return
+    }
+    const snapRadius = touchSnapRadius()
+    tool.hover(worldPosition, false, snapRadius)
+    hoverSnap = resolveSnap(network, worldPosition, snapRadius)
+  }
+
+  /** Withdraw the provisional point without touching the placed ones, and put
+   * the marker out. What a `dragCancel` means: the drag is off, the road is
+   * not. */
+  const discardPendingPoint = (): void => {
+    tool.clearHover()
+    hoverSnap = undefined
+  }
+
+  /**
+   * What a tap, or the lift at the end of a drag, does at a screen position:
+   * place a point in draw mode, pick a road in select mode.
+   *
+   * The mode split is the same one `onPointerUp` makes for a mouse click, and
+   * for the same reason — a click and a tap are the same intent. What it does
+   * NOT reproduce is the double-click timer: `GestureRecogniser` has already
+   * resolved tap from double tap by the time this is called, so there is
+   * nothing to defer and no 300ms of latency to add to every road point.
+   */
+  const placeOrPickAtTouch = (clientX: number, clientY: number): void => {
+    const worldPosition = worldPositionAt(clientX, clientY)
+    lastPointerWorldPosition = worldPosition
+    // A finger on the sky. Nothing to place, and the pending point goes with
+    // it rather than being left pointing at wherever the finger was last over
+    // ground.
+    if (!worldPosition) {
+      discardPendingPoint()
+      return
+    }
+
+    if (toolMode === 'select') {
+      discardPendingPoint()
+      pickRoadAt(worldPosition)
+      return
+    }
+
+    const snapRadius = touchSnapRadius()
+    tool.place(worldPosition, false, snapRadius)
+    // `place` clears the tool's own provisional point, so the preview line now
+    // ends here. The marker stays, on the point just placed and in the colour
+    // of what it snapped to — see decision 2 above.
+    hoverSnap = resolveSnap(network, worldPosition, snapRadius)
+  }
+
+  /** Hand one two-finger sample to the rig. No arithmetic here on purpose:
+   * every sign and unit conversion is in `render/cameraGesture.ts`, where it
+   * is tested. */
+  const applyTwoFinger = (sample: Extract<Gesture, { kind: 'twoFinger' }>): void => {
+    const move = cameraMoveForTwoFinger(sample, {
+      distance: rig.distance,
+      verticalFovDegrees: CAMERA_VERTICAL_FOV,
+      viewportHeightPx: Math.max(1, canvas.clientHeight),
+    })
+    rig.pan(move.pan.dRight, move.pan.dForward)
+    rig.zoom(move.zoomFactor)
+    rig.orbit(move.dAzimuth, 0)
+  }
+
+  const handleGesture = (gesture: Gesture): void => {
+    switch (gesture.kind) {
+      case 'tap':
+        placeOrPickAtTouch(gesture.x, gesture.y)
+        return
+
+      case 'doubleTap':
+        // Draw mode: build it. Through `runAction`, so the double tap, the
+        // Build button and Enter are one implementation and not three. The
+        // point under the second tap is NOT placed — the recogniser already
+        // reported the first tap of the pair, which placed it (see
+        // `DOUBLE_TAP_WINDOW`, which explains why reporting it immediately is
+        // worth more than the 300ms it would cost to withhold it).
+        if (toolMode === 'draw') {
+          runAction({ kind: 'commit' })
+          return
+        }
+        // Select mode has nothing to commit, and a second click there has
+        // always been an ordinary second pick. Same here.
+        placeOrPickAtTouch(gesture.x, gesture.y)
+        return
+
+      case 'dragStart':
+      case 'dragMove':
+        // The live preview, and the whole reason a drag exists as well as a
+        // tap: the marker, the snap colour and any rejection message are all
+        // on screen while the finger is still down and can still be moved.
+        updateTouchHover(gesture.x, gesture.y)
+        return
+
+      case 'dragEnd':
+        placeOrPickAtTouch(gesture.x, gesture.y)
+        return
+
+      case 'dragCancel':
+        // The drag was taken away — a second finger arriving for the camera,
+        // or the browser claiming the pointer. Never a placement.
+        discardPendingPoint()
+        return
+
+      case 'twoFingerStart':
+        // Belt and braces. A drag interrupted by a second finger already
+        // produced a `dragCancel` immediately before this, so there is
+        // normally nothing left to discard; doing it here as well makes "a
+        // camera gesture never leaves a point half-placed" a property of this
+        // handler rather than of an ordering in another module.
+        discardPendingPoint()
+        return
+
+      case 'twoFinger':
+        applyTwoFinger(gesture)
+        return
+
+      case 'twoFingerEnd':
+        return
+    }
+  }
+
+  const handleGestures = (produced: readonly Gesture[]): void => {
+    for (const gesture of produced) handleGesture(gesture)
+  }
+
+  /**
+   * Release the capture taken in `onPointerDown`.
+   *
+   * Browsers release implicit capture on `pointerup`/`pointercancel` by
+   * themselves, but this one was taken explicitly and is released explicitly —
+   * the same shape `endDrag` already uses for the mouse, and the same reason:
+   * a capture left held is invisible until the next gesture behaves oddly.
+   */
+  const releaseTouchCapture = (pointerId: number): void => {
+    if (canvas.hasPointerCapture(pointerId)) canvas.releasePointerCapture(pointerId)
+  }
+
   const onPointerDown = (event: PointerEvent): void => {
+    if (isTouch(event)) {
+      // Captured immediately. Without it a finger that slides off the edge of
+      // the canvas mid-drag stops delivering events entirely, so the drag
+      // never ends: no `dragEnd`, no `dragCancel`, and a provisional point
+      // frozen on screen until the player taps something else.
+      canvas.setPointerCapture(event.pointerId)
+      handleGestures(gestures.down(event.pointerId, event.clientX, event.clientY, event.timeStamp))
+      return
+    }
+
     if (drag) return
 
     let mode: DragMode
@@ -2061,6 +2331,11 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   }
 
   const onPointerMove = (event: PointerEvent): void => {
+    if (isTouch(event)) {
+      handleGestures(gestures.move(event.pointerId, event.clientX, event.clientY, event.timeStamp))
+      return
+    }
+
     if (drag && drag.pointerId === event.pointerId) {
       const dx = event.clientX - drag.lastX
       const dy = event.clientY - drag.lastY
@@ -2118,6 +2393,12 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   }
 
   const onPointerUp = (event: PointerEvent): void => {
+    if (isTouch(event)) {
+      releaseTouchCapture(event.pointerId)
+      handleGestures(gestures.up(event.pointerId, event.timeStamp))
+      return
+    }
+
     // A mouse reuses one pointerId across every button, so a right-button-up
     // while the left button still holds this drag must not be mistaken for
     // ending it — only the button that started the drag can end it. Leave
@@ -2135,8 +2416,7 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     // gesture (drag-vs-click already resolved above) and pointer-to-ground
     // machinery draw mode's placement uses.
     if (toolMode === 'select') {
-      const pickedRoadId = selectTool.select(worldPosition)
-      setMessage(pickedRoadId === undefined ? 'Nothing there to select.' : 'Selected a road.')
+      pickRoadAt(worldPosition)
       return
     }
 
@@ -2162,7 +2442,22 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     }
   }
 
+  /**
+   * The browser took the pointer away.
+   *
+   * Routine on mobile rather than exceptional — a system edge gesture, a
+   * notification shade, a call arriving — which is why the touch branch does
+   * real work here instead of treating it as an error path. `cancel`, not
+   * `up`: whatever was in progress is abandoned, so a stolen pointer can
+   * never be mistaken for a player finishing a road point.
+   */
   const onPointerCancel = (event: PointerEvent): void => {
+    if (isTouch(event)) {
+      releaseTouchCapture(event.pointerId)
+      handleGestures(gestures.cancel(event.pointerId, event.timeStamp))
+      return
+    }
+
     endDrag(event)
   }
 
