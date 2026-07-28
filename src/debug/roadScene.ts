@@ -29,6 +29,9 @@ import {
   type RoadClassName,
 } from '../network/roadClass'
 import { toBufferGeometry } from '../render/meshAdapter'
+import { TrafficView } from '../render/trafficView'
+import { roadsWithTrafficEntry, type RoadWithEntry } from '../mesh/junctionClearance'
+import { VEHICLE_LENGTH } from '../traffic/lane'
 import { terrainGeometry } from '../render/terrainMesh'
 import { CameraRig, type Vec3 as RigVec3 } from '../render/cameraRig'
 import { sunAt } from '../render/sunlight'
@@ -949,6 +952,14 @@ export const buildSceneContent = (): SceneContent => {
   // leg at the junction means every leg's own elevation there is natural
   // ground, so the three legs agree and the junction sits flush without
   // needing `elevationMismatches` to paper over a drifted arrival station.
+  //
+  // Reversing them to arrive at the junction instead has been tried and
+  // reverted: it moved the legs' disagreement at the node from 0.457m to
+  // 5.797m — a three-metre step at the exact point the camera is aimed at —
+  // and did not fix the traffic problem it was aimed at either, because
+  // arriving cars converge on the node exactly as spawning cars diverged from
+  // it. Where traffic enters is `trafficEntryStations`' business, not the
+  // alignments'.
   const network = new RoadNetwork()
 
   // West and east arms both start at the junction, heading opposite ways
@@ -978,6 +989,21 @@ export const buildSceneContent = (): SceneContent => {
     infeasibleRoads, infeasibleCrossings, shallowCrossings, unsupportedFill,
   }
 }
+
+/**
+ * The roads handed to the traffic simulation, each carrying the station its
+ * traffic enters at.
+ *
+ * One expression, named, because it is what `drawRoadScene` passes to
+ * `TrafficView.sync` at startup and again after every rebuild, and what
+ * `roadSceneTraffic.test.ts` measures — three copies of
+ * `roadsWithTrafficEntry(network, VEHICLE_LENGTH)` would let the scene and the
+ * test that guards it drift apart, which is precisely the drift that would go
+ * unnoticed. Passing `network.roads` straight through instead is what put every
+ * car in the demo inside the junction.
+ */
+export const drivableRoads = (network: RoadNetwork): readonly RoadWithEntry[] =>
+  roadsWithTrafficEntry(network, VEHICLE_LENGTH)
 
 /** A sphere in the project's own convention (`(x, y)` ground, `z` up) that
  * encloses a terrain's full footprint and elevation range. */
@@ -1397,6 +1423,7 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
 
   const content = buildSceneContent()
   const { terrain, network } = content
+  let designs: ReadonlyMap<RoadId, ProfilePoint[]> = content.designs
   let editLayer = content.editLayer
   let built = content.built
   let infeasibleRoads = content.infeasibleRoads
@@ -1609,6 +1636,24 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     infeasibleRoads, infeasibleCrossings, shallowCrossings, unsupportedFill,
   )
 
+  // --- Traffic --------------------------------------------------------------
+  //
+  // One object, three verbs. Everything with arithmetic in it — the fixed-step
+  // clock, the spawn-room check, the lane offset, the station-to-world
+  // placement, the junction clearance — lives in `render/trafficView.ts`,
+  // `mesh/junctionClearance.ts` and the pure modules below them, not here.
+  // `sync` is called again from `rebuildNetworkMeshes`, so a road committed,
+  // split or deleted takes its traffic with it.
+  //
+  // `drivableRoads` is what keeps cars out of the junction. All three demo legs
+  // START at it (see `buildSceneContent`), so a lane admitting traffic at
+  // station 0 would put every car in the scene inside the intersection on top
+  // of the other two legs'; that function reads the junction's own solved plate
+  // and says how far along each leg is clear of it.
+  const traffic = new TrafficView()
+  scene.add(traffic.mesh)
+  traffic.sync(drivableRoads(network), designs)
+
   /**
    * Regrade, re-excavate and rebuild every mesh from the network's current
    * state, and swap the scene's meshes for the result.
@@ -1619,6 +1664,7 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
    */
   const rebuildNetworkMeshes = (): void => {
     const result = solveNetwork(terrain, network)
+    designs = result.designs
     editLayer = result.editLayer
     built = result.built
     infeasibleRoads = result.infeasibleRoads
@@ -1635,6 +1681,13 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
       scene, terrain, editLayer, built,
       infeasibleRoads, infeasibleCrossings, shallowCrossings, unsupportedFill,
     )
+
+    // Lanes follow the meshes. A road that was split no longer exists under
+    // its old id, so its lane goes; both halves are new roads and get their
+    // own. A road that failed to grade this time round loses its design
+    // profile and therefore its traffic, rather than keeping cars driving at
+    // the elevation its old profile used to have.
+    traffic.sync(drivableRoads(network), designs)
 
     // A road with no feasible vertical alignment used to reach only the
     // console (see `SceneContent.infeasibleRoads`) — surfaced here so it is
@@ -2439,8 +2492,26 @@ void main() {
   resizeObserver.observe(canvas)
 
   let frame = 0
+  /**
+   * When the last frame ran, for the traffic clock.
+   *
+   * `performance.now()` rather than the timestamp `requestAnimationFrame`
+   * passes its callback, because `tick` is also called once directly (below)
+   * to start the loop, and that call has no timestamp to be given. One clock
+   * read at the top of the frame is the same number either way.
+   *
+   * The delta is handed to `TrafficView.advance` exactly as measured, however
+   * large: clamping it here would put the frame loop in charge of a decision
+   * that belongs to the simulation, and `Fleet.advance` already accumulates it
+   * into whole `FIXED_STEP`s with a cap on how many run per call.
+   */
+  let lastFrameTime = performance.now()
   const tick = (): void => {
     frame = requestAnimationFrame(tick)
+    const now = performance.now()
+    const elapsedSeconds = (now - lastFrameTime) / 1000
+    lastFrameTime = now
+    traffic.advance(elapsedSeconds)
     // Belt and suspenders alongside the ResizeObserver above: cheap enough
     // to check every frame, and it catches the box changing size for any
     // reason the observer's host environment fails to notify for (some
@@ -2491,6 +2562,12 @@ void main() {
       scene.remove(mesh)
       disposeMesh(mesh)
     }
+    // The fleet's one shared geometry, its one shared material, and the
+    // instance buffers behind them — disposed alongside the network meshes
+    // above, for the same reason: every mount of this scene would otherwise
+    // leak them for as long as the page stays open.
+    scene.remove(traffic.mesh)
+    traffic.dispose()
     clearPreviewLine()
     previewOkMaterial.dispose()
     previewWarnMaterial.dispose()
