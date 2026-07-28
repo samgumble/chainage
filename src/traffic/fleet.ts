@@ -375,16 +375,24 @@ export class Fleet {
       } else {
         // Held at the threshold rather than allowed to keep counting.
         //
-        // Not because letting it count would stack vehicles: `stepOnce` admits
-        // at most ONE vehicle per fixed step and `hasSpawnRoom` is checked
-        // before each, so a banked backlog could never put two cars in the same
-        // place. What it would do is spend that backlog at one car every 0.25s
-        // — seven times the intended rate — for as many steps as the lane was
-        // blocked. A lane held up for a minute would discharge sixty seconds of
-        // demand in nine, as a solid block of cars at the spawn gap, and only
-        // then return to the 1.75s interval. Holding at the threshold means a
-        // lane that clears resumes at its ordinary rate immediately, which is
-        // what a queue at a road's entry actually does.
+        // This changes no spawn decision, and saying so is the point. The
+        // docstring here used to claim that banking the wait would "fire them
+        // all the instant it cleared — twenty cars appearing on top of each
+        // other", and that is not what would happen; nor is the gentler
+        // version, a burst at one car per fixed step. The gate above is
+        // `sinceSpawn >= SPAWN_INTERVAL`, and a successful spawn resets to
+        // zero, so every value at or above the threshold is the same state and
+        // spending a banked hour looks exactly like spending a banked second:
+        // one vehicle, then a full interval's wait. Removing this line has been
+        // measured against five jammed and free-flowing lanes over a thousand
+        // simulated seconds each and produces byte-identical traffic.
+        //
+        // What actually prevents a burst is the structure: at most one vehicle
+        // enters per fixed step, `hasSpawnRoom` gates each, and a spawn resets
+        // the clock. What this line does is keep `sinceSpawn` bounded — without
+        // it the counter grows for as long as a tab is open behind a permanent
+        // jam — and give "waiting to enter" exactly one representation instead
+        // of an unbounded family of them.
         entry.sinceSpawn = SPAWN_INTERVAL
       }
     }

@@ -446,50 +446,40 @@ describe('Fleet.advance', () => {
     expect(furthest).toBeGreaterThan(200)
   })
 
-  it('resumes at the ordinary rate after a blocked lane clears, not in a burst', () => {
-    // `stepOnce` holds `sinceSpawn` at the threshold while the lane has no
-    // room. Letting it keep counting instead cannot stack vehicles — at most
-    // one enters per fixed step and `hasSpawnRoom` gates each — but it banks
-    // the blocked time and then spends it at one car every 0.25s, seven times
-    // the intended rate, until the debt clears.
+  it('never admits two vehicles closer together in time than the interval', () => {
+    // The invariant the blocked-spawn branch is really protecting, on a lane
+    // that is genuinely entry-limited rather than one rebuilt underneath the
+    // test: a 260m gravel road at this demand shuts its own entry gate
+    // repeatedly (see `SPAWN_INTERVAL`'s sweep) and opens it again as the queue
+    // moves, so `hasSpawnRoom` refuses thousands of times over this run.
     //
-    // A short jammed lane is the natural way to bank a large backlog: a 60m
-    // gravel road fills, blocks its own entry for most of a run, and the whole
-    // backlog is then spent at once when the block goes away.
+    // No two vehicles ever enter fewer than `STEPS_PER_SPAWN` steps apart,
+    // whether or not the gate was shut in between. Note what this is NOT
+    // claiming: nothing here is what stops two cars occupying the same place —
+    // `stepOnce` admits at most one vehicle per fixed step and `hasSpawnRoom`
+    // gates each. See the comment on the branch itself, which used to claim
+    // otherwise.
     const fleet = new Fleet()
-    fleet.sync([road(0, 60, 'gravel')])
-    for (let i = 0; i < 120 * 60; i++) fleet.advance(1 / 60)
-    expect(fleet.vehicleCount).toBeGreaterThan(2)
+    fleet.sync([road(0, 260, 'gravel')])
 
-    // Clear the road completely: a longer lane under the same id is rebuilt
-    // empty by `sync`, which is exactly the "the block went away" moment.
-    fleet.sync([road(0, 5000, 'gravel')])
-    const seconds = 20
-    for (let i = 0; i < seconds * 60; i++) fleet.advance(1 / 60)
+    // `stepOnce` spawns AFTER stepping, so a lane that just admitted a vehicle
+    // has its rearmost one at exactly station 0 when `advance` returns. That is
+    // an exact test for "entered on this step", not an inference from counts.
+    const entries: number[] = []
+    for (let step = 1; step <= 4000; step++) {
+      fleet.advance(FIXED_STEP)
+      let rearmost = Infinity
+      fleet.forEachVehicle((_id, station) => { rearmost = Math.min(rearmost, station) })
+      if (rearmost === 0) entries.push(step)
+    }
 
-    // At the ordinary interval that is 11 or 12 cars. Spending a banked
-    // backlog would put one on every fixed step — up to 80.
-    expect(fleet.vehicleCount).toBeLessThanOrEqual(Math.ceil(seconds / SPAWN_INTERVAL) + 1)
-    expect(fleet.vehicleCount).toBeGreaterThanOrEqual(Math.floor(seconds / SPAWN_INTERVAL) - 1)
-  })
-
-  it('holds a blocked lane at the threshold rather than banking the wait', () => {
-    // The mechanism directly. A lane held at the threshold spawns on the very
-    // next step it has room for and then waits a full interval; a lane that
-    // banked its wait spawns on every step until the debt clears.
-    const fleet = new Fleet()
-    // Just long enough to hold a couple of cars and no more, so the entry gate
-    // shuts almost immediately and stays shut.
-    fleet.sync([road(0, 40, 'gravel')])
-    for (let i = 0; i < 300 * 60; i++) fleet.advance(1 / 60)
-    expect(fleet.simulatedSeconds).toBeGreaterThan(200)
-
-    // 300 seconds of blockage is 171 banked intervals, or 1200 fixed steps of
-    // debt. Release the lane and run four steps: at most one car can enter.
-    fleet.sync([road(0, 4000, 'gravel')])
-    const before = fleet.vehicleCount
-    for (let n = 0; n < 4; n++) fleet.advance(FIXED_STEP)
-    expect(fleet.vehicleCount - before).toBeLessThanOrEqual(1)
+    expect(entries.length).toBeGreaterThan(100)
+    for (let i = 1; i < entries.length; i++) {
+      expect(entries[i]! - entries[i - 1]!).toBeGreaterThanOrEqual(STEPS_PER_SPAWN)
+    }
+    // And it really was gate-limited, not merely interval-limited: a lane that
+    // never blocked would have taken one vehicle every interval all run.
+    expect(entries.length).toBeLessThan(4000 / STEPS_PER_SPAWN)
   })
 
   it('does not spawn every lane in lockstep', () => {
