@@ -138,6 +138,23 @@ export const FIXED_STEP = MAX_TIMESTEP
  */
 export const MAX_STEPS_PER_FRAME = 8
 
+/**
+ * Fixed steps in one spawn interval — the number of distinct spawn *phases* a
+ * lane can have.
+ *
+ * `SPAWN_INTERVAL` is a multiple of `FIXED_STEP` by construction (see its
+ * docstring), so this is exact: seven steps of 0.25s make 1.75s. A lane that
+ * spawns on step `n` spawns again on `n + 7` and on no step in between, so two
+ * lanes whose phases differ by anything from 1 to 6 never spawn on the same
+ * step, and two lanes whose phases are equal spawn together on every step for
+ * as long as both stay spawn-limited.
+ *
+ * Derived rather than written down because it is only ever "how many steps fit
+ * in an interval": changing either constant changes it, and a hardcoded 7
+ * would go quietly wrong instead.
+ */
+export const STEPS_PER_SPAWN = Math.round(SPAWN_INTERVAL / FIXED_STEP)
+
 export type StepPlan = {
   /** Whole fixed steps to run now. */
   readonly steps: number
@@ -210,9 +227,28 @@ export class Fleet {
   private accumulated = 0
   /** Simulated seconds run so far. Real elapsed time minus anything dropped. */
   private elapsedSimulated = 0
+  private secondsDropped = 0
 
   get simulatedSeconds(): number {
     return this.elapsedSimulated
+  }
+
+  /**
+   * Real seconds handed to `advance` that were never simulated, cumulative.
+   *
+   * `planFixedSteps` computes this and the dropping policy is deliberate — see
+   * `MAX_STEPS_PER_FRAME` — but a policy that discards time silently is
+   * indistinguishable from a bug that does. Ten seconds of ordinary running
+   * followed by one `advance(30)` loses 28.25 simulated seconds, and without
+   * this nothing at any layer says so: `simulatedSeconds` simply reads lower
+   * than the wall clock, and no caller has anything to compare it against.
+   *
+   * Zero for every frame a browser actually delivers. Non-zero means the tab
+   * stalled, and `simulatedSeconds + droppedSeconds` is the elapsed real time
+   * the fleet was asked for.
+   */
+  get droppedSeconds(): number {
+    return this.secondsDropped
   }
 
   get laneCount(): number {
@@ -259,10 +295,25 @@ export class Fleet {
         params: driverParamsFor(road.className),
         length,
         className: road.className,
-        // Staggered by nothing: every new lane spawns its first vehicle on the
-        // next step rather than after a full interval, so a road drawn by the
-        // player has traffic on it immediately instead of three seconds later.
-        sinceSpawn: SPAWN_INTERVAL,
+        // Phased by road id: the lane's first vehicle enters on step
+        // `1 + (id mod STEPS_PER_SPAWN)` and every `STEPS_PER_SPAWN`th step
+        // after that, so the seed is whatever leaves exactly that many steps
+        // to run.
+        //
+        // Seeding every lane at `SPAWN_INTERVAL` instead — which is what this
+        // was — puts every lane's first spawn on step 1 and, since they all
+        // share one interval, keeps them together forever: the demo's two
+        // rural arms produced byte-identical spawn events for as long as they
+        // ran. Phasing by whole steps within one interval makes them
+        // independent streams and, because there are exactly
+        // `STEPS_PER_SPAWN` distinct phases, gives two differently-phased
+        // lanes no shared spawn step at all while both stay spawn-limited.
+        //
+        // Still prompt, which is what the un-staggered seed was protecting:
+        // the last phase waits `STEPS_PER_SPAWN` steps, one whole interval,
+        // and every other phase less — so a road the player has just drawn has
+        // a car on it inside 1.75s rather than sitting empty.
+        sinceSpawn: SPAWN_INTERVAL - FIXED_STEP * (1 + (road.id % STEPS_PER_SPAWN)),
       })
     }
 
@@ -285,6 +336,7 @@ export class Fleet {
 
     for (let n = 0; n < plan.steps; n++) this.stepOnce(FIXED_STEP)
     this.elapsedSimulated += plan.steps * FIXED_STEP
+    this.secondsDropped += plan.dropped
   }
 
   /** Every vehicle in the fleet, by road and station. No allocation per call. */
@@ -321,10 +373,18 @@ export class Fleet {
         entry.lane.add(0, speed)
         entry.sinceSpawn = 0
       } else {
-        // Held at the threshold rather than allowed to keep counting. A lane
-        // blocked for a minute would otherwise bank twenty entries and fire
-        // them all the instant it cleared, which is not a road discharging —
-        // it is twenty cars appearing on top of each other.
+        // Held at the threshold rather than allowed to keep counting.
+        //
+        // Not because letting it count would stack vehicles: `stepOnce` admits
+        // at most ONE vehicle per fixed step and `hasSpawnRoom` is checked
+        // before each, so a banked backlog could never put two cars in the same
+        // place. What it would do is spend that backlog at one car every 0.25s
+        // — seven times the intended rate — for as many steps as the lane was
+        // blocked. A lane held up for a minute would discharge sixty seconds of
+        // demand in nine, as a solid block of cars at the spawn gap, and only
+        // then return to the 1.75s interval. Holding at the threshold means a
+        // lane that clears resumes at its ordinary rate immediately, which is
+        // what a queue at a road's entry actually does.
         entry.sinceSpawn = SPAWN_INTERVAL
       }
     }

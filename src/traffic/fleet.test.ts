@@ -10,6 +10,7 @@ import {
   Fleet,
   MAX_STEPS_PER_FRAME,
   SPAWN_INTERVAL,
+  STEPS_PER_SPAWN,
   driverParamsFor,
   hasSpawnRoom,
   metresPerSecond,
@@ -286,23 +287,52 @@ describe('Fleet.advance', () => {
     expect(fleet.simulatedSeconds).toBe(0)
   })
 
-  it('simulates the same states at 64fps as at 16fps', () => {
-    // The property the fixed step exists for. A raw frame delta passed
-    // straight through would make these two diverge immediately — and, above
-    // MAX_TIMESTEP, would throw.
-    const run = (frameSeconds: number, frames: number): number[] => {
+  it('simulates the same states at 144fps as at 30fps', () => {
+    // The property the fixed step exists for, at rates a display actually runs
+    // at. 1/30 and 1/144 are not binary fractions and neither divides 0.25, so
+    // the two accumulators land on different remainders every frame — which is
+    // the whole difficulty, and exactly what the version of this test being
+    // replaced arranged not to have: 1/64 and 1/16 are both exact binary
+    // fractions landing on precisely four steps per second, so the claim
+    // "identical" was true of any implementation that stepped at all.
+    //
+    // At real rates the claim is not "identical" but "at most one step apart,
+    // and the difference does not accumulate": both rates run whole
+    // `FIXED_STEP`s of the same sequence, and whichever is momentarily ahead is
+    // ahead by less than one step and stays that way.
+    /** The fleet's state keyed by how many fixed steps it has run. */
+    const run = (frameSeconds: number, seconds: number): Map<number, number[]> => {
       const fleet = new Fleet()
       fleet.sync([road(0, 500, 'rural'), road(1, 300, 'gravel')])
-      for (let i = 0; i < frames; i++) fleet.advance(frameSeconds)
-      const positions: number[] = []
-      fleet.forEachVehicle((roadId, station) => positions.push(roadId, station))
-      return positions
+      const states = new Map<number, number[]>()
+      for (let i = 0; i < Math.round(seconds / frameSeconds); i++) {
+        fleet.advance(frameSeconds)
+        const steps = Math.round(fleet.simulatedSeconds / FIXED_STEP)
+        if (states.has(steps)) continue
+        const snapshot: number[] = []
+        fleet.forEachVehicle((roadId, station) => snapshot.push(roadId, station))
+        states.set(steps, snapshot)
+      }
+      return states
     }
 
-    const fast = run(1 / 64, 64 * 30)
-    const slow = run(1 / 16, 16 * 30)
-    expect(fast.length).toBeGreaterThan(4)
-    expect(slow).toEqual(fast)
+    const stepsRun = (states: Map<number, number[]>): number => Math.max(...states.keys())
+
+    const fast = run(1 / 144, 300)
+    const slow = run(1 / 30, 300)
+
+    expect(stepsRun(fast)).toBeGreaterThan(1000)
+    expect(Math.abs(stepsRun(fast) - stepsRun(slow))).toBeLessThanOrEqual(1)
+
+    // Not merely the same number of steps: the same states. Every step the
+    // slower rate reached, the faster one reached with an identical fleet.
+    for (const [steps, state] of slow) expect(fast.get(steps)).toEqual(state)
+
+    // And the one-step lag does not accumulate. Ten times as long, still one
+    // step — 0.25s behind after 3000 simulated seconds.
+    const longFast = run(1 / 144, 3000)
+    const longSlow = run(1 / 30, 3000)
+    expect(stepsRun(longFast) - stepsRun(longSlow)).toBe(1)
   })
 
   it('survives a frame delta far larger than the lane will accept', () => {
@@ -312,6 +342,44 @@ describe('Fleet.advance', () => {
     fleet.sync([road(0, 500, 'rural')])
     expect(() => fleet.advance(30)).not.toThrow()
     expect(fleet.simulatedSeconds).toBeCloseTo(MAX_STEPS_PER_FRAME * FIXED_STEP, 12)
+  })
+
+  it('reports the time it dropped rather than losing it silently', () => {
+    // `planFixedSteps` has always computed `dropped`; `advance` used to
+    // destructure only `steps` and `carry` and throw it away, so 28.25 seconds
+    // could vanish with no signal at any layer. The dropping is right — see
+    // `MAX_STEPS_PER_FRAME` — but a policy that discards time silently is
+    // indistinguishable from a bug that does.
+    const fleet = new Fleet()
+    fleet.sync([road(0, 500, 'rural')])
+
+    // Ten seconds of ordinary 60fps running. Nothing is ever capped.
+    for (let i = 0; i < 600; i++) fleet.advance(1 / 60)
+    expect(fleet.droppedSeconds).toBe(0)
+    const beforeStall = fleet.simulatedSeconds
+
+    fleet.advance(30)
+    // Eight steps run, so two seconds simulated out of the thirty asked for.
+    // 28.25 rather than 28.00 because six hundred additions of 1/60 do not sum
+    // to exactly ten: the fleet is carrying most of a step when the stall
+    // arrives, and a capped call drops the carry along with everything else.
+    expect(fleet.simulatedSeconds - beforeStall).toBeCloseTo(MAX_STEPS_PER_FRAME * FIXED_STEP, 12)
+    expect(fleet.droppedSeconds).toBeCloseTo(28.25, 9)
+
+    // The accounting identity, which is the point of the channel: everything
+    // handed to `advance` is either simulated, dropped, or waiting as carry —
+    // and a capped call carries nothing, so after one the sum is exact.
+    expect(fleet.simulatedSeconds + fleet.droppedSeconds).toBeCloseTo(40, 9)
+  })
+
+  it('accumulates dropped time across repeated stalls', () => {
+    const fleet = new Fleet()
+    fleet.sync([road(0, 500, 'rural')])
+    fleet.advance(30)
+    const once = fleet.droppedSeconds
+    fleet.advance(30)
+    expect(once).toBeGreaterThan(0)
+    expect(fleet.droppedSeconds).toBeCloseTo(2 * once, 9)
   })
 
   it('ignores a non-finite or negative delta', () => {
@@ -376,6 +444,131 @@ describe('Fleet.advance', () => {
     })
     expect(beyond).toBe(0)
     expect(furthest).toBeGreaterThan(200)
+  })
+
+  it('resumes at the ordinary rate after a blocked lane clears, not in a burst', () => {
+    // `stepOnce` holds `sinceSpawn` at the threshold while the lane has no
+    // room. Letting it keep counting instead cannot stack vehicles — at most
+    // one enters per fixed step and `hasSpawnRoom` gates each — but it banks
+    // the blocked time and then spends it at one car every 0.25s, seven times
+    // the intended rate, until the debt clears.
+    //
+    // A short jammed lane is the natural way to bank a large backlog: a 60m
+    // gravel road fills, blocks its own entry for most of a run, and the whole
+    // backlog is then spent at once when the block goes away.
+    const fleet = new Fleet()
+    fleet.sync([road(0, 60, 'gravel')])
+    for (let i = 0; i < 120 * 60; i++) fleet.advance(1 / 60)
+    expect(fleet.vehicleCount).toBeGreaterThan(2)
+
+    // Clear the road completely: a longer lane under the same id is rebuilt
+    // empty by `sync`, which is exactly the "the block went away" moment.
+    fleet.sync([road(0, 5000, 'gravel')])
+    const seconds = 20
+    for (let i = 0; i < seconds * 60; i++) fleet.advance(1 / 60)
+
+    // At the ordinary interval that is 11 or 12 cars. Spending a banked
+    // backlog would put one on every fixed step — up to 80.
+    expect(fleet.vehicleCount).toBeLessThanOrEqual(Math.ceil(seconds / SPAWN_INTERVAL) + 1)
+    expect(fleet.vehicleCount).toBeGreaterThanOrEqual(Math.floor(seconds / SPAWN_INTERVAL) - 1)
+  })
+
+  it('holds a blocked lane at the threshold rather than banking the wait', () => {
+    // The mechanism directly. A lane held at the threshold spawns on the very
+    // next step it has room for and then waits a full interval; a lane that
+    // banked its wait spawns on every step until the debt clears.
+    const fleet = new Fleet()
+    // Just long enough to hold a couple of cars and no more, so the entry gate
+    // shuts almost immediately and stays shut.
+    fleet.sync([road(0, 40, 'gravel')])
+    for (let i = 0; i < 300 * 60; i++) fleet.advance(1 / 60)
+    expect(fleet.simulatedSeconds).toBeGreaterThan(200)
+
+    // 300 seconds of blockage is 171 banked intervals, or 1200 fixed steps of
+    // debt. Release the lane and run four steps: at most one car can enter.
+    fleet.sync([road(0, 4000, 'gravel')])
+    const before = fleet.vehicleCount
+    for (let n = 0; n < 4; n++) fleet.advance(FIXED_STEP)
+    expect(fleet.vehicleCount - before).toBeLessThanOrEqual(1)
+  })
+
+  it('does not spawn every lane in lockstep', () => {
+    // Seeding every lane at `SPAWN_INTERVAL` — which is what this did — put
+    // every road in the network on the same spawn step and, because they all
+    // share one interval, kept them there for as long as they ran: the demo's
+    // two rural arms produced byte-identical spawn events for ten minutes.
+    // Two arms of the same class and length are the case no single-lane test
+    // can see.
+    const fleet = new Fleet()
+    fleet.sync([road(0, 750, 'rural'), road(1, 750, 'rural'), road(2, 300, 'gravel')])
+
+    /** For each lane, the step numbers on which its count went up. */
+    const spawnSteps = new Map<number, number[]>()
+    let previous = new Map<number, number>()
+    for (let step = 1; step <= 400; step++) {
+      fleet.advance(FIXED_STEP)
+      const counts = new Map<number, number>()
+      fleet.forEachVehicle((roadId) => counts.set(roadId, (counts.get(roadId) ?? 0) + 1))
+      for (const id of [0, 1, 2]) {
+        if ((counts.get(id) ?? 0) > (previous.get(id) ?? 0)) {
+          spawnSteps.set(id, [...(spawnSteps.get(id) ?? []), step])
+        }
+      }
+      previous = counts
+    }
+
+    // Only the first hundred steps: nothing has reached the end of a 300m road
+    // by then, so a step that both spawns and retires cannot hide a spawn.
+    const early = (id: number): number[] =>
+      (spawnSteps.get(id) ?? []).filter((s) => s <= 100)
+
+    expect(early(0).length).toBeGreaterThan(10)
+    // The two rural arms are identical in every other respect, so if their
+    // spawn events differ it is this and nothing else.
+    expect(early(1)).not.toEqual(early(0))
+    expect(early(2)).not.toEqual(early(0))
+
+    // Not merely different — disjoint. Lanes phased by whole fixed steps within
+    // one interval never share a spawn step at all.
+    expect(early(0).filter((s) => early(1).includes(s))).toEqual([])
+  })
+
+  it('still puts a car on a new road inside one spawn interval', () => {
+    // The property the un-staggered seed was protecting: a road the player has
+    // just drawn does not sit empty. The last phase waits `STEPS_PER_SPAWN`
+    // steps, which is exactly one interval; every other phase is sooner.
+    for (let id = 0; id < 3 * STEPS_PER_SPAWN; id++) {
+      const fleet = new Fleet()
+      fleet.sync([road(id, 500, 'rural')])
+      for (let n = 0; n < STEPS_PER_SPAWN; n++) fleet.advance(FIXED_STEP)
+      expect(fleet.vehicleCount).toBeGreaterThanOrEqual(1)
+    }
+  })
+
+  it('gives the lanes every distinct phase before repeating one', () => {
+    // `STEPS_PER_SPAWN` roads, and no two of them enter their first vehicle on
+    // the same step. The next one does — there are only this many phases —
+    // which is the honest limit of a scheme with no global lane registry.
+    const firstSpawnStep = (id: number): number => {
+      const fleet = new Fleet()
+      fleet.sync([road(id, 5000, 'rural')])
+      for (let step = 1; step <= 2 * STEPS_PER_SPAWN; step++) {
+        fleet.advance(FIXED_STEP)
+        if (fleet.vehicleCount > 0) return step
+      }
+      return -1
+    }
+
+    const steps = Array.from({ length: STEPS_PER_SPAWN }, (_, id) => firstSpawnStep(id))
+    expect(new Set(steps).size).toBe(STEPS_PER_SPAWN)
+    expect(Math.min(...steps)).toBe(1)
+    expect(Math.max(...steps)).toBe(STEPS_PER_SPAWN)
+    expect(firstSpawnStep(STEPS_PER_SPAWN)).toBe(steps[0])
+  })
+
+  it('derives the number of spawn phases from the two constants', () => {
+    expect(STEPS_PER_SPAWN).toBe(SPAWN_INTERVAL / FIXED_STEP)
+    expect(Number.isInteger(STEPS_PER_SPAWN)).toBe(true)
   })
 
   it('has a spawn interval that lands on a step boundary', () => {
