@@ -261,6 +261,45 @@ describe('Lane', () => {
     expect(lane.positionOf(0)).toBe(500)
   })
 
+  it('carries news of a disturbance exactly one vehicle per step', () => {
+    // The direct statement of the two-pass rule, and the only exact one. Every
+    // acceleration is computed from the state at the *start* of the step, so
+    // after one step a vehicle two places back cannot yet have reacted — not
+    // "reacted less", but bit-for-bit unchanged.
+    //
+    // The phantom-jam tests below cannot check this. Measured: stepping in
+    // place still produces a travelling, amplifying wave, just ~20% faster
+    // (front at vehicle 12 rather than 10 after 10s). Emergence is robust to
+    // the mistake; this is not.
+    const twitchy: IdmParams = { ...p, maxAcceleration: 1.0, headwayTime: 1.0 }
+    const v = 20
+    const spacing = equilibriumSpacing(v, twitchy)
+
+    const platoon = (): Lane => {
+      const lane = new Lane(100000)
+      for (let i = 0; i < 3; i++) lane.add(1000 - i * spacing, v)
+      return lane
+    }
+
+    const undisturbed = platoon()
+    const disturbed = platoon()
+    disturbed.brake(0, 12)
+
+    undisturbed.step(0.2, twitchy)
+    disturbed.step(0.2, twitchy)
+
+    // Vehicle 1 is behind the braking vehicle and reacts on this very step.
+    expect(disturbed.speedOf(1)).not.toBe(undisturbed.speedOf(1))
+    // Vehicle 2 is one further back and cannot possibly know yet.
+    expect(disturbed.speedOf(2)).toBe(undisturbed.speedOf(2))
+    expect(disturbed.positionOf(2)).toBe(undisturbed.positionOf(2))
+
+    // On the next step the news arrives, one vehicle per step exactly.
+    undisturbed.step(0.2, twitchy)
+    disturbed.step(0.2, twitchy)
+    expect(disturbed.speedOf(2)).not.toBe(undisturbed.speedOf(2))
+  })
+
   it('produces a phantom jam: a perturbation travels backwards through a platoon', () => {
     // Spec 4.3 calls this the most readable traffic phenomenon there is, and
     // the reason microscopic simulation was chosen at all. A dense platoon at
