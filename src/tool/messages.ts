@@ -8,17 +8,21 @@ import type { SplitOutcome } from './selectTool'
 /**
  * What the message line says when the game opens.
  *
- * The scene now starts as bare terrain with no roads on it, and a blank canvas
- * with no instructions is not zen, it is unusable: nothing on screen says that
- * clicking places a point, that a second click within the double-click window
- * commits, or that road class is a thing at all — and the player's first
- * gesture in the wrong class is REFUSED for curve overlap (see
- * `DEFAULT_DRAW_CLASS`) before they have any way to know why.
+ * Nothing on screen says that clicking places a point, that a second click
+ * within the double-click window commits, or that road class is a thing at all
+ * — and the player's first gesture in the wrong class is REFUSED for curve
+ * overlap (see `DEFAULT_DRAW_CLASS`) before they have any way to know why.
  *
  * Two lines, and deliberately not a tutorial. It is replaced by the first
  * thing that happens — a rejection, a class change, a mode switch — so it
  * costs the player nothing after the opening moment, and there is no state to
  * dismiss, no step counter and nothing to advance.
+ *
+ * The first line gained a clause when the game stopped opening on bare ground.
+ * There is now a road across the valley (see `openingRoad.ts`), it is the only
+ * thing in the world to build ONTO, and that a road finishing on it splits it
+ * into a junction is not visible from anywhere: without the clause the road is
+ * scenery, and with it the road is an invitation.
  *
  * The class list is BUILT from the ladder rather than typed out. Numbering is
  * one-based because `roadScene.ts` binds keys '1'-'4' to `ROAD_CLASS_ORDER`
@@ -27,7 +31,10 @@ import type { SplitOutcome } from './selectTool'
  *
  * `defaultClass` is named rather than assumed: it is the one class whose
  * corners fit inside the ground the opening camera frames, which is exactly
- * the fact the player cannot see and most needs told.
+ * the fact the player cannot see and most needs told. That claim is a fact
+ * about a number — the camera's opening distance has to stay under twice a
+ * rural road's minimum radius for it to be true at all — so it is asserted
+ * against the real framing in `roadScene.test.ts` rather than left as prose.
  */
 export const describeStartingHint = (
   classOrder: readonly RoadClassName[],
@@ -35,7 +42,8 @@ export const describeStartingHint = (
 ): string => {
   const classes = classOrder.map((name, index) => `${index + 1} ${name}`).join(' · ')
   return (
-    'Click to place points; double-click or Enter builds the road.\n' +
+    'Click to place points; double-click or Enter builds the road — ' +
+    'finish on the existing road to join it.\n' +
     `${classes}. Start on ${defaultClass} — the rest turn wider than this view.`
   )
 }
