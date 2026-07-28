@@ -101,12 +101,12 @@ export const buildDemoSceneContent = (): SceneContent => {
   const network = buildDemoNetwork(terrain)
 
   const {
-    designs, editLayer, built,
+    designs, editLayer, built, spans,
     infeasibleRoads, infeasibleCrossings, shallowCrossings, unsupportedFill,
   } = solveNetwork(terrain, network)
 
   return {
-    terrain, network, designs, editLayer, built,
+    terrain, network, designs, editLayer, built, spans,
     infeasibleRoads, infeasibleCrossings, shallowCrossings, unsupportedFill,
   }
 }
