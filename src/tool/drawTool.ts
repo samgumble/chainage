@@ -99,11 +99,19 @@ export class DrawTool {
    * This only changes how the point's position is decided, nothing more:
    * see `place`'s docstring for why suppressing snap does not also exempt
    * the point from what `commit` does with it afterwards.
+   *
+   * `radius` defaults to `SNAP_RADIUS` so every existing caller — every test
+   * in `drawTool.test.ts` included — keeps today's fixed-world-metre
+   * behaviour unless it deliberately opts into something else. A live scene
+   * should pass a radius derived from screen space instead (see
+   * `tool/snapRadius.ts`): a fixed metre figure is comfortable under a mouse
+   * cursor and useless under a fingertip, or the reverse, depending on how
+   * far the camera has zoomed out, and this class has no way to know which.
    */
-  hover(position: Vec2, suppressSnap = false): void {
+  hover(position: Vec2, suppressSnap = false, radius: number = SNAP_RADIUS): void {
     this.hovered = suppressSnap
       ? position
-      : resolveSnap(this.network, position, SNAP_RADIUS).position
+      : resolveSnap(this.network, position, radius).position
   }
 
   /**
@@ -125,11 +133,14 @@ export class DrawTool {
    * `commit` was already fixed once to not have. Suppressing snap is about
    * player control over where a point lands, not about controlling what the
    * graph does once it has landed there.
+   *
+   * `radius` defaults to `SNAP_RADIUS` for the same reason `hover`'s does —
+   * see there.
    */
-  place(position: Vec2, suppressSnap = false): void {
+  place(position: Vec2, suppressSnap = false, radius: number = SNAP_RADIUS): void {
     const snap: SnapTarget = suppressSnap
       ? { kind: 'free', position }
-      : resolveSnap(this.network, position, SNAP_RADIUS)
+      : resolveSnap(this.network, position, radius)
     this.placed.push({ position: snap.position, snap })
     this.hovered = undefined
   }

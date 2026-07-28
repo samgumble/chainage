@@ -94,7 +94,8 @@ import { classifyCrossing, type InfeasibleCrossing, type ShallowCrossing } from 
 import { buildNetworkMesh, type NetworkMesh } from '../mesh/networkMesh'
 import { networkStructureSpans, type StructureSpan } from '../mesh/structures/spans'
 import { DECK_DEPTH } from '../mesh/structures/bridgeMesh'
-import { DrawTool, SNAP_RADIUS } from '../tool/drawTool'
+import { DrawTool } from '../tool/drawTool'
+import { FINE_POINTER_SNAP_RADIUS_PX, snapRadiusInWorld } from '../tool/snapRadius'
 import { resolveSnap, type SnapTarget } from '../tool/snap'
 import { SelectTool, type SplitOutcome } from '../tool/selectTool'
 import {
@@ -1702,6 +1703,29 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     camera.lookAt(toThreePosition(rig.target))
   }
 
+  /**
+   * How far from the pointer the draw tool should look for something to snap
+   * to right now, world metres.
+   *
+   * Derived fresh on every call from `rig.distance` and the canvas's current
+   * CSS height, rather than read out of a constant, precisely because both of
+   * those change: zooming the camera or resizing the window both change how
+   * many world metres one screen pixel covers (see `tool/snapRadius.ts`).
+   *
+   * `FINE_POINTER_SNAP_RADIUS_PX` throughout — every call site below is a
+   * mouse-or-pen interaction. There is no touch handling in this file yet
+   * (that is `mobile-controls`'s Task 4), so there is no `pointer: coarse`
+   * branch to take here either; when that wiring lands, this is the one
+   * place a coarse-pointer radius would be threaded in.
+   */
+  const currentSnapRadius = (): number =>
+    snapRadiusInWorld(
+      FINE_POINTER_SNAP_RADIUS_PX,
+      rig.distance,
+      CAMERA_VERTICAL_FOV,
+      Math.max(1, canvas.clientHeight),
+    )
+
   // --- Pointer -> world ray ------------------------------------------------
   const raycaster = new THREE.Raycaster()
 
@@ -1939,10 +1963,11 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
       return
     }
     const suppressSnap = suppressSnapModifier(event)
-    tool.hover(worldPosition, suppressSnap)
+    const snapRadius = currentSnapRadius()
+    tool.hover(worldPosition, suppressSnap, snapRadius)
     hoverSnap = suppressSnap
       ? { kind: 'free', position: worldPosition }
-      : resolveSnap(network, worldPosition, SNAP_RADIUS)
+      : resolveSnap(network, worldPosition, snapRadius)
   }
 
   const onPointerDown = (event: PointerEvent): void => {
@@ -2055,12 +2080,16 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
       // include where the player just clicked, not silently end one point
       // short — then commits rather than placing a third point.
       cancelPendingClick()
-      tool.place(worldPosition, suppressSnap)
+      tool.place(worldPosition, suppressSnap, currentSnapRadius())
       attemptCommit()
     } else {
       pendingClickTimer = window.setTimeout(() => {
         pendingClickTimer = undefined
-        tool.place(worldPosition, suppressSnap)
+        // Evaluated at the moment the deferred placement actually fires, not
+        // captured at click time: the radius depends on the camera's CURRENT
+        // distance and the canvas's current size, and 300ms is long enough
+        // for either to have moved.
+        tool.place(worldPosition, suppressSnap, currentSnapRadius())
       }, DOUBLE_CLICK_MS)
     }
   }
