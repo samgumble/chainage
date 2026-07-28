@@ -95,7 +95,7 @@ import { buildNetworkMesh, type NetworkMesh } from '../mesh/networkMesh'
 import { networkStructureSpans, type StructureSpan } from '../mesh/structures/spans'
 import { DECK_DEPTH } from '../mesh/structures/bridgeMesh'
 import { DrawTool } from '../tool/drawTool'
-import { FINE_POINTER_SNAP_RADIUS_PX, snapRadiusInWorld } from '../tool/snapRadius'
+import { FINE_POINTER_SNAP_RADIUS_PX, clampedSnapRadiusInWorld } from '../tool/snapRadius'
 import { resolveSnap, type SnapTarget } from '../tool/snap'
 import { SelectTool, type SplitOutcome } from '../tool/selectTool'
 import {
@@ -1717,9 +1717,14 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
    * (that is `mobile-controls`'s Task 4), so there is no `pointer: coarse`
    * branch to take here either; when that wiring lands, this is the one
    * place a coarse-pointer radius would be threaded in.
+   *
+   * `clampedSnapRadiusInWorld`, not `snapRadiusInWorld` directly: screen-space
+   * scaling is right for how snapping feels, but unbounded it is wrong for
+   * what it means topologically at either end of the camera's zoom range —
+   * see `tool/snapRadius.ts`'s `MIN_SNAP_RADIUS_M`/`MAX_SNAP_RADIUS_M`.
    */
   const currentSnapRadius = (): number =>
-    snapRadiusInWorld(
+    clampedSnapRadiusInWorld(
       FINE_POINTER_SNAP_RADIUS_PX,
       rig.distance,
       CAMERA_VERTICAL_FOV,
