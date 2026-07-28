@@ -119,8 +119,17 @@ export const snapRadiusInWorld = (
  * `= 22` and the prose above said "half of 44" — true when written, and
  * exactly the pairing that goes wrong silently the first time either number is
  * retuned. Now the claim is the code.
+ *
+ * Exported solely so `snapRadius.test.ts` can pin that halving, and it has to
+ * be: today this constant is INERT. `COARSE_POINTER_SNAP_RADIUS_PX` floors
+ * itself at `FINE_POINTER_SNAP_RADIUS_PX` (~38px), which is larger, so nothing
+ * observable through this module's public surface changes if the halving above
+ * becomes a quartering — mutation testing found exactly that, and the only
+ * honest fix is to test the constant itself rather than pretend some derived
+ * value covers it. It stops being inert the moment `SNAP_RADIUS` is tightened,
+ * which `FINE_POINTER_SNAP_RADIUS_PX`'s own docstring argues it may want to be.
  */
-const FINGERTIP_SNAP_RADIUS_PX = MIN_TOUCH_TARGET_PX / 2
+export const FINGERTIP_SNAP_RADIUS_PX = MIN_TOUCH_TARGET_PX / 2
 
 /**
  * The camera distance the game opens on, world metres — the framing

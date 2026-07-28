@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   COARSE_POINTER_SNAP_RADIUS_PX,
+  FINGERTIP_SNAP_RADIUS_PX,
   FINE_POINTER_SNAP_RADIUS_PX,
   MAX_SNAP_RADIUS_M,
   MIN_SNAP_RADIUS_M,
@@ -82,15 +83,27 @@ describe('snapRadiusInWorld', () => {
     // The 22 above is no longer a number of its own: it is half the touch
     // target the on-screen control bar is built from (see `touchTarget.ts`),
     // which is where the "half of 44" claim in FINGERTIP_SNAP_RADIUS_PX's
-    // docstring now actually lives. Asserted here because that constant is
-    // private, so this is the only place the linkage can be checked — and
-    // without it, retuning MIN_TOUCH_TARGET_PX would silently move the touch
-    // snap tolerance with no test noticing.
+    // docstring now actually lives. Asserted directly against the constant
+    // rather than through COARSE, which cannot see it while the fine default
+    // is the larger of the two — see the next test.
     it('the fingertip figure is exactly half the minimum touch target', () => {
-      expect(MIN_TOUCH_TARGET_PX / 2).toBe(22)
+      expect(FINGERTIP_SNAP_RADIUS_PX).toBe(MIN_TOUCH_TARGET_PX / 2)
+      expect(FINGERTIP_SNAP_RADIUS_PX).toBe(22)
       expect(COARSE_POINTER_SNAP_RADIUS_PX).toBe(
-        Math.max(MIN_TOUCH_TARGET_PX / 2, FINE_POINTER_SNAP_RADIUS_PX),
+        Math.max(FINGERTIP_SNAP_RADIUS_PX, FINE_POINTER_SNAP_RADIUS_PX),
       )
+    })
+
+    it('the fingertip figure is currently inert, and the test says so out loud', () => {
+      // Not a property worth preserving — a statement of where the module
+      // stands. While the fine default is the larger of the two, the coarse
+      // radius is entirely determined by it and the fingertip figure has no
+      // effect on any radius this module returns. Anyone retuning
+      // SNAP_RADIUS downward should expect this expectation to flip, and the
+      // assertion above (which pins the constant directly rather than through
+      // a derived value) is what keeps the halving honest in the meantime.
+      expect(FINGERTIP_SNAP_RADIUS_PX).toBeLessThan(FINE_POINTER_SNAP_RADIUS_PX)
+      expect(COARSE_POINTER_SNAP_RADIUS_PX).toBe(FINE_POINTER_SNAP_RADIUS_PX)
     })
   })
 
