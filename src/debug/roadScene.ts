@@ -4,7 +4,7 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 import { Alignment } from '../geometry/alignment'
-import { Line } from '../geometry/primitives'
+import { lineEndingAt } from '../geometry/primitives'
 import { vec2, type Vec2 } from '../geometry/vec2'
 import type { PolylineRejection } from '../geometry/polyline'
 import { generateValley } from '../terrain/generate'
@@ -940,23 +940,31 @@ export const buildSceneContent = (): SceneContent => {
   })
 
   // A T junction on the valley floor: a main road running east-west with a
-  // narrower gravel branch heading north. Three straight roads meeting at one
-  // point, which is exactly what a junction needs and nothing more.
+  // narrower gravel branch joining from the north. Three straight roads
+  // meeting at one point, which is exactly what a junction needs and nothing
+  // more.
   //
-  // All three alignments are built starting FROM the junction rather than
-  // arriving at it. `solveGradeProfile`'s forward greedy sweep pins station 0
-  // to natural ground but can drift away from it by the far end of a long
-  // alignment (the terrain here is rough enough that it does): starting every
-  // leg at the junction means every leg's own elevation there is natural
-  // ground, so the three legs agree and the junction sits flush without
-  // needing `elevationMismatches` to paper over a drifted arrival station.
+  // All three legs ARRIVE at the junction: station 0 is the outer end and
+  // station `length` is the junction. That is a traffic decision as much as a
+  // geometric one. `Fleet` puts vehicles on at station 0 and retires them at
+  // `length`, so legs built the other way round would materialise every car
+  // inside the junction — the exact point the camera rig is aimed at — and
+  // drive it away. Arriving legs instead show traffic converging on a junction
+  // and disappearing there, which reads as a junction the simulation does not
+  // model yet rather than as cars appearing out of nothing.
+  //
+  // It costs something, and the cost is recorded rather than hidden:
+  // `solveGradeProfile`'s greedy sweep pins station 0 to natural ground and
+  // drifts from it further along, so legs that start at the junction agree
+  // there and legs that arrive there do not. The three now disagree by 5.80m
+  // instead of 0.46m, which `roadSceneTraffic.test.ts` pins and explains.
   const network = new RoadNetwork()
 
-  // West and east arms both start at the junction, heading opposite ways
-  // along the valley; the branch starts there too, heading north.
-  const westArm = new Alignment([new Line(JUNCTION, Math.PI, 750)])
-  const eastArm = new Alignment([new Line(JUNCTION, 0, 750)])
-  const branch = new Alignment([new Line(JUNCTION, Math.PI / 2, 300)])
+  // West and east arms run inward along the valley from either end; the branch
+  // runs south into the junction from 300m north of it.
+  const westArm = new Alignment([lineEndingAt(JUNCTION, 0, 750)])
+  const eastArm = new Alignment([lineEndingAt(JUNCTION, Math.PI, 750)])
+  const branch = new Alignment([lineEndingAt(JUNCTION, -Math.PI / 2, 300)])
 
   const arms: [Alignment, 'rural' | 'gravel'][] = [
     [westArm, 'rural'], [eastArm, 'rural'], [branch, 'gravel'],
