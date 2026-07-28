@@ -1,7 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { terrainBounds, terrainFocus } from './cameraFraming'
+import { terrainBounds, terrainFocus, distanceToFrame, frameRoadRun } from './cameraFraming'
 import { Heightmap } from '../terrain/heightmap'
 import { buildTerrain } from '../debug/roadScene'
+import { Alignment } from '../geometry/alignment'
+import { Line } from '../geometry/primitives'
+import { vec2 } from '../geometry/vec2'
+import type { ProfilePoint } from '../terrain/groundProfile'
 
 /**
  * `terrainBounds` sizes the sun's shadow camera and `terrainFocus` aims the
@@ -47,13 +51,16 @@ describe('terrainBounds', () => {
 })
 
 /**
- * Where the camera looks when the game opens.
+ * Where the camera looks when there is nothing built to look at.
  *
- * This is a genuinely new requirement. The rig used to target `JUNCTION`,
- * `vec2(900, 1280)` — the point the demo network's three arms were built
- * around. With the game opening on bare terrain those arms no longer exist,
- * so that coordinate stopped meaning anything while still looking deliberate,
- * which is the worst of both. The target is now derived from the terrain.
+ * The rig used to target `JUNCTION`, `vec2(900, 1280)` — the point the demo
+ * network's three arms were built around. Those arms no longer ship, so that
+ * coordinate stopped meaning anything while still looking deliberate, which is
+ * the worst of both.
+ *
+ * The game now opens on a bridge and `frameRoadRun` aims at that instead; this
+ * is the fallback, and it is not a dead branch — it is the scene the moment a
+ * player deletes their last road.
  */
 describe('terrainFocus', () => {
   it('aims at the middle of the footprint, on the ground there', () => {
@@ -94,11 +101,11 @@ describe('terrainFocus', () => {
     expect(terrainFocus(flat, dug)).toEqual({ x: 10, y: 10, z: -12 })
   })
 
-  it('is not the junction the camera used to be hardcoded to', () => {
+  it('is not the junction the camera was once hardcoded to', () => {
     // The mutation this test exists to catch: restoring `vec2(900, 1280)`,
     // the demo T junction, as the rig target. It is a point defined by three
     // roads the game no longer ships, and on this terrain it is 380m west of
-    // where the camera should be looking.
+    // the middle of the map.
     const focus = terrainFocus(buildTerrain())
 
     // The terrain is a 2560m square from the origin, so its middle is
@@ -113,5 +120,90 @@ describe('terrainFocus', () => {
     // well above nothing at all, so a focus that silently became 0 or the
     // elevation midpoint would fail here.
     expect(focus.z).toBeCloseTo(89.9615, 4)
+  })
+})
+
+/**
+ * How far back the camera stands.
+ *
+ * The opening distance used to be a constant (`RIG_INITIAL_DISTANCE = 300`)
+ * with a paragraph of justification and no way to check it. It is now derived
+ * from the size of what is being looked at, which means it is arithmetic, and
+ * arithmetic that decides what a player sees on the first frame is exactly
+ * what this project keeps out of `roadScene.ts`.
+ */
+describe('distanceToFrame', () => {
+  it('puts a subject exactly across the frame at the classic 90-degree case', () => {
+    // At a 90-degree vertical field the frustum's half-height equals the
+    // distance, so a subject fills the frame at half its own size. No
+    // trigonometry needed to check this one by hand.
+    expect(distanceToFrame(100, 90)).toBeCloseTo(50, 10)
+  })
+
+  it('is the inverse of the frustum half-height it is solving', () => {
+    // The property, rather than a second copy of the formula: whatever
+    // distance comes back, the frustum at that distance must be exactly the
+    // extent that was asked for.
+    for (const [extent, fov] of [[194.475, 45], [30, 60], [2000, 12]] as const) {
+      const d = distanceToFrame(extent, fov)
+      const frustumHeight = 2 * d * Math.tan((fov * Math.PI) / 360)
+      expect(frustumHeight).toBeCloseTo(extent, 8)
+    }
+  })
+
+  it('stands further back for a narrower lens', () => {
+    expect(distanceToFrame(100, 30)).toBeGreaterThan(distanceToFrame(100, 45))
+    expect(distanceToFrame(100, 45)).toBeGreaterThan(distanceToFrame(100, 60))
+  })
+
+  it('refuses an extent or a field of view that is not a lens', () => {
+    expect(() => distanceToFrame(0, 45)).toThrow(RangeError)
+    expect(() => distanceToFrame(-1, 45)).toThrow(RangeError)
+    expect(() => distanceToFrame(100, 0)).toThrow(RangeError)
+    expect(() => distanceToFrame(100, 180)).toThrow(RangeError)
+  })
+})
+
+describe('frameRoadRun', () => {
+  /** A 300m straight running east, with a design line that climbs 30m over
+   * it. Deliberately NOT level: the elevation is the part a plan-only framing
+   * would get wrong. */
+  const straight = new Alignment([new Line(vec2(0, 0), 0, 300)])
+  const climbing: ProfilePoint[] = [{ s: 0, z: 100 }, { s: 300, z: 130 }]
+
+  it('aims at the middle of the run, at the elevation it was built to', () => {
+    const { target } = frameRoadRun(straight, climbing, 100, 200, 45, 1)
+
+    expect(target.x).toBeCloseTo(150, 10)
+    expect(target.y).toBeCloseTo(0, 10)
+    // 150m along a line climbing 0.1 m/m from 100m: 115m, not the 0 a missing
+    // design profile gives and not the ground, which this never looks at.
+    expect(target.z).toBeCloseTo(115, 10)
+  })
+
+  it('measures the run in three dimensions, not in plan', () => {
+    // 100m of plan, 10m of climb: the chord is hypot(100, 10), so the camera
+    // stands slightly further back than a plan-length framing would put it.
+    const chord = Math.hypot(100, 10)
+    const { distance } = frameRoadRun(straight, climbing, 100, 200, 45, 1)
+
+    expect(distance).toBeCloseTo(distanceToFrame(chord, 45), 10)
+    expect(distance).toBeGreaterThan(distanceToFrame(100, 45))
+  })
+
+  it('stands proportionally further back for a smaller fill', () => {
+    const full = frameRoadRun(straight, climbing, 100, 200, 45, 1)
+    const half = frameRoadRun(straight, climbing, 100, 200, 45, 0.5)
+
+    expect(half.distance).toBeCloseTo(full.distance * 2, 8)
+    // The target does not move when the framing loosens — only the distance.
+    expect(half.target).toEqual(full.target)
+  })
+
+  it('refuses a run that is not a run, or a fill that is not a fraction', () => {
+    expect(() => frameRoadRun(straight, climbing, 200, 200, 45, 1)).toThrow(RangeError)
+    expect(() => frameRoadRun(straight, climbing, 200, 100, 45, 1)).toThrow(RangeError)
+    expect(() => frameRoadRun(straight, climbing, 100, 200, 45, 0)).toThrow(RangeError)
+    expect(() => frameRoadRun(straight, climbing, 100, 200, 45, 1.5)).toThrow(RangeError)
   })
 })
