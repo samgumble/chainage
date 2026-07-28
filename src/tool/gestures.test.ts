@@ -240,8 +240,13 @@ describe('GestureRecogniser: two-finger camera gestures', () => {
 
     expect(kinds(g.up(2, 30))).toEqual(['twoFingerEnd'])
 
-    // Pointer 1 is still down. Dragging it must not jump the pending road
-    // point across the screen, and lifting it must not place one.
+    // Pointer 1 is still down and still tracked — it simply owns nothing now.
+    // Asserting only that it emits nothing would be satisfied by forgetting
+    // about it entirely, which is a different bug with the same silence.
+    expect(g.inProgress).toBe(true)
+
+    // Dragging it must not jump the pending road point across the screen, and
+    // lifting it must not place one.
     expect(kinds(g.move(1, 400, 400, 40))).toEqual([])
     expect(kinds(g.up(1, 50))).toEqual([])
     expect(g.inProgress).toBe(false)
