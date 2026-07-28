@@ -105,7 +105,7 @@ import {
   type ToolMode,
 } from '../tool/sceneActions'
 import { createControlBar } from '../render/controlBar'
-import { renderPixelRatio, viewportMetrics } from '../render/viewport'
+import { OVERLAY_EDGE_INSET_PX, renderPixelRatio, viewportMetrics } from '../render/viewport'
 import {
   describePolylineRejection,
   describeSplitOutcome,
@@ -1304,13 +1304,37 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   const messageHost = canvas.parentElement ?? document.body
   const messageEl = document.createElement('div')
   messageEl.style.position = 'absolute'
-  messageEl.style.left = '12px'
-  messageEl.style.top = '12px'
+  // Inset from the top-left corner by `OVERLAY_EDGE_INSET_PX`, plus whatever
+  // the device says is unusable there. A phone in landscape puts its notch
+  // down one side and reports it as `safe-area-inset-left`; in portrait the
+  // status bar and any camera cutout come back as `safe-area-inset-top`. The
+  // fallback of 0 makes this reduce to the plain inset everywhere else, so
+  // there is one rule rather than a desktop case and a phone case.
+  messageEl.style.left = `calc(${OVERLAY_EDGE_INSET_PX}px + env(safe-area-inset-left, 0px))`
+  messageEl.style.top = `calc(${OVERLAY_EDGE_INSET_PX}px + env(safe-area-inset-top, 0px))`
+  // The message is generated text of no fixed length — a mode line plus a
+  // key-hint line, or a refusal naming several roads — and at `pre` it was a
+  // single unbreakable run that ran straight off the side of a phone and cut
+  // off mid-word. `pre-line` keeps the explicit newline the two-line hints are
+  // written with (which `normal` would collapse into one paragraph) while
+  // letting each of those lines wrap when it has to.
+  //
+  // Wrapping alone is not enough: an absolutely-positioned box with no width
+  // constraint shrink-wraps its widest unbroken line, so it would still be
+  // 650px wide in a 375px viewport with nothing to wrap against. The
+  // `max-width` is what gives it something to wrap AT — the host's width less
+  // the inset on this side, the mirror-image inset on the other, and either
+  // safe area. `border-box` so the pill's own horizontal padding is inside
+  // that budget rather than added to it.
+  messageEl.style.boxSizing = 'border-box'
+  messageEl.style.maxWidth =
+    `calc(100% - ${2 * OVERLAY_EDGE_INSET_PX}px` +
+    ` - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px))`
   messageEl.style.padding = '4px 10px'
   messageEl.style.borderRadius = '4px'
   messageEl.style.font = '13px/1.4 ui-sans-serif, system-ui, sans-serif'
   messageEl.style.pointerEvents = 'none'
-  messageEl.style.whiteSpace = 'pre'
+  messageEl.style.whiteSpace = 'pre-line'
   messageHost.appendChild(messageEl)
 
   /**

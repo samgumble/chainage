@@ -47,6 +47,7 @@ import {
   type SceneBinding,
 } from '../tool/sceneActions'
 import { MIN_TOUCH_TARGET_PX } from '../tool/touchTarget'
+import { OVERLAY_EDGE_INSET_PX } from './viewport'
 
 export type ControlBar = {
   /** Re-render for a new mode / armed class. Idempotent. */
@@ -54,16 +55,6 @@ export type ControlBar = {
   /** Remove the bar from the document. */
   dispose: () => void
 }
-
-/**
- * How far the bar sits from the bottom of its host, CSS pixels, on top of
- * whatever safe-area inset the device reports.
- *
- * Matches the message line's own 12px offset from the top-left corner rather
- * than being chosen separately — two overlays inset by different amounts from
- * opposite corners read as an accident.
- */
-const BAR_EDGE_INSET_PX = 12
 
 /** Gap between buttons. Wide enough that a fingertip landing between two of
  * them misses both rather than hitting the wrong one. */
@@ -97,12 +88,20 @@ const applyContainerStyle = (el: HTMLElement): void => {
   // only by the safe area sits flush against the chin on the phones that
   // report one, and only by the 12px sits under the home indicator on the
   // same phones.
-  el.style.bottom = `calc(${BAR_EDGE_INSET_PX}px + env(safe-area-inset-bottom, 0px))`
+  el.style.bottom = `calc(${OVERLAY_EDGE_INSET_PX}px + env(safe-area-inset-bottom, 0px))`
   el.style.display = 'flex'
   el.style.flexWrap = 'wrap'
   el.style.justifyContent = 'center'
   el.style.gap = `${BAR_GAP_PX}px`
-  el.style.padding = `0 ${BAR_EDGE_INSET_PX}px`
+  // The container spans the full width, so its horizontal padding is what
+  // keeps the outermost buttons off the edge — and in landscape, out from
+  // under a side notch or a rounded corner. Same shape as the bottom inset
+  // above: the fixed margin plus whatever the device reports, which is 0
+  // everywhere without a cutout.
+  el.style.paddingTop = '0'
+  el.style.paddingBottom = '0'
+  el.style.paddingLeft = `calc(${OVERLAY_EDGE_INSET_PX}px + env(safe-area-inset-left, 0px))`
+  el.style.paddingRight = `calc(${OVERLAY_EDGE_INSET_PX}px + env(safe-area-inset-right, 0px))`
   // The container spans the whole width, so it would otherwise swallow every
   // pointer event across the bottom of the canvas — including the drags and
   // taps that place road points. Only the buttons themselves take input.
