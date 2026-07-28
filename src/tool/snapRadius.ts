@@ -23,6 +23,7 @@
 import { SNAP_RADIUS } from './drawTool'
 import { NODE_SNAP_DISTANCE } from '../network/graph'
 import { PICK_RADIUS } from './selectTool'
+import { MIN_TOUCH_TARGET_PX } from './touchTarget'
 
 /**
  * World metres covered by one CSS pixel, at a given camera distance and
@@ -107,15 +108,19 @@ export const snapRadiusInWorld = (
  * A fingertip's contact patch is roughly 10mm across (the figure this whole
  * task starts from). At the CSS-pixel definition of 96px to the inch
  * (1px = 1/96in = 0.2646mm), 10mm is about 37.8 CSS px across — an 18.9px
- * radius. Rounded up slightly to 22px: exactly half of the 44 CSS px minimum
- * accessible touch-target SIZE this same plan's Task 3 uses for the on-screen
- * control bar (Apple's Human Interface Guidelines and Android's Material
- * Design both converge on ~44-48pt/dp as the smallest comfortably-hittable
- * control), so the same fingertip-sized reasoning produces the same number in
- * both places rather than two independently-chosen ones that happen to be
- * close.
+ * radius. Rounded up slightly to 22px: exactly half of `MIN_TOUCH_TARGET_PX`,
+ * the minimum accessible touch-target SIZE the on-screen control bar
+ * (`render/controlBar.ts`) sizes every button from, so the same
+ * fingertip-sized reasoning produces the same number in both places rather
+ * than two independently-chosen ones that happen to be close.
+ *
+ * Written as that constant halved rather than as the literal 22 it works out
+ * to. Until Task 3 there was nowhere to import the 44 from, so this line said
+ * `= 22` and the prose above said "half of 44" — true when written, and
+ * exactly the pairing that goes wrong silently the first time either number is
+ * retuned. Now the claim is the code.
  */
-const FINGERTIP_SNAP_RADIUS_PX = 22
+const FINGERTIP_SNAP_RADIUS_PX = MIN_TOUCH_TARGET_PX / 2
 
 /**
  * The camera distance the game opens on, world metres — the framing

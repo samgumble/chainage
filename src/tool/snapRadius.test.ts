@@ -13,6 +13,7 @@ import { SNAP_RADIUS } from './drawTool'
 import { MAX_DISTANCE, MIN_DISTANCE } from '../render/cameraRig'
 import { NODE_SNAP_DISTANCE } from '../network/graph'
 import { PICK_RADIUS } from './selectTool'
+import { MIN_TOUCH_TARGET_PX } from './touchTarget'
 
 describe('snapRadiusInWorld', () => {
   it('grows with camera distance — the same finger covers more ground zoomed out', () => {
@@ -75,6 +76,20 @@ describe('snapRadiusInWorld', () => {
     it('falls back to the fingertip figure when the fine default is tighter', () => {
       expect(COARSE_POINTER_SNAP_RADIUS_PX).toBe(
         Math.max(22, FINE_POINTER_SNAP_RADIUS_PX),
+      )
+    })
+
+    // The 22 above is no longer a number of its own: it is half the touch
+    // target the on-screen control bar is built from (see `touchTarget.ts`),
+    // which is where the "half of 44" claim in FINGERTIP_SNAP_RADIUS_PX's
+    // docstring now actually lives. Asserted here because that constant is
+    // private, so this is the only place the linkage can be checked — and
+    // without it, retuning MIN_TOUCH_TARGET_PX would silently move the touch
+    // snap tolerance with no test noticing.
+    it('the fingertip figure is exactly half the minimum touch target', () => {
+      expect(MIN_TOUCH_TARGET_PX / 2).toBe(22)
+      expect(COARSE_POINTER_SNAP_RADIUS_PX).toBe(
+        Math.max(MIN_TOUCH_TARGET_PX / 2, FINE_POINTER_SNAP_RADIUS_PX),
       )
     })
   })
