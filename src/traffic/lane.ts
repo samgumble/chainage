@@ -47,6 +47,7 @@ export class Lane {
   /** Scratch for the first pass of `step`. Never read outside one step. */
   private accelerations = new Float64Array(INITIAL_CAPACITY)
   private size = 0
+  private stopLine: number | undefined = undefined
 
   constructor(readonly length: number) {
     if (!(length > 0)) {
@@ -98,6 +99,32 @@ export class Lane {
     this.size++
   }
 
+  /** Where the lane is blocked, or `undefined` for a clear lane. */
+  get obstacle(): number | undefined {
+    return this.stopLine
+  }
+
+  /**
+   * Block the lane at `position`, or clear it with `undefined`.
+   *
+   * A red light, a stop sign and an unaccepted gap are all this and nothing
+   * else: no mode, no flag, no second deceleration path. `step` gives the
+   * vehicles behind the line a stationary leader parked on it, and the
+   * ordinary car-following does the rest — the queue, its discharge, and the
+   * shockwave that runs back through it all fall out of the model already
+   * there.
+   *
+   * Clearing is likewise not a transition. The phantom stops existing and the
+   * vehicle behind it simply has a further-away leader, so there is no
+   * discontinuity in acceleration at the moment a light changes.
+   */
+  setObstacle(position: number | undefined): void {
+    if (position !== undefined && !Number.isFinite(position)) {
+      throw new RangeError(`obstacle position must be finite, got ${position}`)
+    }
+    this.stopLine = position
+  }
+
   /** Force a vehicle's speed. For tests and, later, for events. */
   brake(index: number, speed: number): void {
     this.checkIndex(index)
@@ -126,21 +153,39 @@ export class Lane {
       )
     }
 
-    const { positions, speeds, accelerations, size } = this
+    const { positions, speeds, accelerations, size, stopLine } = this
+
+    // The phantom is an ordinary stationary vehicle parked with its rear
+    // bumper on the line, so it stands a vehicle length beyond it and the same
+    // bumper-to-bumper subtraction below applies unchanged. The two lengths
+    // cancel, and that cancellation is the point: the tempting
+    // `stopLine - position - VEHICLE_LENGTH` would park every queue in the
+    // network one whole car short of every line, which still looks plausible.
+    const phantomPosition = stopLine === undefined ? undefined : stopLine + VEHICLE_LENGTH
 
     // Pass 1: accelerations, all from the current state.
     for (let i = 0; i < size; i++) {
       const leading = i > 0
-      accelerations[i] = idmAcceleration(
-        {
-          speed: speeds[i]!,
-          // Bumper to bumper: the leader is the previous index, and a whole
-          // vehicle length of it sits between the two positions.
-          gap: leading ? positions[i - 1]! - positions[i]! - VEHICLE_LENGTH : Infinity,
-          leaderSpeed: leading ? speeds[i - 1]! : Infinity,
-        },
-        params,
-      )
+      // Bumper to bumper: the leader is the previous index, and a whole
+      // vehicle length of it sits between the two positions.
+      let gap = leading ? positions[i - 1]! - positions[i]! - VEHICLE_LENGTH : Infinity
+      let leaderSpeed = leading ? speeds[i - 1]! : Infinity
+
+      if (phantomPosition !== undefined) {
+        const phantomGap = phantomPosition - positions[i]! - VEHICLE_LENGTH
+        // Only vehicles that have not yet reached the line, and only when the
+        // phantom is nearer than the real leader. A negative gap would mean
+        // the line is behind the vehicle, and braking for a light it has
+        // already gone through. Ordering is descending, so a real leader still
+        // short of the line is always the nearer of the two and wins here
+        // without any search for "the vehicle nearest the line".
+        if (phantomGap >= 0 && phantomGap < gap) {
+          gap = phantomGap
+          leaderSpeed = 0
+        }
+      }
+
+      accelerations[i] = idmAcceleration({ speed: speeds[i]!, gap, leaderSpeed }, params)
     }
 
     // Pass 2: ballistic integration.
