@@ -145,6 +145,27 @@ export class DrawTool {
     this.hovered = undefined
   }
 
+  /**
+   * Throw away the provisional point without touching the placed ones.
+   *
+   * The counterpart to `hover`, and it exists because touch has no hover to
+   * stop happening. Under a mouse the provisional point is simply overwritten
+   * by the next `mousemove` and is never *withdrawn*; under a finger it has to
+   * be, because a drag can be abandoned. `GestureRecogniser` reports that as
+   * `dragCancel` — a second finger arriving to start a pinch, or the browser
+   * taking the pointer away mid-drag — and the point the abandoned drag was
+   * previewing must not survive it. Without this the only way to drop a
+   * provisional point is `cancel()`, which also discards every point the
+   * player has already placed: the difference between "that drag is off" and
+   * "your road is gone".
+   *
+   * Idempotent, and safe with nothing hovered — a `dragCancel` can arrive for
+   * a drag that never resolved to a ground position at all.
+   */
+  clearHover(): void {
+    this.hovered = undefined
+  }
+
   undoLastPoint(): void {
     this.placed.pop()
   }
