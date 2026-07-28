@@ -1,9 +1,13 @@
 import { describe, it, expect } from 'vitest'
 import {
-  buildSceneContent, solveNetwork, terrainBounds,
+  buildSceneContent, solveNetwork, drivableRoads,
   CORRIDOR_MAX_BATTER_WIDTH, EXCAVATION_STATION_SPACING,
   DEFAULT_DRAW_CLASS, RIG_INITIAL_DISTANCE,
 } from './roadScene'
+import { buildDemoSceneContent } from './demoNetwork.fixture'
+import { DrawTool } from '../tool/drawTool'
+import { resolveSnap } from '../tool/snap'
+import { Fleet, FIXED_STEP } from '../traffic/fleet'
 import { buildNetworkMesh } from '../mesh/networkMesh'
 import type { RoadMesh } from '../mesh/roadMesh'
 import { RoadNetwork, type RoadId } from '../network/graph'
@@ -25,17 +29,22 @@ import { DECK_DEPTH } from '../mesh/structures/bridgeMesh'
 import { networkStructureSpans, type StructureSpan } from '../mesh/structures/spans'
 
 /**
- * The demo scene is the only end-to-end evidence the structures pipeline
- * works, so its parameters are asserted rather than eyeballed. Both triggers
- * shipped unreachable once — a grade solver bounded to ground + fill
+ * The three-arm demo network is the only end-to-end evidence the structures
+ * pipeline works, so its parameters are asserted rather than eyeballed. Both
+ * triggers shipped unreachable once — a grade solver bounded to ground + fill
  * allowance can never produce a structure station, and a corridor template
  * with no `maxBatterWidth` can never produce a wall — and neither failure is
  * visible in a screenshot of a scene that renders perfectly well without them.
  *
- * The scene is built once: it grades three roads over a 257x257 terrain and
- * excavates every corridor, which is not cheap.
+ * Built HERE rather than taken from `buildSceneContent`. The game now opens as
+ * a blank canvas, so the arms are no longer the shipped starting state; this
+ * file owns its fixture explicitly (see `demoNetwork.fixture.ts`) instead of
+ * measuring whatever the game happens to ship with.
+ *
+ * Built once: it grades three roads over a 257x257 terrain and excavates every
+ * corridor, which is not cheap.
  */
-const content = buildSceneContent()
+const content = buildDemoSceneContent()
 
 /**
  * Everything hanging below a rural road's design line where it is carried over
@@ -47,14 +56,14 @@ const content = buildSceneContent()
 const ruralStructureDepth = totalPavementThickness(ROAD_CLASSES.rural) + DECK_DEPTH
 
 /**
- * The demo scene rebuilt with no corridor template, so no wall can be built
+ * The demo network rebuilt with no corridor template, so no wall can be built
  * and every structure vertex left is a bridge.
  *
  * `structureSpans` is required alongside `terrain` (see `NetworkMeshOptions`),
- * and derived here from the same function `solveNetwork` uses. The demo scene
- * has no crossings, so it forces no decks, and this list is identical to the
- * one the scene excavated to — which is the point: these comparisons are
- * against the scene's own structures, not against a second derivation of them.
+ * and derived here from the same function `solveNetwork` uses. The demo
+ * network has no crossings, so it forces no decks, and this list is identical
+ * to the one the fixture excavated to — which is the point: these comparisons
+ * are against the fixture's own structures, not against a second derivation.
  */
 const demoBridgesOnly = () => ({
   spacing: 4,
@@ -75,46 +84,7 @@ const structureVertices = (built: { structures: ReadonlyMap<number, { vertexCoun
   return total
 }
 
-/**
- * `terrainBounds` sizes the sun's shadow camera (see `drawRoadScene`), so it
- * is the one piece of that setup that is a pure function of the terrain and
- * testable without a renderer — everything else in Step 3 needs a real
- * `THREE.DirectionalLight` and is covered by using the app (Step 8).
- */
-describe('terrainBounds', () => {
-  it('centres on a flat heightmap\'s footprint, at its own elevation', () => {
-    // 3x3 grid, cellSize 10, all elevations 0: a 20x20 footprint centred on
-    // (10, 10), with no elevation spread at all.
-    const flat = new Heightmap(0, 0, 10, 3, 3, new Float32Array(9))
-    const bounds = terrainBounds(flat)
-
-    expect(bounds.centerX).toBe(10)
-    expect(bounds.centerY).toBe(10)
-    expect(bounds.centerZ).toBe(0)
-    // Half-footprint is (10, 10) with no elevation spread, so the enclosing
-    // sphere's radius is exactly the flat diagonal: hypot(10, 10, 0).
-    expect(bounds.radius).toBeCloseTo(Math.hypot(10, 10, 0), 10)
-  })
-
-  it("grows the radius to cover the heightmap's own elevation spread", () => {
-    // 2x2 grid, cellSize 1, origin (5, 5): a single cell, one corner raised
-    // 10m above the other three — minZ=0, maxZ=10.
-    const elevations = new Float32Array([0, 0, 0, 10])
-    const bumpy = new Heightmap(5, 5, 1, 2, 2, elevations)
-    const bounds = terrainBounds(bumpy)
-
-    expect(bounds.centerX).toBe(5.5)
-    expect(bounds.centerY).toBe(5.5)
-    // Midpoint of the elevation range, not the mean of the four samples.
-    expect(bounds.centerZ).toBe(5)
-    // Half-footprint (0.5, 0.5) plus half the elevation spread (5) — a
-    // flat-heightmap radius (as above) would badly undersize the shadow
-    // camera's frustum against this much relief.
-    expect(bounds.radius).toBeCloseTo(Math.hypot(0.5, 0.5, 5), 10)
-  })
-})
-
-describe('the demo scene', () => {
+describe('the demo network fixture', () => {
   it('grades all three roads', () => {
     expect(content.designs.size).toBe(3)
   })
@@ -160,6 +130,249 @@ describe('the demo scene', () => {
     }
     expect(sampled).toBeGreaterThan(0)
     expect(untouched).toBeGreaterThan(0)
+  })
+})
+
+/**
+ * The blank canvas: what the game actually opens on.
+ *
+ * Every one of these states is new. Until this change a road had ALWAYS
+ * existed — three of them, from the first frame — so no code path here had
+ * ever run with zero roads in it, and "it obviously works, the loops are just
+ * empty" is exactly the shape of argument this project has been wrong with
+ * before. The scene is built once and shared; it is cheap precisely because
+ * there is nothing on it to grade.
+ */
+const blank = buildSceneContent()
+
+describe('the scene the game opens on', () => {
+  it('has terrain', () => {
+    // The half that must NOT be empty. A blank canvas is bare ground, not an
+    // empty world, and a `buildSceneContent` that returned an empty heightmap
+    // would satisfy every other assertion in this block.
+    expect(blank.terrain.cols).toBe(257)
+    expect(blank.terrain.rows).toBe(257)
+    expect(blank.terrain.width).toBe(2560)
+    expect(blank.terrain.height).toBe(2560)
+  })
+
+  it('has no roads', () => {
+    // The user's request, in one assertion: "I want it to start as a blank
+    // canvas that it build". Adding any road back to `buildSceneContent`
+    // fails here.
+    expect(blank.network.roads).toEqual([])
+    expect(blank.network.nodes).toEqual([])
+  })
+
+  it('derives nothing from the roads it does not have', () => {
+    expect(blank.designs.size).toBe(0)
+    expect(blank.built.roads.size).toBe(0)
+    expect(blank.built.junctions.size).toBe(0)
+    expect(blank.built.structures.size).toBe(0)
+  })
+
+  it('reports no problems, rather than reporting nothing at all', () => {
+    // Empty because there is nothing to be wrong with, not because the report
+    // channels were skipped: an empty network is a *valid* network, and a
+    // scene that opened with a refusal on the message line would be telling
+    // the player they had already done something wrong.
+    expect([...blank.infeasibleRoads.keys()]).toEqual([])
+    expect(blank.infeasibleCrossings).toEqual([])
+    expect(blank.shallowCrossings).toEqual([])
+    expect([...blank.unsupportedFill.keys()]).toEqual([])
+    expect([...blank.built.tightCrossings.keys()]).toEqual([])
+    expect([...blank.built.infeasibleJunctions.keys()]).toEqual([])
+    expect([...blank.built.elevationMismatches.keys()]).toEqual([])
+  })
+
+  it('leaves the ground exactly as the terrain generated it', () => {
+    // No roads means no corridors means no excavation. Checked across the
+    // whole grid rather than at a point, because a stray delta anywhere would
+    // be a cut with no road in it — and `terrainVertexColours` would paint it
+    // as cut face, a visible scar on an untouched landscape.
+    let moved = 0
+    for (let row = 0; row < blank.terrain.rows; row++) {
+      for (let col = 0; col < blank.terrain.cols; col++) {
+        if (blank.editLayer.deltaAt(col, row) !== 0) moved++
+      }
+    }
+    expect(moved).toBe(0)
+  })
+})
+
+describe('an empty network', () => {
+  /** Fresh each time, so these cases cannot reach each other. */
+  const empty = (): RoadNetwork => new RoadNetwork()
+
+  it('solves without throwing, and returns empties', () => {
+    const result = solveNetwork(blank.terrain, empty())
+
+    expect(result.designs.size).toBe(0)
+    expect(result.spans.size).toBe(0)
+    expect(result.infeasibleRoads.size).toBe(0)
+    expect(result.infeasibleCrossings).toEqual([])
+    expect(result.shallowCrossings).toEqual([])
+    expect(result.unsupportedFill.size).toBe(0)
+    expect(result.built.roads.size).toBe(0)
+  })
+
+  it('still produces a usable edit layer to pick against', () => {
+    // The pointer-to-ground ray marches `terrainSampler`, which IS the edit
+    // layer (see `drawRoadScene`). If an empty solve returned a layer that
+    // sampled to nothing, every click on an empty world would miss the ground
+    // and the player could never place their first point.
+    const { editLayer } = solveNetwork(blank.terrain, empty())
+
+    for (const [x, y] of [[0, 0], [1280, 1280], [2560, 2560], [640, 1900]]) {
+      expect(editLayer.sample(x!, y!)).toBe(blank.terrain.sample(x!, y!))
+      expect(Number.isFinite(editLayer.sample(x!, y!))).toBe(true)
+    }
+  })
+
+  it('carries no traffic, and advancing it is a no-op rather than an error', () => {
+    // `drawRoadScene` calls `traffic.sync(drivableRoads(network), designs)` at
+    // startup and `traffic.advance(dt)` every frame from the first one. On an
+    // empty network both now run against nothing, every frame, forever.
+    const drivable = drivableRoads(empty())
+    expect(drivable).toEqual([])
+
+    const fleet = new Fleet()
+    fleet.sync(drivable)
+    for (let step = 0; step < 40; step++) fleet.advance(FIXED_STEP)
+
+    let vehicles = 0
+    fleet.forEachVehicle(() => { vehicles++ })
+    expect(vehicles).toBe(0)
+  })
+
+  it('snaps a hover to free ground, because there is nothing to snap to', () => {
+    // The marker the player sees before their first click. With no roads and
+    // no nodes in the world, every position must resolve as `free` — a snap
+    // resolver that assumed at least one road existed would either throw here
+    // or return a target pointing at nothing.
+    const snap = resolveSnap(empty(), vec2(1280, 1280), 20)
+    expect(snap).toEqual({ kind: 'free', position: vec2(1280, 1280) })
+  })
+})
+
+/**
+ * Committing the first road onto an empty network, and deleting the last one
+ * back to empty.
+ *
+ * Neither transition had ever been exercised. `DrawTool.commit` had only ever
+ * added a road to a network that already contained three, and `deleteSelected`
+ * had only ever left two behind — so "no roads" was reachable in the graph and
+ * unreachable in the game.
+ */
+describe('the first road on an empty world', () => {
+  /** Along the valley floor near the terrain's middle, where the camera now
+   * looks — a short, straight, gently graded gravel road, which is exactly
+   * what a player's first gesture produces. */
+  const FIRST = [vec2(1150, 1280), vec2(1400, 1280)] as const
+
+  const drawFirstRoad = (network: RoadNetwork) => {
+    const tool = new DrawTool(network, DEFAULT_DRAW_CLASS)
+    for (const point of FIRST) tool.place(point, false)
+    return tool.commit()
+  }
+
+  it('commits, grades and meshes', () => {
+    const network = new RoadNetwork()
+    const result = drawFirstRoad(network)
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return // narrows the type for the compiler
+    expect(network.roads.length).toBe(1)
+    // A lone road has two ends and therefore two nodes, neither shared.
+    expect(network.nodes.length).toBe(2)
+
+    // The rebuild `attemptCommit` performs. The road has to come out of it
+    // with a design profile and real geometry, or the player's first click
+    // pair produces a road they cannot see.
+    const { designs, built, infeasibleRoads } = solveNetwork(blank.terrain, network)
+    expect(infeasibleRoads.size).toBe(0)
+    expect(designs.get(result.roadId)!.length).toBeGreaterThan(1)
+
+    const mesh = built.roads.get(result.roadId)
+    expect(mesh).toBeDefined()
+    const vertices = mesh!.layers.reduce((sum, layer) => sum + layer.mesh.vertexCount, 0)
+    expect(vertices).toBeGreaterThan(0)
+  })
+
+  it('digs its corridor into ground that nothing had touched', () => {
+    // The excavation's first run on a virgin edit layer. `CorridorExcavation`
+    // arbitrates overlapping corridors by nearest centreline; with exactly one
+    // corridor and no prior deltas there is nothing to arbitrate, which is the
+    // case it had never been given.
+    const network = new RoadNetwork()
+    expect(drawFirstRoad(network).ok).toBe(true)
+
+    const { editLayer } = solveNetwork(blank.terrain, network)
+
+    let moved = 0
+    for (let row = 0; row < blank.terrain.rows; row++) {
+      for (let col = 0; col < blank.terrain.cols; col++) {
+        if (editLayer.deltaAt(col, row) !== 0) moved++
+      }
+    }
+    // Compared against the blank scene rather than against a number: the
+    // blank canvas moves nothing, and one road must move something.
+    expect(moved).toBeGreaterThan(0)
+  })
+
+  it('puts traffic on it, having had none the moment before', () => {
+    const network = new RoadNetwork()
+    const committed = drawFirstRoad(network)
+    expect(committed.ok).toBe(true)
+
+    const { designs } = solveNetwork(blank.terrain, network)
+    const drivable = drivableRoads(network).filter(
+      (road) => (designs.get(road.id)?.length ?? 0) > 0,
+    )
+    expect(drivable).toHaveLength(1)
+
+    const fleet = new Fleet()
+    fleet.sync(drivable)
+    // Long enough for the spawn interval to have admitted several vehicles.
+    for (let step = 0; step < 200; step++) fleet.advance(FIXED_STEP)
+
+    let vehicles = 0
+    fleet.forEachVehicle(() => { vehicles++ })
+    expect(vehicles).toBeGreaterThan(0)
+  })
+
+  it('returns to a solvable empty world when the last road is deleted', () => {
+    const network = new RoadNetwork()
+    const committed = drawFirstRoad(network)
+    expect(committed.ok).toBe(true)
+    if (!committed.ok) return
+
+    const selectTool = new SelectTool(network)
+    // Midway along it, the way a player picks a road.
+    expect(selectTool.select(vec2(1275, 1280))).toBe(committed.roadId)
+    expect(selectTool.deleteSelected()).toEqual({ ok: true, roadId: committed.roadId })
+
+    // The other end of the round trip. Deleting the last road must leave the
+    // graph genuinely empty — no orphaned nodes for `resolveSnap` to offer the
+    // player a snap to, and no lane for a car to keep driving down.
+    expect(network.roads).toEqual([])
+    expect(network.nodes).toEqual([])
+
+    const { designs, editLayer, built } = solveNetwork(blank.terrain, network)
+    expect(designs.size).toBe(0)
+    expect(built.roads.size).toBe(0)
+    expect(drivableRoads(network)).toEqual([])
+
+    // And the ground heals: the corridor the deleted road dug is gone, because
+    // `solveNetwork` excavates a FRESH edit layer every time rather than
+    // patching the previous one.
+    let moved = 0
+    for (let row = 0; row < blank.terrain.rows; row++) {
+      for (let col = 0; col < blank.terrain.cols; col++) {
+        if (editLayer.deltaAt(col, row) !== 0) moved++
+      }
+    }
+    expect(moved).toBe(0)
   })
 })
 

@@ -7,7 +7,10 @@ import {
   describeSplitOutcome,
   describeUpgradeObstacle,
   describeUpgradeObstacles,
+  describeStartingHint,
 } from './messages'
+import { ROAD_CLASS_ORDER } from '../network/roadClass'
+import { DEFAULT_DRAW_CLASS } from '../debug/roadScene'
 
 describe('describePolylineRejection', () => {
   it('explains too few points', () => {
@@ -303,5 +306,64 @@ describe('describeShallowCrossings', () => {
     expect(describeShallowCrossings([shallow, { ...shallow, crosses: 2 }])).toMatch(
       /2 crossings/,
     )
+  })
+})
+
+/**
+ * The line the game opens on.
+ *
+ * A blank canvas with nothing said on it is unusable: the scene ships no roads
+ * now, so the opening frame is the only chance to say that clicking places a
+ * point, that a double-click or Enter commits, and that road class exists at
+ * all. What is asserted here is not the wording but the three facts the
+ * wording has to carry, plus the one thing that could silently go stale — the
+ * key numbers, which are `ROAD_CLASS_ORDER` indices plus one.
+ */
+describe('describeStartingHint', () => {
+  const hint = () => describeStartingHint(ROAD_CLASS_ORDER, DEFAULT_DRAW_CLASS)
+
+  it('says how to place a point and how to commit', () => {
+    // The two gestures with no other way to discover them. Without the commit
+    // verb a player places points forever and never gets a road.
+    expect(hint()).toMatch(/[Cc]lick to place/)
+    expect(hint()).toMatch(/double-click/)
+    expect(hint()).toMatch(/Enter/)
+  })
+
+  it('numbers every class the way the keys are actually bound', () => {
+    // `roadScene.ts` binds '1'-'4' to `ROAD_CLASS_ORDER` indices 0-3, so the
+    // numbering here is one-based off that same array. Generated from the
+    // ladder rather than typed, so reordering or extending it cannot leave
+    // this sentence naming the wrong keys.
+    const message = hint()
+    ROAD_CLASS_ORDER.forEach((className, index) => {
+      expect(message).toContain(`${index + 1} ${className}`)
+    })
+    // Every class, and no invented fifth key.
+    expect(message).not.toContain(`${ROAD_CLASS_ORDER.length + 1} `)
+  })
+
+  it('names the class to start in', () => {
+    // The fact the player cannot see: gravel is the only class whose corners
+    // fit inside the ground the opening camera frames (see
+    // `DEFAULT_DRAW_CLASS`), so the first road drawn in any other class is
+    // refused for curve overlap with nothing on screen explaining it.
+    expect(hint()).toContain(DEFAULT_DRAW_CLASS)
+    expect(hint()).toMatch(new RegExp(`[Ss]tart on ${DEFAULT_DRAW_CLASS}`))
+  })
+
+  it('stays to two lines', () => {
+    // This is a zen road builder, not a tutorial. One newline, no more, and
+    // nothing long enough to become a wall of text over the terrain.
+    const message = hint()
+    const lines = message.split('\n')
+    expect(lines).toHaveLength(2)
+    for (const line of lines) expect(line.length).toBeLessThan(110)
+  })
+
+  it('follows the ladder it is given rather than a hardcoded one', () => {
+    // Proves the generation is real: a different ladder produces a different
+    // sentence, so a future class cannot be added without this moving.
+    expect(describeStartingHint(['highway', 'gravel'], 'highway')).toContain('1 highway · 2 gravel')
   })
 })

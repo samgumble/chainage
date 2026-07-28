@@ -3,9 +3,8 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
-import { Alignment } from '../geometry/alignment'
-import { Line } from '../geometry/primitives'
-import { vec2, type Vec2 } from '../geometry/vec2'
+import type { Alignment } from '../geometry/alignment'
+import type { Vec2 } from '../geometry/vec2'
 import type { PolylineRejection } from '../geometry/polyline'
 import { generateValley } from '../terrain/generate'
 import {
@@ -34,6 +33,7 @@ import { roadsWithTrafficEntry, type RoadWithEntry } from '../mesh/junctionClear
 import { VEHICLE_LENGTH } from '../traffic/lane'
 import { terrainGeometry } from '../render/terrainMesh'
 import { CameraRig, type Vec3 as RigVec3 } from '../render/cameraRig'
+import { terrainBounds, terrainFocus } from '../render/cameraFraming'
 import { sunAt } from '../render/sunlight'
 import { surfaceFor } from '../render/materials'
 import { TILT_SHIFT_FRAGMENT_SHADER, createTiltShiftUniforms } from '../render/tiltShift'
@@ -103,6 +103,7 @@ import {
   describeInfeasibleRoads,
   describeInfeasibleCrossings,
   describeShallowCrossings,
+  describeStartingHint,
 } from '../tool/messages'
 
 const MAX_GRADE = 0.07
@@ -231,15 +232,6 @@ export const RIG_INITIAL_DISTANCE = 300
  * road genuinely is a larger object than a farm track.
  */
 export const DEFAULT_DRAW_CLASS: RoadClassName = 'gravel'
-
-/**
- * Where the demo network's three arms meet — a T junction on the valley
- * floor, main road running east-west with a narrower gravel branch heading
- * north. Module scope (not local to `buildSceneContent`) because
- * `drawRoadScene` also needs it, to frame the camera rig on the same point
- * the network was actually built around rather than a second guess at it.
- */
-const JUNCTION = vec2(900, 1280)
 
 /**
  * Sweep one road's corridor into a shared excavation.
@@ -504,7 +496,15 @@ const solveGround = (
     clearanceFloors,
   })
 
-const solveFor = (alignment: Alignment, terrain: Heightmap): GradeSolution =>
+/**
+ * Grade one alignment against natural ground with this scene's own limits.
+ *
+ * Exported for `demoNetwork.fixture.ts`, which admits an arm to its network
+ * only if it grades — the same pre-check the demo network has always applied,
+ * and one that has to use the scene's own solver settings rather than a second
+ * set that happened to agree with them.
+ */
+export const solveFor = (alignment: Alignment, terrain: Heightmap): GradeSolution =>
   solveGround(sampleGroundProfile(alignment, terrain, GRADE_STATION_SPACING))
 
 /**
@@ -923,62 +923,47 @@ export const solveNetwork = (
 }
 
 /**
- * Terrain, roads, earthworks and meshes for the demo scene.
+ * The terrain the game opens on.
  *
- * Split out from `drawRoadScene` so the scene's parameters can be asserted
- * against without a WebGL context. The bar those assertions hold is that this
- * scene actually exercises the structures pipeline: a demo whose constants
- * make every trigger unreachable looks exactly like one that works.
+ * Exported so the test fixture (`demoNetwork.fixture.ts`) builds its roads
+ * into the SAME ground the player gets, rather than into a second heightmap
+ * that only happens to be generated the same way. Every measured number in
+ * those tests — a 273-423 span, a 17.554m drop, a 0.457m junction spread — is
+ * a property of this particular seed, so the fixture and the scene must not
+ * be able to drift apart on it.
+ *
+ * The 10m cell size is fine enough that the excavated corridor (a 10m-wide
+ * formation) isn't lost between grid nodes: at the original 20m cellSize, a
+ * single cell spans the whole formation width plus both batters, so the
+ * cut/fill dissolves into the surrounding terrain's own noise instead of
+ * reading as an engineered surface. Same 2560m footprint, twice the density.
  */
-export const buildSceneContent = (): SceneContent => {
-  // Fine enough that the excavated corridor (a 10m-wide formation) isn't lost
-  // between grid nodes: at the original 20m cellSize, a single cell spans the
-  // whole formation width plus both batters, so the cut/fill dissolves into
-  // the surrounding terrain's own noise instead of reading as an engineered
-  // surface. Same 2560m footprint as before, just twice the density.
-  const terrain = generateValley({
+export const buildTerrain = (): Heightmap =>
+  generateValley({
     cols: 257, rows: 257, cellSize: 10,
     floorElevation: 100, ridgeHeight: 70, valleyHalfWidth: 400, seed: 7,
   })
 
-  // A T junction on the valley floor: a main road running east-west with a
-  // narrower gravel branch heading north. Three straight roads meeting at one
-  // point, which is exactly what a junction needs and nothing more.
-  //
-  // All three alignments are built starting FROM the junction rather than
-  // arriving at it. `solveGradeProfile`'s forward greedy sweep pins station 0
-  // to natural ground but can drift away from it by the far end of a long
-  // alignment (the terrain here is rough enough that it does): starting every
-  // leg at the junction means every leg's own elevation there is natural
-  // ground, so the three legs agree and the junction sits flush without
-  // needing `elevationMismatches` to paper over a drifted arrival station.
-  //
-  // Reversing them to arrive at the junction instead has been tried and
-  // reverted: it moved the legs' disagreement at the node from 0.457m to
-  // 5.797m — a three-metre step at the exact point the camera is aimed at —
-  // and did not fix the traffic problem it was aimed at either, because
-  // arriving cars converge on the node exactly as spawning cars diverged from
-  // it. Where traffic enters is `trafficEntryStations`' business, not the
-  // alignments'.
+/**
+ * Terrain, and nothing built on it yet.
+ *
+ * The game opens as a blank canvas: real ground, an EMPTY `RoadNetwork`, and
+ * every road in the world drawn by the player. It used to open on a fixed
+ * three-arm T junction, which was doing two unrelated jobs at once — it was
+ * the shipped starting state AND it was the fixture nearly every scene-level
+ * test measured against. Those are now separate things: the arms live in
+ * `demoNetwork.fixture.ts`, which tests build for themselves, and this
+ * function ships nothing but the ground.
+ *
+ * Still routed through `solveNetwork` rather than short-circuited to a
+ * hand-written empty `SceneContent`. An empty network is a state the game had
+ * never once been in, and the way to find out whether the grade solve, the
+ * excavation and the mesh build survive it is to run them, not to arrange for
+ * them not to run. `roadScene.test.ts` pins the empty answer they give.
+ */
+export const buildSceneContent = (): SceneContent => {
+  const terrain = buildTerrain()
   const network = new RoadNetwork()
-
-  // West and east arms both start at the junction, heading opposite ways
-  // along the valley; the branch starts there too, heading north.
-  const westArm = new Alignment([new Line(JUNCTION, Math.PI, 750)])
-  const eastArm = new Alignment([new Line(JUNCTION, 0, 750)])
-  const branch = new Alignment([new Line(JUNCTION, Math.PI / 2, 300)])
-
-  const arms: [Alignment, 'rural' | 'gravel'][] = [
-    [westArm, 'rural'], [eastArm, 'rural'], [branch, 'gravel'],
-  ]
-
-  // Only roads that grade feasibly join the demo network — an infeasible arm
-  // would otherwise sit in the network with no design profile and an empty
-  // mesh, which is not what this fixed demo layout wants.
-  for (const [alignment, className] of arms) {
-    if (!solveFor(alignment, terrain).feasible) continue
-    network.addRoad(alignment, className)
-  }
 
   const {
     designs, editLayer, built,
@@ -1004,48 +989,6 @@ export const buildSceneContent = (): SceneContent => {
  */
 export const drivableRoads = (network: RoadNetwork): readonly RoadWithEntry[] =>
   roadsWithTrafficEntry(network, VEHICLE_LENGTH)
-
-/** A sphere in the project's own convention (`(x, y)` ground, `z` up) that
- * encloses a terrain's full footprint and elevation range. */
-export type TerrainBounds = {
-  readonly centerX: number
-  readonly centerY: number
-  readonly centerZ: number
-  readonly radius: number
-}
-
-/**
- * The bounding sphere of a heightmap — its footprint (from `originX`/`originY`
- * out to `width`/`height`) and the full spread of its own elevations.
- *
- * Exists to size the sun's shadow camera (see `drawRoadScene`): a
- * `DirectionalLight`'s shadow is an orthographic camera whose default frustum
- * is a couple of units across, which on terrain at this scene's scale
- * produces either no shadows at all or a small square of them near the
- * origin. A pure function of the terrain rather than a number picked by eye,
- * so it stays correct if the demo terrain's footprint or relief ever changes.
- * No three.js in sight, so it is testable without a renderer.
- */
-export const terrainBounds = (terrain: Heightmap): TerrainBounds => {
-  let minZ = Infinity
-  let maxZ = -Infinity
-  for (const z of terrain.elevations) {
-    if (z < minZ) minZ = z
-    if (z > maxZ) maxZ = z
-  }
-
-  const centerX = terrain.originX + terrain.width / 2
-  const centerY = terrain.originY + terrain.height / 2
-  const centerZ = (minZ + maxZ) / 2
-  const halfElevation = (maxZ - minZ) / 2
-
-  return {
-    centerX,
-    centerY,
-    centerZ,
-    radius: Math.hypot(terrain.width / 2, terrain.height / 2, halfElevation),
-  }
-}
 
 /**
  * Per-vertex colour for the terrain mesh, RGB triples in `terrainGeometry`'s
@@ -1629,7 +1572,10 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   /** Which of the two modes the player is currently in. Defaults to draw so
    * the scene opens exactly as it always has. */
   let toolMode: ToolMode = 'draw'
-  setMessage('')
+  // Not the bare mode label the scene used to open with: there are no roads on
+  // screen now, so the opening frame has to say how to make one. See
+  // `describeStartingHint` — it is replaced by the first thing that happens.
+  setMessage(describeStartingHint(ROAD_CLASS_ORDER, DEFAULT_DRAW_CLASS))
 
   let networkMeshes = addNetworkMeshes(
     scene, terrain, editLayer, built,
@@ -1724,17 +1670,14 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
 
   // --- Camera rig ---------------------------------------------------------
   //
-  // Targets the actual junction the demo network was built around (`JUNCTION`,
-  // module scope — see its docstring), not a separate guess at the same spot,
-  // so bringing the distance in below reliably frames the junction rather
-  // than empty terrain beside it.
-  const RIG_TARGET: RigVec3 = {
-    x: JUNCTION.x,
-    y: JUNCTION.y,
-    z: terrain.sample(JUNCTION.x, JUNCTION.y),
-  }
+  // The middle of the terrain, standing on the ground there — see
+  // `terrainFocus`. It used to be `JUNCTION`, the point the demo network's
+  // three arms were built around; the scene now opens with no roads at all,
+  // so there is no junction to aim at and a hardcoded coordinate would frame
+  // a spot for a reason that no longer exists.
+  const rigTarget: RigVec3 = terrainFocus(terrain)
 
-  const rig = new CameraRig(RIG_TARGET, RIG_INITIAL_DISTANCE)
+  const rig = new CameraRig(rigTarget, RIG_INITIAL_DISTANCE)
   // Lower than `CameraRig`'s own default elevation (`Math.PI / 5`, 36°): a
   // diorama is looked across at a raised, comfortable angle, not down at from
   // near-plan.

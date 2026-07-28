@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { buildSceneContent, drivableRoads, solveNetwork, type SceneContent } from './roadScene'
+import { drivableRoads, solveNetwork, type SceneContent } from './roadScene'
+import { buildDemoSceneContent } from './demoNetwork.fixture'
 import { MAX_JUNCTION_ELEVATION_SPREAD } from '../mesh/networkMesh'
 import type { RoadWithEntry } from '../mesh/junctionClearance'
 import { formationHalfWidth, ROAD_CLASSES, totalPavementThickness } from '../network/roadClass'
@@ -12,15 +13,20 @@ import { laneCentreOffset, placeVehicle, type VehiclePose } from '../render/vehi
 import { VEHICLE_WIDTH } from '../render/trafficView'
 
 /**
- * The demo scene's traffic, against the demo scene's own geometry.
+ * The demo network's traffic, against the demo network's own geometry.
  *
  * Everything else that tests traffic tests it on a synthetic straight from the
  * origin, where the only road in the world is the one under test. Nothing there
- * can see what a player sees, which is three roads meeting at a point with the
- * camera pointed at it — and the defect this file exists for was invisible to
- * all nine hundred of those tests: every car in the scene materialised at
- * station 0, which on all three legs IS the junction, so three roads' worth of
- * new traffic interpenetrated at the focal point.
+ * can see three roads meeting at a point — and the defect this file exists for
+ * was invisible to all nine hundred of those tests: every car in the scene
+ * materialised at station 0, which on all three legs IS the junction, so three
+ * roads' worth of new traffic interpenetrated at the focal point.
+ *
+ * The three arms were the game's starting state when this file was written and
+ * are now a fixture (`demoNetwork.fixture.ts`) — same junction, same bearings,
+ * same lengths, same terrain, so every number pinned below still measures what
+ * it measured. Built here explicitly rather than taken from whatever the game
+ * ships, which is now bare ground.
  *
  * The fix is not to reverse the legs. That has been tried and measured: cars
  * then converge on the node instead of diverging from it and collide there just
@@ -32,7 +38,7 @@ import { VEHICLE_WIDTH } from '../render/trafficView'
  *
  * Built once. Grading three roads over a 257x257 terrain is not cheap.
  */
-const content: SceneContent = buildSceneContent()
+const content: SceneContent = buildDemoSceneContent()
 
 /**
  * Roads with a design profile, carrying their entry stations — exactly what
