@@ -67,8 +67,23 @@ describe('idmAcceleration', () => {
   it('brakes for a leader that is slower even when the gap is comfortable', () => {
     // The closing-speed term is what makes this negative; without it a
     // generous gap would read as free road right up until the collision.
-    const a = idmAcceleration({ speed: 30, gap: 60, leaderSpeed: 5 }, p)
-    expect(a).toBeLessThan(0)
+    //
+    // `speed` must sit BELOW `desiredSpeed`, and that is the whole test.
+    // An earlier version used 30 against a desired speed of 30, which zeroes
+    // the free term — and with the free term at zero the result is
+    // `-a·(s*/s)²`, negative for ANY leader at ANY gap. It passed with the
+    // closing-speed term deleted, so it never tested the thing its own name
+    // claims. At 20 the free term is `1 − (20/30)⁴ ≈ 0.80`, so the closing
+    // term has something to overcome and its absence flips the sign.
+    const closing = idmAcceleration({ speed: 20, gap: 60, leaderSpeed: 5 }, p)
+    expect(closing).toBeLessThan(0)
+
+    // And "comfortable" is asserted rather than assumed: the same car at the
+    // same gap behind a leader matching its speed is still accelerating, so
+    // 60m genuinely is roomy here and the braking above is caused by the
+    // closing speed, not by the gap being tight.
+    const matched = idmAcceleration({ speed: 20, gap: 60, leaderSpeed: 20 }, p)
+    expect(matched).toBeGreaterThan(0)
   })
 
   it('ignores a leader that is pulling away', () => {
