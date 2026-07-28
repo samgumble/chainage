@@ -1,10 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { buildSceneContent, solveNetwork, type SceneContent } from './roadScene'
+import { buildSceneContent, drivableRoads, solveNetwork, type SceneContent } from './roadScene'
 import { MAX_JUNCTION_ELEVATION_SPREAD } from '../mesh/networkMesh'
+import type { RoadWithEntry } from '../mesh/junctionClearance'
 import { formationHalfWidth, ROAD_CLASSES } from '../network/roadClass'
 import type { NetworkNode, RoadId } from '../network/graph'
 import { distance, type Vec2 } from '../geometry/vec2'
-import { FIXED_STEP, Fleet, type DrivableRoad } from '../traffic/fleet'
+import { FIXED_STEP, Fleet } from '../traffic/fleet'
 import { VEHICLE_LENGTH } from '../traffic/lane'
 import { placeVehicle, type VehiclePose } from '../render/vehiclePlacement'
 import { VEHICLE_WIDTH } from '../render/trafficView'
@@ -16,16 +17,27 @@ import { VEHICLE_WIDTH } from '../render/trafficView'
  * origin, where the only road in the world is the one under test. Nothing there
  * can see what a player sees, which is three roads meeting at a point with the
  * camera pointed at it — and the defect this file exists for was invisible to
- * all nine hundred of those tests: every car in the scene materialised inside
- * the junction and drove outward, so no car ever arrived at one and the boxes
- * of three roads' worth of new traffic interpenetrated at the focal point.
+ * all nine hundred of those tests: every car in the scene materialised at
+ * station 0, which on all three legs IS the junction, so three roads' worth of
+ * new traffic interpenetrated at the focal point.
+ *
+ * The fix is not to reverse the legs. That has been tried and measured: cars
+ * then converge on the node instead of diverging from it and collide there just
+ * as hard (89 frames became 88), while moving every leg's station 0 to its far
+ * end moves `solveGradeProfile`'s only terrain-faithful point off the junction
+ * and blows the legs' elevation disagreement there out from 0.457m to 5.797m.
+ * The fix is to keep the legs leaving the junction and enter the traffic clear
+ * of it — see `mesh/junctionClearance.ts`.
  *
  * Built once. Grading three roads over a 257x257 terrain is not cheap.
  */
 const content: SceneContent = buildSceneContent()
 
-/** Roads with a design profile — exactly what `TrafficView.sync` passes on. */
-const drivable: DrivableRoad[] = [...content.network.roads].filter(
+/**
+ * Roads with a design profile, carrying their entry stations — exactly what
+ * `drawRoadScene` hands `TrafficView.sync`.
+ */
+const drivable: readonly RoadWithEntry[] = drivableRoads(content.network).filter(
   (road) => (content.designs.get(road.id)?.length ?? 0) > 0,
 )
 
@@ -39,19 +51,20 @@ const junctionNode = (): NetworkNode => {
 const JUNCTION: Vec2 = junctionNode().position
 
 /**
- * How far from the junction node the legs still share ground, metres.
+ * How far from the junction node the legs could still share ground, metres.
  *
- * The widest leg's formation half-width — the physical extent of the junction
- * plate — plus a whole vehicle, because a vehicle's box reaches half its length
- * beyond its own centre and so does the one it might hit. Derived from the road
- * classes actually in the scene rather than picked, so a wider class or a longer
+ * The widest leg's formation half-width — no part of any junction plate built
+ * from these classes reaches further along a leg than that — plus a whole
+ * vehicle, because a vehicle's box reaches half its length beyond its own
+ * centre and so does the one it might hit. Derived from the road classes
+ * actually in the scene rather than picked, so a wider class or a longer
  * vehicle moves it.
  */
 const JUNCTION_REACH =
   Math.max(...drivable.map((road) => formationHalfWidth(ROAD_CLASSES[road.className]))) +
   VEHICLE_LENGTH
 
-const poseOf = (road: DrivableRoad, station: number): VehiclePose =>
+const poseOf = (road: RoadWithEntry, station: number): VehiclePose =>
   placeVehicle(
     road.alignment,
     content.designs.get(road.id)!,
@@ -109,8 +122,8 @@ type Run = {
   readonly closestApproach: number
   /** Every overlapping pair seen, so the where and the why can be asserted. */
   readonly overlapping: readonly (readonly [Placed, Placed])[]
-  /** Every vehicle seen within `JUNCTION_REACH` of the junction. */
-  readonly nearJunction: readonly Placed[]
+  /** Closest any vehicle's centre came to the junction node. */
+  readonly nearestToJunction: number
   /** Furthest any vehicle got from its own road's station 0. */
   readonly furthestStation: number
 }
@@ -130,9 +143,9 @@ const measure = (seconds: number): Run => {
 
   let framesWithOverlap = 0
   let closestApproach = Infinity
+  let nearestToJunction = Infinity
   let furthestStation = 0
   const overlapping: (readonly [Placed, Placed])[] = []
-  const nearJunction: Placed[] = []
 
   for (let frame = 0; frame < seconds / FIXED_STEP; frame++) {
     fleet.advance(FIXED_STEP)
@@ -141,10 +154,9 @@ const measure = (seconds: number): Run => {
     fleet.forEachVehicle((roadId, station) => {
       const road = byId.get(roadId)!
       const pose = poseOf(road, station)
-      const it = { roadId, station, x: pose.x, y: pose.y, heading: pose.heading }
-      placed.push(it)
+      placed.push({ roadId, station, x: pose.x, y: pose.y, heading: pose.heading })
       if (station > furthestStation) furthestStation = station
-      if (distance(pose, JUNCTION) <= JUNCTION_REACH) nearJunction.push(it)
+      nearestToJunction = Math.min(nearestToJunction, distance(pose, JUNCTION))
     })
 
     let hit = false
@@ -163,42 +175,44 @@ const measure = (seconds: number): Run => {
     if (hit) framesWithOverlap++
   }
 
-  return { framesWithOverlap, closestApproach, overlapping, nearJunction, furthestStation }
+  return { framesWithOverlap, closestApproach, overlapping, nearestToJunction, furthestStation }
 }
 
 /** Ten simulated minutes, the window the reviewer's own probe used. */
 const run = measure(600)
 
 describe('the demo scene’s traffic', () => {
-  it('puts no vehicle into the junction at the moment it enters the road', () => {
-    // THE regression. `Fleet` spawns at station 0, so a leg built FROM the
-    // junction has its entry point inside the junction — three roads' worth of
-    // cars appearing on top of each other at the exact point `RIG_TARGET` aims
-    // the camera at. Every leg's station 0 must be at its outer end.
+  it('builds every leg outward from the junction', () => {
+    // The geometric half of the fix, and the reason the legs are NOT reversed:
+    // `solveGradeProfile` pins station 0 to natural ground and drifts from it
+    // further along, so a leg starting at the junction is faithful to the
+    // terrain exactly where the three legs have to agree with each other.
     //
-    // This is the assertion that fails if the arms are ever built the other way
-    // round again, and nothing in the traffic tests can make it: they are all
-    // single roads at the origin, where station 0 is nowhere in particular.
+    // This fails the moment someone anchors the legs at their far ends again.
+    //
+    // The alignment's own stations, not the driving line's: a leg's chainage
+    // starts on the centreline, and the 1.75m the vehicles sit off it would
+    // otherwise show up here as two millimetres of slop.
     for (const road of drivable) {
-      const entry = poseOf(road, 0)
-      expect(distance(entry, JUNCTION)).toBeGreaterThan(road.alignment.length / 2)
-
-      // ...and the far end IS the junction, so a vehicle retires on arriving
-      // at one rather than driving off into open country.
-      const exit = poseOf(road, road.alignment.length)
-      expect(distance(exit, JUNCTION)).toBeLessThanOrEqual(JUNCTION_REACH)
+      expect(distance(road.alignment.poseAt(0).position, JUNCTION)).toBeCloseTo(0, 9)
+      expect(distance(road.alignment.poseAt(road.alignment.length).position, JUNCTION))
+        .toBeCloseTo(road.alignment.length, 6)
     }
   })
 
-  it('drives its traffic toward the junction, not away from it', () => {
-    // The dynamic form of the same claim, and the one that would survive
-    // someone reversing the alignments while leaving the geometry alone. Every
-    // vehicle that reaches the junction is at the FAR end of its own lane.
-    expect(run.nearJunction.length).toBeGreaterThan(50)
-    for (const vehicle of run.nearJunction) {
-      const length = drivable.find((road) => road.id === vehicle.roadId)!.alignment.length
-      expect(vehicle.station).toBeGreaterThan(length / 2)
+  it('enters its traffic clear of the junction and drives it away', () => {
+    // The traffic half. Every leg's station 0 is inside the intersection, so
+    // every leg has to be told to admit vehicles further along — and the
+    // distance comes from the junction's own solved plate, not from a number
+    // in this file. 6.5m on the rural arms, 9.5m on the gravel branch.
+    for (const road of drivable) {
+      expect(road.spawnStation).toBeGreaterThan(0)
     }
+
+    // Which means no car's centre is ever within a car's length of the node,
+    // measured over the whole run rather than argued from the entry stations.
+    expect(run.nearestToJunction).toBeGreaterThan(VEHICLE_LENGTH)
+    expect(run.nearestToJunction).toBeCloseTo(6.731, 2)
 
     // And traffic really does traverse the legs: something got all the way to
     // the end of the longest one.
@@ -206,38 +220,27 @@ describe('the demo scene’s traffic', () => {
     expect(run.furthestStation).toBeGreaterThan(longest * 0.9)
   })
 
-  it('never overlaps two vehicles anywhere but inside the junction', () => {
-    // The reviewer's instrument, kept: oriented boxes, every pair on different
-    // roads, ten simulated minutes.
+  it('never overlaps two vehicles from different roads, anywhere', () => {
+    // The reviewer's instrument, kept and tightened: oriented boxes, every pair
+    // on different roads, ten simulated minutes, and the count is now ZERO
+    // rather than "zero except inside the junction".
     //
-    // Along the roads themselves the count is zero, and that is a real claim
-    // about the lane offsets — the two rural arms run within 3.5m of each
-    // other for 750m each, and a `laneCentreOffset` that lost its sign or its
-    // magnitude would put them on the same line for their whole length.
-    //
-    // Inside the junction it is NOT zero, and that is the honest state of the
-    // simulation rather than an accepted defect: three legs' driving lines
-    // cross there, nothing gives way, and nothing can — see the mismatch
-    // documented on `Lane.setObstacle` and `canClearBeforeStopping`, which is
-    // exactly the per-vehicle stopping mechanism a junction needs. Measured
-    // over 600s: 88 of 2400 frames, all of them gravel-branch against rural,
-    // all within a few metres of the node. Before the arms were reversed it
-    // was 89 of 2400 — the same order of magnitude, but every one of them a
-    // car appearing out of nothing at the point the camera is aimed at rather
-    // than two cars meeting where a junction is not yet modelled.
-    expect(run.overlapping.length).toBeGreaterThan(0)
-    for (const [a, b] of run.overlapping) {
-      expect(distance(a, JUNCTION)).toBeLessThanOrEqual(JUNCTION_REACH)
-      expect(distance(b, JUNCTION)).toBeLessThanOrEqual(JUNCTION_REACH)
-      // Never on entry, which is what the old arrangement produced.
-      expect(Math.min(a.station, b.station)).toBeGreaterThan(0)
-    }
+    // It can be zero because the three legs DIVERGE from the node. Three entry
+    // points a few metres out along three different bearings are far apart, and
+    // every vehicle only ever gets further from the others — so there is no
+    // convergence for the simulation to have to give way at. Reversing the legs
+    // could not reach zero: the gravel branch's `laneCentreOffset` is 0, so its
+    // driving line crosses both rural driving lines inside all three lanes, and
+    // arriving cars met there exactly as spawning cars had.
+    expect(run.overlapping).toHaveLength(0)
+    expect(run.framesWithOverlap).toBe(0)
 
-    // The count is reported rather than merely bounded, so a change in it is
-    // visible in the diff instead of being absorbed by a loose inequality.
-    expect(run.framesWithOverlap).toBe(88)
-    expect(run.framesWithOverlap / (600 / FIXED_STEP)).toBeLessThan(0.05)
-    expect(run.closestApproach).toBeCloseTo(0.554, 2)
+    // The margin is reported rather than merely bounded, so a change in it is
+    // visible in the diff instead of being absorbed by a loose inequality. Two
+    // boxes this size cannot overlap beyond 4.85m centre to centre — the sum of
+    // their half-diagonals — so ten metres is not a near miss.
+    expect(run.closestApproach).toBeCloseTo(10.115, 2)
+    expect(run.closestApproach).toBeGreaterThan(Math.hypot(VEHICLE_LENGTH, VEHICLE_WIDTH))
   })
 
   it('keeps the two rural arms out of each other for their whole length', () => {
@@ -255,57 +258,54 @@ describe('the demo scene’s traffic', () => {
   })
 })
 
-describe('what reversing the arms cost', () => {
+describe('the junction the demo is built around', () => {
   /**
    * Recorded, not accepted.
    *
-   * `solveGradeProfile`'s greedy sweep pins station 0 to natural ground and
-   * drifts from it further along, so which end a leg starts at decides where it
-   * is faithful to the terrain. With all three legs starting AT the junction
-   * they agreed there to within 0.46m; with all three ARRIVING there they
-   * disagree by 5.80m, and `buildJunctionMesh` sits the plate at the mean — a
-   * step of nearly three metres at the point the camera is aimed at.
+   * The three legs agree at the node to within 0.457m, which is what building
+   * them all outward FROM it buys: `solveGradeProfile`'s greedy sweep pins
+   * station 0 to natural ground, and station 0 is the junction on all three.
+   * The residue is the crossfall correction and the sweep's own first step, and
+   * it is still above `MAX_JUNCTION_ELEVATION_SPREAD` — a pre-existing quarter
+   * of a metre over, not something to paper over here.
    *
-   * The ground along the west arm rises at up to 17.9%, far beyond the 7% the
-   * class allows, so no orientation lets that leg simply follow it; the drift
-   * has to land somewhere. Pinning it away is possible — `GradeConstraints`
-   * already has `fixedEnd`, and the west arm solves feasibly with it set to
-   * natural ground at the junction — but making the network solve junction
-   * elevations as a shared constraint is a grade-solver change, not a scene
-   * one, and is deliberately not made here.
-   *
-   * This test fails the moment that work lands, which is the intent.
+   * The number is pinned tightly because it is the thing that moved when the
+   * legs were reversed: anchoring them at their far ends instead put it at
+   * 5.797m, a three-metre step at the exact point the camera rig is aimed at.
    */
-  it('leaves the junction legs disagreeing in elevation', () => {
+  it('keeps its legs agreeing in elevation to within half a metre', () => {
     const node = junctionNode()
     const spread = content.built.elevationMismatches.get(node.id)
     expect(spread).toBeDefined()
+    expect(spread!).toBeCloseTo(0.457, 3)
+    expect(spread!).toBeLessThan(1)
+
+    // Still over the threshold, which is why it is in `elevationMismatches` at
+    // all. Pinned so that a grade solver which really does resolve junction
+    // elevations makes this test fail rather than pass quietly.
     expect(spread!).toBeGreaterThan(MAX_JUNCTION_ELEVATION_SPREAD)
-    expect(spread!).toBeCloseTo(5.797, 2)
   })
 
   it('still builds a bridge, and builds it on the east arm', () => {
     // The structures pipeline is the demo's only end-to-end evidence, and
-    // renumbering the stations moves every span. The east arm crosses the same
-    // ravine either way; its span used to be 273-423 measured from the
-    // junction and is now 181-439 measured from the outer end.
+    // renumbering the stations moves every span. Measured from the junction
+    // outward, the east arm crosses the ravine between 273 and 423.
     const { spans } = solveNetwork(content.terrain, content.network)
 
     const east = drivable.find(
-      (road) => road.className === 'rural' && poseOf(road, 0).x > JUNCTION.x,
+      (road) => road.className === 'rural' && poseOf(road, road.alignment.length).x > JUNCTION.x,
     )!
     const eastSpans = spans.get(east.id) ?? []
     expect(eastSpans).toHaveLength(1)
-    expect(eastSpans[0]!.fromStation).toBeCloseTo(181, 6)
-    expect(eastSpans[0]!.toStation).toBeCloseTo(439, 6)
+    expect(eastSpans[0]!.fromStation).toBeCloseTo(273, 6)
+    expect(eastSpans[0]!.toStation).toBeCloseTo(423, 6)
     expect(eastSpans[0]!.maxHeight).toBeGreaterThan(10)
 
-    // And the gravel branch, which carried none before, now does: arriving from
-    // the ridge it stays high above the valley floor for most of its length.
+    // The gravel branch carries none. It gained one (57-243) only while the
+    // legs were reversed, because arriving from the ridge put its low-drift end
+    // at the junction; built outward from the valley floor it follows the
+    // ground and needs no structure.
     const gravel = drivable.find((road) => road.className === 'gravel')!
-    const gravelSpans = spans.get(gravel.id) ?? []
-    expect(gravelSpans).toHaveLength(1)
-    expect(gravelSpans[0]!.fromStation).toBeCloseTo(57, 6)
-    expect(gravelSpans[0]!.toStation).toBeCloseTo(243, 6)
+    expect(spans.get(gravel.id) ?? []).toHaveLength(0)
   })
 })

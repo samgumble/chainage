@@ -4,7 +4,7 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 import { Alignment } from '../geometry/alignment'
-import { lineEndingAt } from '../geometry/primitives'
+import { Line } from '../geometry/primitives'
 import { vec2, type Vec2 } from '../geometry/vec2'
 import type { PolylineRejection } from '../geometry/polyline'
 import { generateValley } from '../terrain/generate'
@@ -30,6 +30,8 @@ import {
 } from '../network/roadClass'
 import { toBufferGeometry } from '../render/meshAdapter'
 import { TrafficView } from '../render/trafficView'
+import { roadsWithTrafficEntry, type RoadWithEntry } from '../mesh/junctionClearance'
+import { VEHICLE_LENGTH } from '../traffic/lane'
 import { terrainGeometry } from '../render/terrainMesh'
 import { CameraRig, type Vec3 as RigVec3 } from '../render/cameraRig'
 import { sunAt } from '../render/sunlight'
@@ -940,31 +942,31 @@ export const buildSceneContent = (): SceneContent => {
   })
 
   // A T junction on the valley floor: a main road running east-west with a
-  // narrower gravel branch joining from the north. Three straight roads
-  // meeting at one point, which is exactly what a junction needs and nothing
-  // more.
+  // narrower gravel branch heading north. Three straight roads meeting at one
+  // point, which is exactly what a junction needs and nothing more.
   //
-  // All three legs ARRIVE at the junction: station 0 is the outer end and
-  // station `length` is the junction. That is a traffic decision as much as a
-  // geometric one. `Fleet` puts vehicles on at station 0 and retires them at
-  // `length`, so legs built the other way round would materialise every car
-  // inside the junction — the exact point the camera rig is aimed at — and
-  // drive it away. Arriving legs instead show traffic converging on a junction
-  // and disappearing there, which reads as a junction the simulation does not
-  // model yet rather than as cars appearing out of nothing.
+  // All three alignments are built starting FROM the junction rather than
+  // arriving at it. `solveGradeProfile`'s forward greedy sweep pins station 0
+  // to natural ground but can drift away from it by the far end of a long
+  // alignment (the terrain here is rough enough that it does): starting every
+  // leg at the junction means every leg's own elevation there is natural
+  // ground, so the three legs agree and the junction sits flush without
+  // needing `elevationMismatches` to paper over a drifted arrival station.
   //
-  // It costs something, and the cost is recorded rather than hidden:
-  // `solveGradeProfile`'s greedy sweep pins station 0 to natural ground and
-  // drifts from it further along, so legs that start at the junction agree
-  // there and legs that arrive there do not. The three now disagree by 5.80m
-  // instead of 0.46m, which `roadSceneTraffic.test.ts` pins and explains.
+  // Reversing them to arrive at the junction instead has been tried and
+  // reverted: it moved the legs' disagreement at the node from 0.457m to
+  // 5.797m — a three-metre step at the exact point the camera is aimed at —
+  // and did not fix the traffic problem it was aimed at either, because
+  // arriving cars converge on the node exactly as spawning cars diverged from
+  // it. Where traffic enters is `trafficEntryStations`' business, not the
+  // alignments'.
   const network = new RoadNetwork()
 
-  // West and east arms run inward along the valley from either end; the branch
-  // runs south into the junction from 300m north of it.
-  const westArm = new Alignment([lineEndingAt(JUNCTION, 0, 750)])
-  const eastArm = new Alignment([lineEndingAt(JUNCTION, Math.PI, 750)])
-  const branch = new Alignment([lineEndingAt(JUNCTION, -Math.PI / 2, 300)])
+  // West and east arms both start at the junction, heading opposite ways
+  // along the valley; the branch starts there too, heading north.
+  const westArm = new Alignment([new Line(JUNCTION, Math.PI, 750)])
+  const eastArm = new Alignment([new Line(JUNCTION, 0, 750)])
+  const branch = new Alignment([new Line(JUNCTION, Math.PI / 2, 300)])
 
   const arms: [Alignment, 'rural' | 'gravel'][] = [
     [westArm, 'rural'], [eastArm, 'rural'], [branch, 'gravel'],
@@ -987,6 +989,21 @@ export const buildSceneContent = (): SceneContent => {
     infeasibleRoads, infeasibleCrossings, shallowCrossings, unsupportedFill,
   }
 }
+
+/**
+ * The roads handed to the traffic simulation, each carrying the station its
+ * traffic enters at.
+ *
+ * One expression, named, because it is what `drawRoadScene` passes to
+ * `TrafficView.sync` at startup and again after every rebuild, and what
+ * `roadSceneTraffic.test.ts` measures — three copies of
+ * `roadsWithTrafficEntry(network, VEHICLE_LENGTH)` would let the scene and the
+ * test that guards it drift apart, which is precisely the drift that would go
+ * unnoticed. Passing `network.roads` straight through instead is what put every
+ * car in the demo inside the junction.
+ */
+export const drivableRoads = (network: RoadNetwork): readonly RoadWithEntry[] =>
+  roadsWithTrafficEntry(network, VEHICLE_LENGTH)
 
 /** A sphere in the project's own convention (`(x, y)` ground, `z` up) that
  * encloses a terrain's full footprint and elevation range. */
@@ -1623,12 +1640,19 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   //
   // One object, three verbs. Everything with arithmetic in it — the fixed-step
   // clock, the spawn-room check, the lane offset, the station-to-world
-  // placement — lives in `render/trafficView.ts` and the pure modules below it,
-  // not here. `sync` is called again from `rebuildNetworkMeshes`, so a road
-  // committed, split or deleted takes its traffic with it.
+  // placement, the junction clearance — lives in `render/trafficView.ts`,
+  // `mesh/junctionClearance.ts` and the pure modules below them, not here.
+  // `sync` is called again from `rebuildNetworkMeshes`, so a road committed,
+  // split or deleted takes its traffic with it.
+  //
+  // `drivableRoads` is what keeps cars out of the junction. All three demo legs
+  // START at it (see `buildSceneContent`), so a lane admitting traffic at
+  // station 0 would put every car in the scene inside the intersection on top
+  // of the other two legs'; that function reads the junction's own solved plate
+  // and says how far along each leg is clear of it.
   const traffic = new TrafficView()
   scene.add(traffic.mesh)
-  traffic.sync(network.roads, designs)
+  traffic.sync(drivableRoads(network), designs)
 
   /**
    * Regrade, re-excavate and rebuild every mesh from the network's current
@@ -1663,7 +1687,7 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     // own. A road that failed to grade this time round loses its design
     // profile and therefore its traffic, rather than keeping cars driving at
     // the elevation its old profile used to have.
-    traffic.sync(network.roads, designs)
+    traffic.sync(drivableRoads(network), designs)
 
     // A road with no feasible vertical alignment used to reach only the
     // console (see `SceneContent.infeasibleRoads`) — surfaced here so it is

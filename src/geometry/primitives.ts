@@ -49,30 +49,6 @@ export class Line implements Primitive {
 }
 
 /**
- * A straight of `length` metres that *arrives* at `end` on `heading`.
- *
- * `new Line(p, θ, L)` names the point a straight leaves from; this names the
- * point it reaches. Both describe the same segment, and which one a caller
- * wants is decided by whichever end is the fixed, meaningful one — a leg of a
- * junction is defined by the junction it meets, not by wherever its far end
- * happens to land.
- *
- * The distinction matters beyond taste, because station 0 is not symmetric:
- * `Alignment` measures chainage from the start, `solveGradeProfile` pins its
- * greedy sweep to the start, and `Fleet` puts vehicles on at station 0 and
- * takes them off at `length`. Building a leg with this rather than reversing
- * the heading by hand puts station 0 at the far end and the junction at
- * `length`, which is what all three of those want for a road that leads INTO
- * something.
- */
-export const lineEndingAt = (end: Vec2, heading: number, length: number): Line =>
-  new Line(
-    { x: end.x - length * Math.cos(heading), y: end.y - length * Math.sin(heading) },
-    heading,
-    length,
-  )
-
-/**
  * A circular arc of constant curvature.
  * Positive curvature turns left (counter-clockwise); radius is 1/|curvature|.
  *
