@@ -105,6 +105,7 @@ import {
   type ToolMode,
 } from '../tool/sceneActions'
 import { createControlBar } from '../render/controlBar'
+import { renderPixelRatio, viewportMetrics } from '../render/viewport'
 import {
   describePolylineRejection,
   describeSplitOutcome,
@@ -1330,7 +1331,12 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   }
 
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true })
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+  // Was `Math.min(window.devicePixelRatio, 2)` inline. Same number for every
+  // real display, but the cap is a measured decision about frame rate versus
+  // sharpness rather than a magic 2 — so it lives, with the measurement that
+  // chose it and with the guard for a `devicePixelRatio` that is not a
+  // number, in `render/viewport.ts` where it can be tested.
+  renderer.setPixelRatio(renderPixelRatio(window.devicePixelRatio))
   renderer.setClearColor(0x14181d)
 
   // ACES Filmic is what turns a bright sun into a scene instead of a clipped
@@ -2362,13 +2368,31 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   // A shallow depth of field, sharp only around what the camera is orbiting
   // and blurring both nearer and farther, is what reads as a miniature rather
   // than a smeared screenshot — see `tiltShift.ts`.
-  const initialWidth = Math.max(1, canvas.clientWidth)
-  const initialHeight = Math.max(1, canvas.clientHeight)
   // Captured once: this renderer's own pixel ratio never changes after
   // construction, and `EffectComposer` itself captures it the same way at
   // construction time, so recomputing it later would only ever repeat this
   // value.
   const composerPixelRatio = renderer.getPixelRatio()
+
+  // The canvas's size at construction, and everything derived from it, from
+  // the one module that owns that derivation (`render/viewport.ts`). The
+  // `null` branch is the zero-sized-canvas case that function documents;
+  // unreachable here in practice, because `renderPixelRatio` above guarantees
+  // a positive finite ratio and a canvas in the document has a positive box
+  // by the time this runs — but reported rather than papered over with a
+  // made-up size, because a scene silently built at the wrong resolution is
+  // precisely the defect this task exists to remove.
+  const initialMetrics = viewportMetrics(
+    canvas.clientWidth,
+    canvas.clientHeight,
+    composerPixelRatio,
+  )
+  if (!initialMetrics) {
+    throw new Error(
+      `cannot build the scene: canvas is ${canvas.clientWidth}x${canvas.clientHeight} CSS px ` +
+        `at pixel ratio ${composerPixelRatio}`,
+    )
+  }
 
   // The pass reads depth (see `TILT_SHIFT_FRAGMENT_SHADER`), so the render
   // target it draws into needs a real depth *texture* — a composer's default
@@ -2386,10 +2410,13 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   // target is supplied explicitly (for the depth texture, above) and so has
   // to restate it rather than inherit it.
   const composerRenderTarget = new THREE.WebGLRenderTarget(
-    initialWidth * composerPixelRatio,
-    initialHeight * composerPixelRatio,
+    initialMetrics.bufferWidth,
+    initialMetrics.bufferHeight,
     {
-      depthTexture: new THREE.DepthTexture(initialWidth * composerPixelRatio, initialHeight * composerPixelRatio),
+      depthTexture: new THREE.DepthTexture(
+        initialMetrics.bufferWidth,
+        initialMetrics.bufferHeight,
+      ),
       type: THREE.HalfFloatType,
     },
   )
@@ -2448,8 +2475,8 @@ void main() {
       focusFalloff: FOCUS_FALLOFF_METRES,
       near: camera.near,
       far: camera.far,
-      texelWidth: 1 / (initialWidth * composerPixelRatio),
-      texelHeight: 1 / (initialHeight * composerPixelRatio),
+      texelWidth: initialMetrics.texelWidth,
+      texelHeight: initialMetrics.texelHeight,
     }),
     vertexShader: TILT_SHIFT_VERTEX_SHADER,
     fragmentShader: TILT_SHIFT_FRAGMENT_SHADER,
@@ -2495,12 +2522,18 @@ void main() {
   let lastWidth = -1
   let lastHeight = -1
   const resize = (width: number, height: number) => {
-    if (width <= 0 || height <= 0) return
-    if (width === lastWidth && height === lastHeight) return
-    lastWidth = width
-    lastHeight = height
-    renderer.setSize(width, height, false)
-    camera.aspect = width / height
+    // Every number below comes from `render/viewport.ts`, which also decides
+    // what counts as a box worth rendering into at all (a zero-sized canvas
+    // is a normal transient, not an error) — see `viewportMetrics`. Nothing
+    // arithmetic is computed in this file; what is left here is the three.js
+    // calls that apply it, and the memo that stops them running every frame.
+    const metrics = viewportMetrics(width, height, composerPixelRatio)
+    if (!metrics) return
+    if (metrics.width === lastWidth && metrics.height === lastHeight) return
+    lastWidth = metrics.width
+    lastHeight = metrics.height
+    renderer.setSize(metrics.width, metrics.height, false)
+    camera.aspect = metrics.aspect
     camera.updateProjectionMatrix()
 
     // The composer owns render targets sized to the canvas — resizing the
@@ -2508,13 +2541,13 @@ void main() {
     // `EffectComposer.setSize` resizes both of its internal buffers (and,
     // with them, the depth texture attached to each), so no separate
     // render-target recreation is needed here.
-    composer.setSize(width, height)
+    composer.setSize(metrics.width, metrics.height)
     // Not a `THREE.Vector2` (see `TiltShiftUniforms`, above, and
     // `createTiltShiftUniforms` in `tiltShift.ts`) — a plain `{x, y}` pair, so
     // set the two fields directly rather than calling a `.set()` that does
     // not exist on this shape.
-    tiltShiftUniforms.uTexelSize.value.x = 1 / (width * composerPixelRatio)
-    tiltShiftUniforms.uTexelSize.value.y = 1 / (height * composerPixelRatio)
+    tiltShiftUniforms.uTexelSize.value.x = metrics.texelWidth
+    tiltShiftUniforms.uTexelSize.value.y = metrics.texelHeight
   }
 
   const resizeObserver = new ResizeObserver((entries) => {
