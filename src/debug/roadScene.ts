@@ -103,6 +103,7 @@ import {
   describeInfeasibleRoads,
   describeInfeasibleCrossings,
   describeShallowCrossings,
+  describeStartingHint,
 } from '../tool/messages'
 
 const MAX_GRADE = 0.07
@@ -1571,7 +1572,10 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   /** Which of the two modes the player is currently in. Defaults to draw so
    * the scene opens exactly as it always has. */
   let toolMode: ToolMode = 'draw'
-  setMessage('')
+  // Not the bare mode label the scene used to open with: there are no roads on
+  // screen now, so the opening frame has to say how to make one. See
+  // `describeStartingHint` — it is replaced by the first thing that happens.
+  setMessage(describeStartingHint(ROAD_CLASS_ORDER, DEFAULT_DRAW_CLASS))
 
   let networkMeshes = addNetworkMeshes(
     scene, terrain, editLayer, built,
