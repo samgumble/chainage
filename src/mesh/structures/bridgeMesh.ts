@@ -4,6 +4,7 @@ import type { TerrainSampler } from '../../terrain/heightmap'
 import {
   type ProfilePoint, designElevationAtStation,
 } from '../../terrain/groundProfile'
+import { type RoadClass, totalPavementThickness } from '../../network/roadClass'
 import type { StructureSpan } from './spans'
 import { MeshBuilder, type Point3 } from '../meshBuilder'
 import type { MeshData } from '../ribbon'
@@ -14,8 +15,27 @@ export const DECK_DEPTH = 1.2
 export const PIER_SPACING = 25
 /** Half the plan size of a pier, metres. */
 export const PIER_HALF_WIDTH = 1.0
-/** How far the deck's top sits below the design elevation, metres. */
-export const DECK_CLEARANCE = 0.6
+
+/**
+ * How far the top of every support (abutment or pier) sits below the deck's
+ * true underside at its own station, metres.
+ *
+ * Without this, a support's top face and the deck's underside face would be
+ * exactly coincident — same station, same elevation — which is a textbook
+ * z-fight: two faces at the same depth flicker unpredictably because the
+ * renderer's depth buffer cannot consistently order them. Embedding the
+ * support's top slightly INTO the deck instead removes the ambiguity: the two
+ * faces are then unambiguously separated in depth, and the overlap itself is
+ * invisible, since it sits inside the closed deck solid and is never the
+ * frontmost surface from any camera position.
+ *
+ * 0.05m matches `EXCAVATION_ZFIGHT_MARGIN` (terrain/excavation.ts), which
+ * was sized for the same renderer and the same order of viewing distance
+ * (debug/roadScene.ts's camera: near=1, far=6000) — a few centimetres is well
+ * clear of that depth buffer's resolution at bridge-scale ranges, without
+ * visibly shortening the shortest support (a pier, metres tall).
+ */
+export const SUPPORT_DECK_MARGIN = 0.05
 
 export type BridgeOptions = {
   readonly deckDepth?: number
@@ -32,7 +52,13 @@ const DECK_STEP = 5
  *
  * The road ribbon already draws the running surface; this is what holds it up.
  * The deck's top sits `deckClearance` below the design elevation so the
- * pavement stack rests on it rather than intersecting it.
+ * pavement stack rests on it rather than intersecting it. `deckClearance`
+ * defaults to `roadClass`'s own `totalPavementThickness` — that IS the
+ * distance from the design line (the top of the wearing course) down to the
+ * deck, since the pavement stack occupies exactly that gap. A caller may
+ * still override it via `options.deckClearance`, but there is no legitimate
+ * reason to: two different bridges on the same class would then rest their
+ * pavement at two different depths into the deck.
  *
  * Piers go at `pierSpacing` intervals strictly inside the span — never at its
  * ends, where the abutments already are.
@@ -43,13 +69,21 @@ export const buildBridgeMesh = (
   design: readonly ProfilePoint[],
   span: StructureSpan,
   halfWidth: number,
+  roadClass: RoadClass,
   options: BridgeOptions = {},
 ): MeshData => {
   const {
     deckDepth = DECK_DEPTH,
     pierSpacing = PIER_SPACING,
     pierHalfWidth = PIER_HALF_WIDTH,
-    deckClearance = DECK_CLEARANCE,
+    // The pavement stack sits ON the deck, so the deck's own top has to sit
+    // exactly one pavement-stack thickness below the design elevation.
+    // Hardcoding this instead (as a bare constant, independent of class) is
+    // what used to leave the deck's top 0.1m below the pavement's true
+    // underside for a rural road — one class's thickness borrowed by every
+    // other class, wrong in whichever direction that class's own thickness
+    // differs from it.
+    deckClearance = totalPavementThickness(roadClass),
   } = options
 
   const builder = new MeshBuilder()
@@ -115,12 +149,6 @@ export const buildBridgeMesh = (
 
   for (const s of supports) {
     const isAbutment = s === span.fromStation || s === span.toStation
-    const section = deckSection(s)
-    const pose = alignment.poseAt(s)
-    const groundZ = terrain.sample(pose.position.x, pose.position.y)
-    const topZ = section.leftBottom.z
-    if (topZ <= groundZ) continue
-
     // An abutment carries the full road width; a pier is a slender column.
     const halfAcross = isAbutment ? halfWidth : pierHalfWidth
     // addBox centres its footprint symmetrically on the station it's given.
@@ -130,6 +158,23 @@ export const buildBridgeMesh = (
     const boxStation = isAbutment
       ? (s === span.fromStation ? s + pierHalfWidth : s - pierHalfWidth)
       : s
+
+    // Ground and deck underside are both measured at the box's OWN station,
+    // not at `s`. For a pier the two are the same station, so this changes
+    // nothing; for an abutment the box is shifted inward by `pierHalfWidth`,
+    // and on a graded design line that shift changes the deck's true
+    // underside elevation there. Measuring at `s` instead (the old code) left
+    // the abutment's top up to `grade * pierHalfWidth` away from where the
+    // deck underside actually sits above the box's real footprint — on this
+    // codebase's demo scene, about 0.07m, sometimes short of the deck,
+    // sometimes into it, either way wrong.
+    const pose = alignment.poseAt(boxStation)
+    const groundZ = terrain.sample(pose.position.x, pose.position.y)
+    // See `SUPPORT_DECK_MARGIN`: the support's top is pulled down into the
+    // deck by a fixed margin so the two faces are never coincident.
+    const topZ = deckSection(boxStation).leftBottom.z - SUPPORT_DECK_MARGIN
+    if (topZ <= groundZ) continue
+
     addBox(builder, alignment, boxStation, halfAcross, pierHalfWidth, groundZ, topZ)
   }
 

@@ -1,6 +1,30 @@
 import type { ProfilePoint } from './groundProfile'
 import { clampNumber } from './heightmap'
 
+/**
+ * A hard floor under one station's design elevation, metres.
+ *
+ * The vertical half of a grade separation: an overpass needs its design line
+ * to stand a given height above whatever it passes over at exactly one
+ * station, and everything else about the profile — how it climbs to that
+ * height and comes back down — is the solver's business, not the caller's.
+ *
+ * `station` must match a station of the ground profile to within
+ * `STATION_TOLERANCE`. It is not interpolated, and an unmatched station
+ * throws rather than being quietly dropped: a clearance requirement that
+ * silently did not apply is a road built through another road, which is the
+ * exact failure this type exists to prevent. Callers whose crossing falls
+ * between two stations should floor BOTH stations bracketing it — the profile
+ * is piecewise linear between stations, so both endpoints clearing the floor
+ * is what makes every point in between clear it too.
+ */
+export type ClearanceFloor = {
+  /** Station along the alignment, metres. Must match a ground station. */
+  readonly station: number
+  /** Least design elevation permitted at that station, metres. */
+  readonly minimumElevation: number
+}
+
 export type GradeConstraints = {
   /** Maximum absolute grade as a rise-over-run fraction. 7% is 0.07. */
   readonly maxGrade: number
@@ -24,6 +48,13 @@ export type GradeConstraints = {
   readonly fixedStart?: number
   /** Elevation the profile must end at, if tied to existing road. */
   readonly fixedEnd?: number
+  /**
+   * Stations whose design elevation must be at least a given height —
+   * grade separation, expressed as a constraint on the solve rather than as
+   * something done to its answer afterwards. See `ClearanceFloor`, and the
+   * phase 1 comment in `solveGradeProfile` for why it is applied there.
+   */
+  readonly clearanceFloors?: readonly ClearanceFloor[]
 }
 
 /** How a station is held up. */
@@ -44,7 +75,7 @@ const EPSILON = 1e-9
  * that pipeline — it means the two profiles were not built over the same
  * stations.
  */
-const STATION_TOLERANCE = 1e-6
+export const STATION_TOLERANCE = 1e-6
 
 /**
  * Find a vertical alignment that respects the maximum grade and stays as
@@ -73,8 +104,10 @@ export const solveGradeProfile = (
   ground: readonly ProfilePoint[],
   constraints: GradeConstraints,
 ): GradeSolution => {
-  const { maxGrade, maxCutDepth, maxFillHeight, maxStructureHeight, fixedStart, fixedEnd } =
-    constraints
+  const {
+    maxGrade, maxCutDepth, maxFillHeight, maxStructureHeight, fixedStart, fixedEnd,
+    clearanceFloors = [],
+  } = constraints
 
   if (maxGrade <= 0) {
     throw new RangeError('maxGrade must be positive')
@@ -89,7 +122,12 @@ export const solveGradeProfile = (
   }
 
   const n = ground.length
-  if (n === 0) return { feasible: true, profile: [] }
+  if (n === 0) {
+    if (clearanceFloors.length > 0) {
+      throw new RangeError('clearanceFloors were given for an empty ground profile')
+    }
+    return { feasible: true, profile: [] }
+  }
 
   // --- Initial bands from the cut and fill envelope ---
   const min = new Float64Array(n)
@@ -110,6 +148,41 @@ export const solveGradeProfile = (
   }
 
   // --- Phase 1: interval propagation, one pass each way ---
+  //
+  // Clearance floors are raised into the bands HERE, before either pass runs,
+  // and that placement is the whole point rather than an implementation
+  // detail. A floor is nothing more exotic than a station whose band starts
+  // higher than the cut/fill envelope alone would allow; once it is in the
+  // band, the two propagation passes below spread the consequence outwards in
+  // both directions at the grade limit, the emptiness check afterwards reports
+  // an unreachable floor as an infeasible alignment, and the greedy sweep in
+  // phase 2 climbs to it and back down without any further help. Reachability,
+  // the grade limit and the infeasibility report all come free from machinery
+  // that already exists.
+  //
+  // Lifting the profile AFTER the solve instead would satisfy the clearance
+  // and silently break the grade limit getting there: a 5m step inserted
+  // between two stations 10m apart is a 50% grade on a road solved to 7%,
+  // returned as `feasible: true` with no mention of it anywhere. That is
+  // precisely the class of defect this codebase reports rather than commits,
+  // and `gradeSolver.test.ts` pins it — the "reports infeasible" case passes
+  // under a no-op floor but fails under a post-solve lift.
+  //
+  // Only `min` is raised, never `max`. A floor above the station's structure
+  // ceiling therefore empties the band rather than quietly widening it, which
+  // is the honest answer: that clearance cannot be had within the height this
+  // alignment is allowed to stand.
+  for (const floor of clearanceFloors) {
+    const i = stationIndex(ground, floor.station)
+    if (i === undefined) {
+      throw new RangeError(
+        `clearance floor at station ${floor.station} matches no station of the ` +
+          'ground profile; floors are applied to stations, not interpolated between them',
+      )
+    }
+    min[i] = Math.max(min[i]!, floor.minimumElevation)
+  }
+
   for (let i = 1; i < n; i++) {
     const d = ground[i]!.s - ground[i - 1]!.s
     const reach = d * maxGrade
@@ -146,6 +219,25 @@ export const solveGradeProfile = (
   }
 
   return { feasible: true, profile }
+}
+
+/**
+ * Index of the profile station matching `station`, or `undefined`.
+ *
+ * `STATION_TOLERANCE` rather than exact equality for the same reason
+ * `classifySupport` uses it: stations arrive as `i * spacing` from one
+ * profile and as a copied `s` from another, and the two agree to the last
+ * bit in practice but are not required to. Anything larger than a micron
+ * apart is not floating-point noise — it is a different station.
+ */
+const stationIndex = (
+  ground: readonly ProfilePoint[],
+  station: number,
+): number | undefined => {
+  for (let i = 0; i < ground.length; i++) {
+    if (Math.abs(ground[i]!.s - station) <= STATION_TOLERANCE) return i
+  }
+  return undefined
 }
 
 /**

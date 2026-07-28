@@ -1,16 +1,28 @@
 import { describe, it, expect } from 'vitest'
-import { buildSceneContent, solveNetwork, terrainBounds } from './roadScene'
+import {
+  buildSceneContent, solveNetwork, terrainBounds,
+  CORRIDOR_MAX_BATTER_WIDTH, EXCAVATION_STATION_SPACING,
+  DEFAULT_DRAW_CLASS, RIG_INITIAL_DISTANCE,
+} from './roadScene'
 import { buildNetworkMesh } from '../mesh/networkMesh'
 import type { RoadMesh } from '../mesh/roadMesh'
 import { RoadNetwork, type RoadId } from '../network/graph'
 import { Alignment } from '../geometry/alignment'
 import { Line } from '../geometry/primitives'
 import { vec2 } from '../geometry/vec2'
-import { sampleGroundProfile } from '../terrain/groundProfile'
+import { sampleGroundProfile, designElevationAtStation } from '../terrain/groundProfile'
 import { solveGradeProfile } from '../terrain/gradeSolver'
 import { Heightmap } from '../terrain/heightmap'
+import type { TerrainEditLayer } from '../terrain/editLayer'
 import { SelectTool } from '../tool/selectTool'
-import { ROAD_CLASSES, formationHalfWidth } from '../network/roadClass'
+import { minimumRadiusForSpeed } from '../geometry/designSpeed'
+import {
+  ROAD_CLASSES, ROAD_CLASS_ORDER, formationHalfWidth, totalPavementThickness,
+  type RoadClassName,
+} from '../network/roadClass'
+import { MIN_OVERPASS_CLEARANCE } from '../network/crossings'
+import { DECK_DEPTH } from '../mesh/structures/bridgeMesh'
+import { networkStructureSpans, type StructureSpan } from '../mesh/structures/spans'
 
 /**
  * The demo scene is the only end-to-end evidence the structures pipeline
@@ -24,6 +36,37 @@ import { ROAD_CLASSES, formationHalfWidth } from '../network/roadClass'
  * excavates every corridor, which is not cheap.
  */
 const content = buildSceneContent()
+
+/**
+ * Everything hanging below a rural road's design line where it is carried over
+ * something: the pavement stack it runs on, plus the deck slab under that.
+ * Restated from the same two sources `roadScene.ts` derives it from, so a test
+ * that agreed with a hardcoded number rather than with the deck that actually
+ * gets built would fail here.
+ */
+const ruralStructureDepth = totalPavementThickness(ROAD_CLASSES.rural) + DECK_DEPTH
+
+/**
+ * The demo scene rebuilt with no corridor template, so no wall can be built
+ * and every structure vertex left is a bridge.
+ *
+ * `structureSpans` is required alongside `terrain` (see `NetworkMeshOptions`),
+ * and derived here from the same function `solveNetwork` uses. The demo scene
+ * has no crossings, so it forces no decks, and this list is identical to the
+ * one the scene excavated to — which is the point: these comparisons are
+ * against the scene's own structures, not against a second derivation of them.
+ */
+const demoBridgesOnly = () => ({
+  spacing: 4,
+  terrain: content.terrain,
+  maxFillHeight: 10,
+  structureSpans: networkStructureSpans(content.network.roads, {
+    designs: content.designs,
+    terrain: content.terrain,
+    maxFillHeight: 10,
+    spacing: 4,
+  }),
+})
 
 /** Total structure vertices across every road. */
 const structureVertices = (built: { structures: ReadonlyMap<number, { vertexCount: number }> }) => {
@@ -80,35 +123,30 @@ describe('the demo scene', () => {
     // Rebuilt with no corridor template, so walls are off and every vertex
     // left is a bridge. A count taken from the full scene could not tell the
     // two structure types apart.
-    const bridgesOnly = buildNetworkMesh(content.network, content.designs, {
-      spacing: 4,
-      terrain: content.terrain,
-      maxFillHeight: 10,
-    })
+    const bridgesOnly = buildNetworkMesh(content.network, content.designs, demoBridgesOnly())
     expect(structureVertices(bridgesOnly)).toBeGreaterThan(0)
   })
 
   it('produces retaining walls as well as bridges', () => {
     // Same scene minus the batter limit: no wall can be built without one, so
     // whatever the full scene has beyond this is wall.
-    const bridgesOnly = buildNetworkMesh(content.network, content.designs, {
-      spacing: 4,
-      terrain: content.terrain,
-      maxFillHeight: 10,
-    })
+    const bridgesOnly = buildNetworkMesh(content.network, content.designs, demoBridgesOnly())
     expect(structureVertices(content.built)).toBeGreaterThan(structureVertices(bridgesOnly))
   })
 
+  // What ties the earthworks to the structures. `solveNetwork` derives each
+  // road's spans once, before excavating, and hands the same list to both
+  // `sweepCorridor` (as `structureRanges`) and `buildNetworkMesh` — so the
+  // sweep stops at the abutment face rather than at whatever station a
+  // per-station fill test happened to trip. This assertion fails outright if
+  // that thread is ever cut: with `structureRanges: []` the sweep fills the
+  // valley the deck crosses and no bridge vertex stands over natural ground.
   it('leaves the ground unexcavated where a bridge carries the road', () => {
     // The bridge spans a valley the earthworks would otherwise fill in. If
     // the excavation ran through the span, the deck would be buried in its
     // own embankment: somewhere under a bridge the edit layer must still
     // read as natural ground.
-    const bridgesOnly = buildNetworkMesh(content.network, content.designs, {
-      spacing: 4,
-      terrain: content.terrain,
-      maxFillHeight: 10,
-    })
+    const bridgesOnly = buildNetworkMesh(content.network, content.designs, demoBridgesOnly())
 
     let sampled = 0
     let untouched = 0
@@ -331,5 +369,608 @@ describe('select mode mutations re-solve and rebuild', () => {
     // costs several decimal places before any road-width arithmetic starts.
     expect(widthBefore).toBeCloseTo(expectedBefore, 4)
     expect(widthAfter).toBeCloseTo(expectedAfter, 4)
+  })
+})
+
+/**
+ * Grade separation: two roads that cross in plan without a player ever having
+ * clicked where they meet.
+ *
+ * The rule is that the newer road goes over, always, and that the lift is a
+ * constraint on the newer road's grade solve rather than something done to
+ * its answer — see `solveNetwork`'s docstring. `solveNetwork` is exported, so
+ * both halves are checkable directly against a network built for the purpose.
+ *
+ * The demo scene cannot stand in for this: its three arms all meet at one
+ * shared node, so it has no crossings at all and never exercises this path.
+ */
+describe('roads that cross without a junction', () => {
+  /** Flat ground at 100m over a 600x600 footprint. */
+  const flat = (): Heightmap =>
+    new Heightmap(0, 0, 10, 61, 61, new Float32Array(61 * 61).fill(100))
+
+  /**
+   * Two 400m straights meeting at (300, 300) at right angles, neither one's
+   * endpoint anywhere near the crossing, so nothing about this reads as a
+   * junction. `first` is added first and is therefore the older road.
+   */
+  const crossingPair = (network: RoadNetwork): { first: RoadId; second: RoadId } => ({
+    first: network.addRoad(new Alignment([new Line(vec2(100, 300), 0, 400)]), 'rural'),
+    second: network.addRoad(
+      new Alignment([new Line(vec2(300, 100), Math.PI / 2, 400)]),
+      'rural',
+    ),
+  })
+
+  it('raises the newer road clear of the older one', () => {
+    const terrain = flat()
+    const network = new RoadNetwork()
+    const { first, second } = crossingPair(network)
+
+    const { designs, built } = solveNetwork(terrain, network)
+
+    const older = designs.get(first)!
+    const newer = designs.get(second)!
+    expect(older).toBeDefined()
+    expect(newer).toBeDefined()
+
+    // The crossing is at station 200 on both. The road below stays on flat
+    // ground; the road above has to clear it by the lorry clearance plus its
+    // own deck and pavement.
+    const below = designElevationAtStation(older, 200)
+    const above = designElevationAtStation(newer, 200)
+    expect(below).toBeCloseTo(100, 6)
+    expect(above).toBeGreaterThanOrEqual(below + MIN_OVERPASS_CLEARANCE + ruralStructureDepth - 1e-6)
+
+    // And it climbs there legally. A profile that reached the clearance by
+    // stepping up between two stations would satisfy the assertion above
+    // while being unbuildable, which is the defect the constraint-not-
+    // post-process design exists to rule out.
+    for (let i = 1; i < newer.length; i++) {
+      const grade = (newer[i]!.z - newer[i - 1]!.z) / (newer[i]!.s - newer[i - 1]!.s)
+      expect(Math.abs(grade)).toBeLessThanOrEqual(0.07 + 1e-9)
+    }
+  })
+
+  it('leaves the older road\'s profile exactly as it would be on its own', () => {
+    const terrain = flat()
+    const network = new RoadNetwork()
+    const { first } = crossingPair(network)
+
+    const solo = new RoadNetwork()
+    const soloId = solo.addRoad(new Alignment([new Line(vec2(100, 300), 0, 400)]), 'rural')
+
+    // The whole reason the NEW road is the one that moves: an existing road's
+    // vertical profile is never touched, so its structures, its mesh and any
+    // road tied to its endpoints all stay valid.
+    expect(solveNetwork(terrain, network).designs.get(first)).toEqual(
+      solveNetwork(terrain, solo).designs.get(soloId),
+    )
+  })
+
+  it('leaves tightCrossings empty once the separation has been applied', () => {
+    const terrain = flat()
+    const network = new RoadNetwork()
+    crossingPair(network)
+
+    // This is what turns `tightCrossings` from routine console noise into a
+    // defect signal: a crossing this path handled must not still be reported
+    // as too tight to pass over.
+    expect([...solveNetwork(terrain, network).built.tightCrossings.entries()]).toEqual([])
+  })
+
+  it('does not raise a crossing that sits on a node — that is a junction', () => {
+    const terrain = flat()
+    const network = new RoadNetwork()
+    // A road running east-west, and a second road TERMINATING on it at
+    // (300, 300) rather than passing over. The second road's start node sits
+    // exactly on the crossing, which is the only evidence available that the
+    // player meant the two to meet, so nothing is lifted.
+    const through = network.addRoad(new Alignment([new Line(vec2(100, 300), 0, 400)]), 'rural')
+    const stub = network.addRoad(
+      new Alignment([new Line(vec2(300, 300), Math.PI / 2, 200)]),
+      'rural',
+    )
+
+    const { designs } = solveNetwork(terrain, network)
+    expect(designElevationAtStation(designs.get(through)!, 200)).toBeCloseTo(100, 6)
+    expect(designElevationAtStation(designs.get(stub)!, 0)).toBeCloseTo(100, 6)
+  })
+
+  it('reports a crossing it cannot raise instead of building it at grade', () => {
+    // A 120m-wide flat-bottomed trench 30m deep, running east-west along
+    // y = 300. A road crossing it north-south is held near the rim by the
+    // grade limit — a bridge, effectively — while a road running ALONG the
+    // trench floor sits 25m or so below it. Raising the second road over the
+    // first would need it to stand higher above its own ground than
+    // MAX_STRUCTURE_HEIGHT allows, so there is no legal profile for it.
+    const elevations = new Float32Array(61 * 61)
+    for (let row = 0; row < 61; row++) {
+      for (let col = 0; col < 61; col++) {
+        elevations[row * 61 + col] = Math.abs(row * 10 - 300) <= 60 ? 70 : 100
+      }
+    }
+    const trench = new Heightmap(0, 0, 10, 61, 61, elevations)
+
+    const network = new RoadNetwork()
+    // Across the trench first, so it is the older road...
+    const across = network.addRoad(
+      new Alignment([new Line(vec2(300, 100), Math.PI / 2, 400)]),
+      'rural',
+    )
+    // ...and along the floor second, so it is the one asked to climb over.
+    const along = network.addRoad(new Alignment([new Line(vec2(100, 300), 0, 400)]), 'rural')
+
+    const { designs, infeasibleRoads, infeasibleCrossings } = solveNetwork(trench, network)
+
+    // Both roads grade perfectly well on their own — this is not an
+    // impossible alignment, it is an impossible crossing, and the two must
+    // not be reported through the same channel.
+    expect([...infeasibleRoads.keys()]).toEqual([])
+    expect(designs.has(across)).toBe(true)
+
+    // No design profile for the road that could not be raised. Falling back
+    // to its unlifted solve would build it straight through the road above.
+    expect(designs.has(along)).toBe(false)
+    expect(infeasibleCrossings).toHaveLength(1)
+    expect(infeasibleCrossings[0]!.road).toBe(along)
+    expect(infeasibleCrossings[0]!.crosses).toBe(across)
+    expect(infeasibleCrossings[0]!.requiredElevation).toBeGreaterThan(
+      designElevationAtStation(designs.get(across)!, 200),
+    )
+  })
+})
+
+/**
+ * The deck an overpass gets, and where the earthwork it replaces is allowed to
+ * land.
+ *
+ * Separate from the block above, which is about the LIFT — whether the design
+ * lines separate, and legally. Everything here is about what happens after
+ * they do: a lifted road still has a corridor, that corridor still fans out
+ * sideways, and unless a deck takes the road off the ground for long enough,
+ * the fan lands on the road it was lifted over. The design lines are perfect
+ * and what gets built is a dam.
+ *
+ * Every case is measured the way the defect is seen: by reading the edit layer
+ * at grid nodes inside the lower road's own corridor and asking whether any of
+ * them received fill.
+ */
+describe('an overpass deck', () => {
+  /** Flat ground at 100m over a 900x900 footprint — room for a 30-degree
+   * crossing's 174m deck and both 400m roads with the grid to spare. */
+  const flat = (): Heightmap =>
+    new Heightmap(0, 0, 10, 91, 91, new Float32Array(91 * 91).fill(100))
+
+  /** Where the two roads meet. On a grid node, so the probe below straddles
+   * it symmetrically. */
+  const CROSSING = vec2(450, 450)
+
+  /** Length of both roads, so the crossing falls at station 200 on each. */
+  const ROAD_LENGTH = 400
+
+  /**
+   * Two roads crossing at `angleDeg`, neither one's endpoint anywhere near the
+   * crossing so nothing about it reads as a junction.
+   *
+   * The east-west road is added FIRST and is therefore the older one, the one
+   * that stays put and the one whose corridor has to be kept clear. The second
+   * runs through the same point at `angleDeg` to it and is the one lifted.
+   */
+  const crossingAt = (
+    angleDeg: number,
+    lowerClass: RoadClassName,
+    upperClass: RoadClassName,
+  ): { network: RoadNetwork; lower: RoadId; upper: RoadId } => {
+    const theta = (angleDeg * Math.PI) / 180
+    const network = new RoadNetwork()
+    const lower = network.addRoad(
+      new Alignment([new Line(vec2(CROSSING.x - ROAD_LENGTH / 2, CROSSING.y), 0, ROAD_LENGTH)]),
+      lowerClass,
+    )
+    const start = vec2(
+      CROSSING.x - (ROAD_LENGTH / 2) * Math.cos(theta),
+      CROSSING.y - (ROAD_LENGTH / 2) * Math.sin(theta),
+    )
+    const upper = network.addRoad(
+      new Alignment([new Line(start, theta, ROAD_LENGTH)]),
+      upperClass,
+    )
+    return { network, lower, upper }
+  }
+
+  /**
+   * The band either side of the lower road that must stay free of the other
+   * road's earthwork: its own formation, plus the batter that stands beside it
+   * before a retaining wall takes over.
+   *
+   * Restated from the same two things `solveNetwork` derives it from rather
+   * than written down as a number, so a test that agreed with a stale constant
+   * instead of with the corridor that actually gets excavated would fail here.
+   */
+  const clearHalfWidth = (className: RoadClassName): number =>
+    formationHalfWidth(ROAD_CLASSES[className]) + CORRIDOR_MAX_BATTER_WIDTH
+
+  /**
+   * Every grid node inside the lower road's corridor that received FILL.
+   *
+   * Fill specifically, not "any change": the lower road excavates its own
+   * corridor, and on flat ground that is a cut everywhere (the design surface
+   * sits a pavement stack below natural ground), so a negative delta there is
+   * the road being built and a positive one is somebody else's embankment
+   * arriving on top of it. That positive delta is the defect — 4.75m of it on
+   * the carriageway at 20 degrees — and it is what this counts.
+   *
+   * `probed` comes back too: a probe that happened to inspect no nodes at all
+   * would report zero fills and prove nothing.
+   */
+  const fillInsideLowerCorridor = (
+    terrain: Heightmap,
+    editLayer: TerrainEditLayer,
+    halfWidth: number,
+  ): { probed: number; fills: string[] } => {
+    const fills: string[] = []
+    let probed = 0
+    for (let row = 0; row < terrain.rows; row++) {
+      for (let col = 0; col < terrain.cols; col++) {
+        const x = terrain.originX + col * terrain.cellSize
+        const y = terrain.originY + row * terrain.cellSize
+        // Only where the lower road actually runs, and only across its own
+        // corridor: beyond its ends and beyond its batters there is nothing of
+        // it to bury.
+        if (x < CROSSING.x - ROAD_LENGTH / 2 || x > CROSSING.x + ROAD_LENGTH / 2) continue
+        if (Math.abs(y - CROSSING.y) > halfWidth) continue
+        probed++
+        const delta = editLayer.deltaAt(col, row)
+        // 1e-6, not 0: deltas are float arithmetic on elevations near 100.
+        if (delta > 1e-6) fills.push(`(${x}, ${y}) +${delta.toFixed(2)}m`)
+      }
+    }
+    return { probed, fills }
+  }
+
+  /**
+   * The heart of it, and the measurement the review made.
+   *
+   * A station interval on the LIFTED road and a band around the road BELOW are
+   * the same interval only at 90 degrees. Deriving the deck from the lower
+   * road's width alone — which is what this used to do — is therefore right at
+   * 90, wrong at 45, and wrong on the carriageway itself below about 20: the
+   * transverse fan of a station outside the deck runs nearly parallel to the
+   * road underneath and reaches straight down it.
+   *
+   * 90 and 60 are here as controls: they passed before the fix and must still
+   * pass. 45 and 30 are the cases that did not.
+   */
+  for (const angleDeg of [90, 60, 45, 30]) {
+    it(`keeps the lifted road's earthwork out of the lower road's corridor at ${angleDeg} degrees`, () => {
+      const terrain = flat()
+      const { network, lower, upper } = crossingAt(angleDeg, 'rural', 'rural')
+      const { designs, editLayer, shallowCrossings } = solveNetwork(terrain, network)
+
+      // Both roads exist and the lift actually happened — without this the
+      // assertion below could be satisfied by a scene that simply refused to
+      // build the upper road at all.
+      expect(designs.has(lower)).toBe(true)
+      expect(designElevationAtStation(designs.get(lower)!, 200)).toBeCloseTo(100, 6)
+      expect(designElevationAtStation(designs.get(upper)!, 200)).toBeGreaterThanOrEqual(
+        100 + MIN_OVERPASS_CLEARANCE + ruralStructureDepth - 1e-6,
+      )
+      // Nothing this square needs the clamp, so nothing may be reported.
+      expect(shallowCrossings).toEqual([])
+
+      const { probed, fills } = fillInsideLowerCorridor(
+        terrain, editLayer, clearHalfWidth('rural'),
+      )
+      expect(probed).toBeGreaterThan(100)
+      expect(fills).toEqual([])
+    })
+  }
+
+  /**
+   * The widest sweep in `ROAD_CLASSES` over the narrowest corridor.
+   *
+   * The cases above are all rural over rural. This is the other end of the
+   * range — a highway lifted over a gravel track — and it is here because
+   * nothing else exercises a lifted road whose own earthwork fan is far wider
+   * than the corridor it is clearing.
+   *
+   * Stated plainly, because it would be easy to assume otherwise: this test
+   * does NOT pin the `sweptHalfWidth · |cos θ|` term. Deleting that term leaves
+   * this green, as it leaves every case above green — dividing by `sin θ`
+   * alone already yields a deck long enough at every angle and class pairing
+   * that could be constructed. The term errs long rather than short, so its
+   * absence costs deck length and never lets fill onto the road below, which
+   * is why no fill-based assertion can see it. It is kept because the
+   * derivation it comes from is the honest one; if it is ever removed, the
+   * reason must be that argument, not a green suite.
+   *
+   * What IS pinned here, and by the 30-degree case above, is the defect that
+   * actually shipped: a deck derived from the lower road's width with no angle
+   * term at all.
+   */
+  it('keeps earthwork off a narrow road under the widest class that can cross it', () => {
+    const terrain = flat()
+    const { network, lower, upper } = crossingAt(45, 'gravel', 'highway')
+    const { designs, editLayer, shallowCrossings } = solveNetwork(terrain, network)
+
+    // The lift has to have happened, or an empty `fills` proves nothing.
+    expect(designs.has(lower)).toBe(true)
+    expect(designs.has(upper)).toBe(true)
+    expect(designElevationAtStation(designs.get(lower)!, 200)).toBeCloseTo(100, 6)
+    expect(designElevationAtStation(designs.get(upper)!, 200)).toBeGreaterThan(
+      100 + MIN_OVERPASS_CLEARANCE,
+    )
+    // 45 degrees is nowhere near the clamp.
+    expect(shallowCrossings).toEqual([])
+
+    const { probed, fills } = fillInsideLowerCorridor(
+      terrain, editLayer, clearHalfWidth('gravel'),
+    )
+    expect(probed).toBeGreaterThan(100)
+    expect(fills).toEqual([])
+  })
+
+  /**
+   * `solveNetwork` reports the crossings it could not deck honestly.
+   *
+   * Below `MIN_DECKABLE_CROSSING_ANGLE` the required half-length runs away —
+   * at 10 degrees it is over 240m against a 400m road, and it keeps growing.
+   * The deck is clamped so it cannot, and the clamp is announced: the standing
+   * rule here is that a crossing built wrong is one the player is told about,
+   * not one they have to find.
+   */
+  it('reports a crossing too shallow to deck instead of silently clamping it', () => {
+    const terrain = flat()
+    const { network, lower, upper } = crossingAt(10, 'rural', 'rural')
+    const { designs, shallowCrossings } = solveNetwork(terrain, network)
+
+    // It is still built — this is not `infeasibleCrossings`, where the road
+    // gets no profile at all. The road and its lift are real; the deck is the
+    // part that is knowingly short.
+    expect(designs.has(upper)).toBe(true)
+
+    expect(shallowCrossings).toHaveLength(1)
+    const shallow = shallowCrossings[0]!
+    expect(shallow.road).toBe(upper)
+    expect(shallow.crosses).toBe(lower)
+    expect((shallow.angle * 180) / Math.PI).toBeCloseTo(10, 6)
+    // The whole point of the report: what was built is short of what the
+    // angle asked for, and by how much is on the record.
+    expect(shallow.deckHalfLength).toBeLessThan(shallow.requiredHalfLength)
+  })
+
+
+  /**
+   * The one span the lifted road is carried on, and the assertion that it is
+   * long enough.
+   *
+   * "Long enough" is not a taste: the corridor sweep steps at
+   * `EXCAVATION_STATION_SPACING`, so the first station it takes outside the
+   * deck can sit anywhere in that step past the deck's end, and that station
+   * must already be clear of the lower road's corridor. So the deck has to
+   * reach at least the corridor half-width plus one sweep step beyond the
+   * crossing. Both terms are read from the code that produces them rather than
+   * written down, so this cannot quietly go stale.
+   */
+  const deckSpanOf = (
+    spans: ReadonlyMap<RoadId, readonly StructureSpan[]>,
+    roadId: RoadId,
+  ): StructureSpan => {
+    const list = spans.get(roadId) ?? []
+    expect(list).toHaveLength(1)
+    return list[0]!
+  }
+
+  /**
+   * The deck is derived from how wide the road BELOW is, not how wide the
+   * lifted road is. Two classes that differ as far apart as they can — a
+   * six-lane highway underneath, a single-lane farm track over it — so
+   * borrowing the wrong one's width is a 12m error per end rather than no
+   * error at all, which is what a rural-over-rural fixture would measure.
+   *
+   * Square on purpose. At 90 degrees the angle term drops out entirely and
+   * what is left is the width term alone, so this isolates it from the skew
+   * arithmetic the tests above exercise.
+   */
+  it('measures the deck against the road below, not the road being lifted', () => {
+    const terrain = flat()
+    const { network, upper } = crossingAt(90, 'highway', 'gravel')
+    const { spans } = solveNetwork(terrain, network)
+
+    const deck = deckSpanOf(spans, upper)
+    const reach = clearHalfWidth('highway') + EXCAVATION_STATION_SPACING
+    expect(deck.fromStation).toBeLessThanOrEqual(200 - reach)
+    expect(deck.toStation).toBeGreaterThanOrEqual(200 + reach)
+  })
+
+  /**
+   * The same requirement on the ordinary square case, where the road below is
+   * the same class as the road over it.
+   *
+   * This is what pins the sampling margin. The derivation is exact in the
+   * continuum; the deck that gets built is not, because the required range is
+   * resampled onto the structure spacing and the sweep steps on a grid of its
+   * own. A deck derived exactly and built with no margin lands short.
+   */
+  it('leaves the deck long enough for the sweep step that follows it', () => {
+    const terrain = flat()
+    const { network, upper } = crossingAt(90, 'rural', 'rural')
+    const { spans } = solveNetwork(terrain, network)
+
+    const deck = deckSpanOf(spans, upper)
+    const reach = clearHalfWidth('rural') + EXCAVATION_STATION_SPACING
+    expect(deck.fromStation).toBeLessThanOrEqual(200 - reach)
+    expect(deck.toStation).toBeGreaterThanOrEqual(200 + reach)
+  })
+
+  /**
+   * The deck reaches the mesh, not just the span list.
+   *
+   * `spans` says what the solve decided; this says what was built from it. The
+   * two are separate claims — the mesh build takes its spans as an argument,
+   * and a caller that handed it a different list (or none) would produce a
+   * lifted road with a correct design line, correct earthworks, and nothing
+   * holding it up.
+   *
+   * Measured by elevation, because the lifted road's structures are not only
+   * its deck: 6.7m of fill at 3H:1V needs a 20m batter and only 8m is allowed,
+   * so both approaches carry retaining walls too. A wall stands between
+   * natural ground and the truncated batter's end, which on this fixture tops
+   * out around 104m; the deck's own top sits at the design line less the
+   * pavement stack, above 106m. Nothing but a deck can be up there.
+   */
+  it('builds the deck into the lifted road structure mesh', () => {
+    const terrain = flat()
+    const { network, upper } = crossingAt(90, 'rural', 'rural')
+    const { designs, built } = solveNetwork(terrain, network)
+
+    const mesh = built.structures.get(upper)!
+    expect(mesh.vertexCount).toBeGreaterThan(0)
+
+    let highest = -Infinity
+    for (let i = 0; i < mesh.vertexCount; i++) {
+      highest = Math.max(highest, mesh.positions[i * 3 + 2]!)
+    }
+
+    const deckTop =
+      designElevationAtStation(designs.get(upper)!, 200) -
+      totalPavementThickness(ROAD_CLASSES.rural)
+    // Precision 4: positions round-trip through a Float32Array, whose ~7
+    // significant digits hold values near 100 to about 1e-5.
+    expect(highest).toBeCloseTo(deckTop, 4)
+  })
+})
+
+/**
+ * The class the draw tool opens in.
+ *
+ * This is the defect the player actually reported — "roads that won't
+ * connect" — in its first and simplest form: a default class whose corners are
+ * bigger than the visible world, so the first road they draw is refused for
+ * curve overlap and nothing they can see explains why. The whole rest of this
+ * branch is downstream of getting past that.
+ *
+ * `drawRoadScene` needs a canvas and a GPU, so the default is a module
+ * constant rather than a literal buried in it, and what is asserted here is
+ * not the choice but the property that forces it.
+ */
+describe('the default draw class', () => {
+  /** A corner needs its own radius' worth of straight either side of it, so
+   * the shortest road that can turn at all is twice the corner radius. */
+  const shortestRoadWithACorner = (className: RoadClassName): number =>
+    2 * minimumRadiusForSpeed(ROAD_CLASSES[className].designSpeedKph)
+
+  it('fits inside the ground the camera frames', () => {
+    expect(shortestRoadWithACorner(DEFAULT_DRAW_CLASS)).toBeLessThan(RIG_INITIAL_DISTANCE)
+  })
+
+  it('is the only class that does', () => {
+    // Not "is the smallest": smallest-but-still-too-big would satisfy that and
+    // still refuse the player's first road. Every other class must actually
+    // fail to fit.
+    for (const className of ROAD_CLASS_ORDER) {
+      if (className === DEFAULT_DRAW_CLASS) continue
+      expect(shortestRoadWithACorner(className)).toBeGreaterThan(RIG_INITIAL_DISTANCE)
+    }
+  })
+
+  it('is gravel', () => {
+    // The two assertions above say what the default has to be; this says what
+    // it is, so that a change to either the framing or the class speeds shows
+    // up here as a decision to re-make rather than as a silent re-derivation.
+    expect(DEFAULT_DRAW_CLASS).toBe('gravel')
+  })
+})
+
+/**
+ * A known limitation, pinned so its description cannot quietly stop matching.
+ *
+ * `solveNetwork` lifts the NEWER road over the older one, and "newer" is the
+ * road id. `splitRoad` allocates both halves of a split road ids above every
+ * existing road, so splitting a road makes its halves the newest roads in the
+ * network — younger than anything ever built over them — and any crossing on
+ * either half reverses.
+ *
+ * This asserts the WRONG behaviour on purpose. Fixing it wants creation
+ * provenance on `Road`, separate from the id, which is a graph change; what is
+ * in scope is that `solveNetwork`'s docstring describes what actually happens,
+ * and that is what this holds it to. When the ordering is fixed, this test
+ * fails, and that failure is the reminder to rewrite the docstring with it.
+ */
+describe('splitting a road under an existing overpass', () => {
+  it('inverts the crossing, because both halves get ids above every other road', () => {
+    const terrain = new Heightmap(0, 0, 10, 61, 61, new Float32Array(61 * 61).fill(100))
+    const network = new RoadNetwork()
+    const a = network.addRoad(new Alignment([new Line(vec2(100, 300), 0, 400)]), 'rural')
+    const c = network.addRoad(
+      new Alignment([new Line(vec2(300, 100), Math.PI / 2, 400)]), 'rural',
+    )
+
+    const before = solveNetwork(terrain, network)
+    const lifted = 100 + MIN_OVERPASS_CLEARANCE + ruralStructureDepth
+    expect(designElevationAtStation(before.designs.get(a)!, 200)).toBeCloseTo(100, 6)
+    expect(designElevationAtStation(before.designs.get(c)!, 200)).toBeCloseTo(lifted, 6)
+
+    // Two hundred metres from the crossing — what `DrawTool.commit` does when
+    // a player ends a third road on A, and nothing to do with C at all.
+    const split = network.splitRoad(a, 100)
+    expect(split.second).toBeGreaterThan(c)
+
+    const after = solveNetwork(terrain, network)
+    // The half of A that carries the crossing is now the newer road, so it is
+    // the one that climbs, and the overpass the player already had drops to
+    // grade underneath it.
+    expect(designElevationAtStation(after.designs.get(split.second)!, 100)).toBeCloseTo(lifted, 6)
+    expect(designElevationAtStation(after.designs.get(c)!, 200)).toBeCloseTo(100, 6)
+  })
+})
+
+/**
+ * A high run too short to become a bridge.
+ *
+ * The scene declares a 10m fill allowance. A run of stations standing higher
+ * than that used to be skipped by the corridor sweep outright, which left an
+ * unsupported hole in the road; that skip was replaced by the span list, which
+ * covers a high run long enough to become a span and does nothing at all for
+ * one that is not. A narrow notch therefore gets a full embankment, well past
+ * the allowance, with no structure under it.
+ *
+ * Neither the hole nor the silent embankment is right. The embankment is at
+ * least continuous, so that is what is built — and reported.
+ */
+describe('an embankment past the fill allowance', () => {
+  it('is reported rather than built silently', () => {
+    // Flat ground at 100m with a single grid column dropped 18m, a 10m-wide
+    // V across the road. Narrow on purpose: the structure classification
+    // samples at 4m, so only one station reads as needing a structure, the run
+    // is far short of `MIN_SPAN_LENGTH` and is discarded as terrain noise —
+    // which leaves nothing at all to stop the sweep embanking it.
+    const cols = 121, rows = 121
+    const elevations = new Float32Array(cols * rows).fill(100)
+    for (let row = 0; row < rows; row++) elevations[row * cols + 60] = 82
+    const notched = new Heightmap(0, 0, 5, cols, rows, elevations)
+
+    const network = new RoadNetwork()
+    const road = network.addRoad(new Alignment([new Line(vec2(100, 300), 0, 400)]), 'rural')
+
+    const { unsupportedFill } = solveNetwork(notched, network)
+
+    const reported = unsupportedFill.get(road)
+    expect(reported).toBeDefined()
+    expect(reported!.length).toBeGreaterThan(0)
+    for (const fill of reported!) {
+      // Every reported station really is over the allowance — the channel
+      // reports a measurement, not a suspicion.
+      expect(fill.height).toBeGreaterThan(fill.allowance)
+      expect(fill.allowance).toBe(10)
+    }
+  })
+
+  it('says nothing about the demo scene, whose high runs all became spans', () => {
+    // Not vacuous: the assertion above fires on a scene that has the problem,
+    // and this one is a scene that does not. A channel that reported every
+    // road would be no channel at all.
+    expect([...content.unsupportedFill.keys()]).toEqual([])
   })
 })

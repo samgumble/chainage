@@ -1,5 +1,20 @@
-import type { ProfilePoint } from '../../terrain/groundProfile'
-import type { StationSupport } from '../../terrain/gradeSolver'
+import type { Alignment } from '../../geometry/alignment'
+import type { RoadId } from '../../network/graph'
+import type { TerrainSampler } from '../../terrain/heightmap'
+import {
+  type ProfilePoint,
+  designElevationAtStation,
+  sampleGroundProfile,
+} from '../../terrain/groundProfile'
+import { classifySupport, type StationSupport } from '../../terrain/gradeSolver'
+
+/**
+ * Floating-point slack when deciding whether a station falls within half a
+ * sample spacing of a required one. Guards the exact-half-spacing case, where
+ * the arithmetic that produced the required station and the arithmetic that
+ * produced the sample station agree mathematically and differ in the last bit.
+ */
+const STATION_EPSILON = 1e-9
 
 export type StructureSpan = {
   readonly fromStation: number
@@ -109,4 +124,160 @@ export const structureSpans = (
   }
 
   return merged
+}
+
+/** Everything one road's spans are a function of. */
+export type RoadSpanInputs = {
+  readonly alignment: Alignment
+  /** The road's solved design profile — the grade line, not natural ground. */
+  readonly design: readonly ProfilePoint[]
+  /**
+   * NATURAL ground, before any corridor excavation.
+   *
+   * Ground already cut and filled to the design surface sits at the design
+   * line by construction, so every station would read as level and no span
+   * could ever be found. This is also what lets spans be derived before the
+   * earthworks run: they never depend on the excavation's own output.
+   */
+  readonly terrain: TerrainSampler
+  /** The fill allowance the design line was graded to. */
+  readonly maxFillHeight: number
+  /** Station spacing the ground and support profiles are sampled at. */
+  readonly spacing: number
+  /**
+   * Station ranges that must be carried on a structure however low the design
+   * line runs there, because something other than height demands it.
+   *
+   * Height alone cannot decide this. An overpass lifted just enough to clear
+   * the road beneath it — five metres of clearance plus the depth of the deck,
+   * so six or seven on flat ground — sits comfortably under `maxFillHeight`,
+   * and `classifySupport` therefore calls it earthwork. The corridor sweep
+   * then does exactly what it is told and builds an embankment across the
+   * road below. The design lines are correctly separated and the graph is
+   * correct; what gets built is a dam.
+   *
+   * Ranges rather than single stations, because the thing being cleared has
+   * width. A deck forced onto the one or two samples nearest a crossing is
+   * five or ten metres long, which is both shorter than `MIN_SPAN_LENGTH` —
+   * so it would be discarded outright — and narrower than the corridor it is
+   * supposed to bridge. The caller knows how wide the road underneath is and
+   * says so; this function does not have to guess.
+   */
+  readonly requiredStructureRanges?: readonly {
+    readonly fromStation: number
+    readonly toStation: number
+  }[]
+}
+
+/**
+ * The structure spans on one road: sample natural ground, classify each
+ * station, and group the structure stations into spans.
+ *
+ * The single derivation of a road's spans in this codebase. It exists as its
+ * own function because two consumers need the answer — the mesh build, which
+ * puts bridges on the spans and keeps retaining walls off them, and the
+ * corridor excavation, which must stop earthworks at the abutment face — and
+ * they used to derive it independently: the earthworks stopped where a
+ * per-station fill test happened to trip (measured: stations 280-420) while
+ * the structures covered 273-423. Everything wrong at the bridges lived in
+ * that seven-station disagreement, so there is now one function, called once
+ * per road, whose result is shared rather than recomputed.
+ *
+ * A road with fewer than two design stations has no spans: there is no design
+ * line to measure against ground, which is a road that did not grade, not a
+ * road whose spans are unknown.
+ */
+export const roadStructureSpans = (inputs: RoadSpanInputs): StructureSpan[] => {
+  const { alignment, design, terrain, maxFillHeight, spacing } = inputs
+  if (design.length < 2) return []
+
+  const ground = sampleGroundProfile(alignment, terrain, spacing)
+  if (ground.length === 0) return []
+
+  // Resample the design onto the ground profile's own stations, so
+  // `classifySupport` compares like with like. The two profiles are sampled
+  // independently and will not otherwise share stations.
+  const designAtGround = ground.map((g) => ({
+    s: g.s,
+    z: designElevationAtStation(design, g.s),
+  }))
+
+  const support = classifySupport(ground, designAtGround, maxFillHeight)
+
+  // Bounds are inclusive: a sample sitting exactly on the end of a required
+  // range is inside it, the same convention `structureRanges` uses in the
+  // corridor sweep, so earthwork and structures continue to agree about who
+  // owns a boundary station.
+  const required = inputs.requiredStructureRanges ?? []
+  if (required.length > 0) {
+    for (let i = 0; i < ground.length; i++) {
+      const s = ground[i]!.s
+      const inRange = required.some(
+        (r) => s >= r.fromStation - STATION_EPSILON && s <= r.toStation + STATION_EPSILON,
+      )
+      if (inRange) support[i] = 'structure'
+    }
+  }
+
+  return structureSpans(designAtGround, support, ground)
+}
+
+/** A station range something other than height demands a structure over. */
+export type StructureRange = {
+  readonly fromStation: number
+  readonly toStation: number
+}
+
+/** Everything a whole network's spans are a function of. */
+export type NetworkSpanInputs = {
+  readonly designs: ReadonlyMap<RoadId, readonly ProfilePoint[]>
+  /** NATURAL ground, before any corridor excavation — see `RoadSpanInputs`. */
+  readonly terrain: TerrainSampler
+  readonly maxFillHeight: number
+  readonly spacing: number
+  /**
+   * Per road, the ranges that must be on a structure whatever their height —
+   * an overpass's deck, in practice. See `RoadSpanInputs`.
+   */
+  readonly requiredStructureRanges?: ReadonlyMap<RoadId, readonly StructureRange[]>
+}
+
+/**
+ * Every road's spans, in one place.
+ *
+ * The reason this exists rather than each consumer looping over
+ * `roadStructureSpans` itself: there are three consumers — the corridor
+ * excavation, which must stop earthwork at the abutment face; the mesh build,
+ * which puts the bridges there; and the scene, which owns the required ranges
+ * neither of the other two can derive — and every pair of them that derived
+ * the answer separately has, at some point on this branch, disagreed. The mesh
+ * build no longer derives it at all; it is handed this.
+ *
+ * Roads with fewer than two design stations are absent from the result rather
+ * than present with an empty list: they did not grade, so their spans are not
+ * "none", they are unknown.
+ */
+export const networkStructureSpans = (
+  roads: readonly { readonly id: RoadId; readonly alignment: Alignment }[],
+  inputs: NetworkSpanInputs,
+): Map<RoadId, readonly StructureSpan[]> => {
+  const { designs, terrain, maxFillHeight, spacing, requiredStructureRanges } = inputs
+
+  const spans = new Map<RoadId, readonly StructureSpan[]>()
+  for (const road of roads) {
+    const design = designs.get(road.id)
+    if (!design || design.length < 2) continue
+    spans.set(
+      road.id,
+      roadStructureSpans({
+        alignment: road.alignment,
+        design,
+        terrain,
+        maxFillHeight,
+        spacing,
+        requiredStructureRanges: requiredStructureRanges?.get(road.id),
+      }),
+    )
+  }
+  return spans
 }

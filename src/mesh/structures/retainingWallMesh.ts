@@ -115,12 +115,46 @@ export const wallSegments = (
  * The face points away from the road, so its winding runs bottom-to-top on the
  * near station and top-to-bottom on the far one for the right side, and the
  * reverse for the left — that is what keeps the outward face frontmost on both.
+ *
+ * `spacing` is the station spacing the segments were SAMPLED at, and it is a
+ * required argument rather than something recovered from the run. A run has
+ * gaps in it — `networkMesh` drops every segment inside a bridge span, and
+ * `wallSegments` only emits one where a wall is actually needed — and joining
+ * across a gap paints a solid panel over ground with no wall under it. Telling
+ * a gap from an ordinary step needs to know what an ordinary step is.
+ *
+ * This used to infer it, as the median of the run's own gaps, and the
+ * inference is unsound in exactly the case it exists for: a gap inflates the
+ * median it is then compared against. Two segments 200m apart give
+ * `median([200]) = 200`, and 200 is not more than 300, so a 200m triangle got
+ * emitted across the whole hole. One dropped sample on a 4m cadence gives
+ * `median([4, 8]) = 6`, and `1.5 * 6 = 9` is not less than 8, so that one got
+ * joined too. Both are confirmed defects, and both are tests now. The caller
+ * knows the spacing — `networkMesh` passes the very number it sampled at — so
+ * it is passed rather than guessed.
  */
 export const buildRetainingWallMesh = (
   alignment: Alignment,
   segments: readonly WallSegment[],
+  spacing: number,
 ): MeshData => {
+  if (spacing <= 0) {
+    throw new RangeError('spacing must be positive')
+  }
+
   const builder = new MeshBuilder()
+
+  // A gap opened by a dropped sample skips at least one whole sample, so it is
+  // a whole multiple of the spacing and at least twice it. 1.5x separates that
+  // from a genuine step while absorbing floating-point noise and the shorter
+  // final partial step `wallSegments` appends at the alignment's own end.
+  //
+  // The one gap this cannot judge is a dropped sample immediately before that
+  // final partial step, which measures `spacing + partial` and can land under
+  // 1.5x. That joins a panel over at most one partial step of un-walled
+  // ground, at the very end of a road, and closing it would mean carrying the
+  // segment list's provenance rather than its stations.
+  const maxJoinGap = spacing * 1.5
 
   for (const side of ['left', 'right'] as const) {
     const run = segments
@@ -130,6 +164,7 @@ export const buildRetainingWallMesh = (
     for (let i = 1; i < run.length; i++) {
       const from = run[i - 1]!
       const to = run[i]!
+      if (to.s - from.s > maxJoinGap) continue
 
       const poseFrom = alignment.poseAt(from.s)
       const poseTo = alignment.poseAt(to.s)

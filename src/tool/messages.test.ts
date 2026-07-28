@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
+  describeInfeasibleCrossings,
+  describeShallowCrossings,
   describeInfeasibleRoads,
   describePolylineRejection,
   describeSplitOutcome,
@@ -240,5 +242,66 @@ describe('fmt (number formatting shared by every message)', () => {
     const message = describeInfeasibleRoads(new Map([[4, 132]]))
     // `String(132)` would print "132", with no decimal point at all.
     expect(message).toMatch(/132\.0m/)
+  })
+})
+
+describe('describeInfeasibleCrossings', () => {
+  const crossing = {
+    road: 3,
+    crosses: 1,
+    station: 212.44,
+    requiredElevation: 118.06,
+    failedAtStation: 40,
+  }
+
+  it('is empty when every crossing was separated', () => {
+    expect(describeInfeasibleCrossings([])).toBe('')
+  })
+
+  it('names both roads, the height needed and where the grade line gave up', () => {
+    const message = describeInfeasibleCrossings([crossing])
+    expect(message).toContain('118.1')
+    expect(message).toContain('212.4')
+    expect(message).toContain('40.0')
+    expect(message).toMatch(/road 3/)
+    expect(message).toMatch(/road 1/)
+  })
+
+  it('counts more than one', () => {
+    expect(describeInfeasibleCrossings([crossing, { ...crossing, crosses: 2 }])).toMatch(
+      /2 crossings/,
+    )
+  })
+})
+
+describe('describeShallowCrossings', () => {
+  const shallow = {
+    road: 3,
+    crosses: 1,
+    station: 212.44,
+    // 12 degrees, in the radians the geometry works in.
+    angle: (12 * Math.PI) / 180,
+    deckHalfLength: 130.2,
+    requiredHalfLength: 208.75,
+  }
+
+  it('is empty when every crossing was square enough to deck', () => {
+    expect(describeShallowCrossings([])).toBe('')
+  })
+
+  it('names both roads, the angle, and both deck lengths', () => {
+    const message = describeShallowCrossings([shallow])
+    // Degrees, not radians: nobody reads 0.2 as an angle between two roads.
+    expect(message).toContain('12.0')
+    expect(message).toContain('130.2')
+    expect(message).toContain('208.8')
+    expect(message).toMatch(/road 3/)
+    expect(message).toMatch(/road 1/)
+  })
+
+  it('counts more than one', () => {
+    expect(describeShallowCrossings([shallow, { ...shallow, crosses: 2 }])).toMatch(
+      /2 crossings/,
+    )
   })
 })

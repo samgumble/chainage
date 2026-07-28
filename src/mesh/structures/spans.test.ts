@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import { structureSpans, MIN_SPAN_LENGTH, ABUTMENT_EXTENSION } from './spans'
+import { structureSpans, roadStructureSpans, MIN_SPAN_LENGTH, ABUTMENT_EXTENSION } from './spans'
+import { Alignment } from '../../geometry/alignment'
+import { Line } from '../../geometry/primitives'
+import { vec2 } from '../../geometry/vec2'
+import type { TerrainSampler } from '../../terrain/heightmap'
 import type { ProfilePoint } from '../../terrain/groundProfile'
 import type { StationSupport } from '../../terrain/gradeSolver'
 
@@ -138,5 +142,71 @@ describe('structureSpans', () => {
   it('exports a sane default minimum length', () => {
     expect(MIN_SPAN_LENGTH).toBeGreaterThan(0)
     expect(MIN_SPAN_LENGTH).toBeLessThan(50)
+  })
+})
+
+describe('roadStructureSpans requiredStructureRanges', () => {
+  // A straight 200m road over dead-flat ground at elevation 100.
+  const alignment = new Alignment([new Line(vec2(0, 0), 0, 200)])
+  const flatGround: TerrainSampler = { sample: () => 100 }
+
+  // Design line 6m up: five metres of overpass clearance plus the depth of
+  // the deck, which is what a road lifted over another road on flat terrain
+  // actually sits at. Comfortably under the 10m fill allowance below, which
+  // is the entire point — height alone cannot tell this apart from an
+  // ordinary embankment.
+  const design: ProfilePoint[] = Array.from({ length: 41 }, (_, i) => ({
+    s: i * 5,
+    z: 106,
+  }))
+
+  const spansWith = (
+    requiredStructureRanges?: readonly { fromStation: number; toStation: number }[],
+  ) =>
+    roadStructureSpans({
+      alignment,
+      design,
+      terrain: flatGround,
+      maxFillHeight: 10,
+      spacing: 5,
+      requiredStructureRanges,
+    })
+
+  it('calls a 6m lift earthwork when nothing requires a structure', () => {
+    // Not a bug — 6m of fill against a 10m allowance genuinely is an
+    // embankment. This is the baseline the next test has to overturn.
+    expect(spansWith()).toEqual([])
+  })
+
+  // THE DEFECT. Without this, an overpass grades correctly, separates
+  // correctly in the design lines, and then the corridor sweep builds an
+  // embankment straight across the road underneath it.
+  it('forces a span where the road was lifted to clear another road', () => {
+    const spans = spansWith([{ fromStation: 85, toStation: 115 }])
+    expect(spans).toHaveLength(1)
+    expect(spans[0]!.fromStation).toBeLessThanOrEqual(100)
+    expect(spans[0]!.toStation).toBeGreaterThanOrEqual(100)
+  })
+
+  it('includes a sample sitting exactly on a range bound', () => {
+    // Bounds are inclusive, matching the corridor sweep's structureRanges,
+    // so the two never disagree about who owns a boundary station.
+    const spans = spansWith([{ fromStation: 85, toStation: 115 }])
+    expect(spans[0]!.fromStation).toBeLessThanOrEqual(85)
+    expect(spans[0]!.toStation).toBeGreaterThanOrEqual(115)
+  })
+
+  it('discards a forced range too short to be a span', () => {
+    // MIN_SPAN_LENGTH still applies. A range covering one sample is not a
+    // bridge, and this is exactly why the caller passes the width of the
+    // road below rather than the crossing station on its own.
+    expect(spansWith([{ fromStation: 100, toStation: 100 }])).toEqual([])
+  })
+
+  it('leaves stations away from the requirement as earthwork', () => {
+    const spans = spansWith([{ fromStation: 85, toStation: 115 }])
+    // The span must be local to the crossing, not the whole road. Station 20
+    // is far away and has no reason to be carried on anything.
+    expect(spans[0]!.fromStation).toBeGreaterThan(20)
   })
 })

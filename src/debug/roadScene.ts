@@ -5,24 +5,91 @@ import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 import { Alignment } from '../geometry/alignment'
 import { Line } from '../geometry/primitives'
-import { vec2, fromAngle, type Vec2 } from '../geometry/vec2'
+import { vec2, type Vec2 } from '../geometry/vec2'
 import type { PolylineRejection } from '../geometry/polyline'
 import { generateValley } from '../terrain/generate'
-import { sampleGroundProfile, designElevationAtStation, type ProfilePoint } from '../terrain/groundProfile'
-import { solveGradeProfile, type GradeSolution } from '../terrain/gradeSolver'
+import {
+  sampleGroundProfile, designElevationAtStation, type ProfilePoint,
+} from '../terrain/groundProfile'
+import {
+  solveGradeProfile, STATION_TOLERANCE,
+  type GradeSolution, type ClearanceFloor,
+} from '../terrain/gradeSolver'
 import { TerrainEditLayer } from '../terrain/editLayer'
-import { designSurfaceAtOffset, type CorridorTemplate, type CorridorBatters } from '../terrain/corridor'
+import { type CorridorTemplate, type CorridorBatters } from '../terrain/corridor'
+import { CorridorExcavation, sweepCorridor, type UnsupportedFill } from '../terrain/excavation'
 import { rayTerrainIntersection, type Ray3, type Vec3 as GroundVec3 } from '../terrain/rayCast'
 import { clampNumber, type Heightmap, type TerrainSampler } from '../terrain/heightmap'
-import { ROAD_CLASSES, formationHalfWidth, totalPavementThickness, type RoadClassName } from '../network/roadClass'
+import {
+  ROAD_CLASSES,
+  ROAD_CLASS_ORDER,
+  formationHalfWidth,
+  totalPavementThickness,
+  type LayerName,
+  type RoadClassName,
+} from '../network/roadClass'
 import { toBufferGeometry } from '../render/meshAdapter'
 import { terrainGeometry } from '../render/terrainMesh'
 import { CameraRig, type Vec3 as RigVec3 } from '../render/cameraRig'
 import { sunAt } from '../render/sunlight'
 import { surfaceFor } from '../render/materials'
 import { TILT_SHIFT_FRAGMENT_SHADER, createTiltShiftUniforms } from '../render/tiltShift'
-import { RoadNetwork, type RoadId } from '../network/graph'
+import { RoadNetwork, NODE_SNAP_DISTANCE, type RoadId } from '../network/graph'
+import { findCrossings, MIN_OVERPASS_CLEARANCE } from '../network/crossings'
+
+/**
+ * Slack added to each end of a derived overpass deck, metres.
+ *
+ * `overpassDeckHalfLength` is exact in the continuum. What it is not exact
+ * about is sampling, and three quantisations sit between its answer and what
+ * actually gets built:
+ *
+ * - the required range is resampled onto `STRUCTURE_STATION_SPACING` (4m)
+ *   before it becomes a span, and `ABUTMENT_EXTENSION` (3m) does not always
+ *   step back over that, so a span can finish up to 1m inside the range asked
+ *   for;
+ * - the corridor sweep steps at `EXCAVATION_STATION_SPACING` (5m), so the
+ *   first station outside the deck sits anywhere in the 5m past its end;
+ * - the derivation treats both alignments as straight over the deck's length,
+ *   which is exact through a `Line` and approximate through an `Arc`.
+ *
+ * Ten metres is comfortably clear of the 4m and the 5m, and absorbs a fair
+ * amount of curvature besides. This is NOT where the road below's batter run
+ * is accounted for — that is `CORRIDOR_MAX_BATTER_WIDTH`, in the half-width
+ * the derivation is given. Erring long here costs a slightly longer deck;
+ * erring short puts an embankment in the road the deck was bridging.
+ */
+const OVERPASS_DECK_MARGIN = 10
+
+/**
+ * Shallowest crossing angle an overpass deck is derived honestly for, radians.
+ *
+ * The half-length a deck needs is `(B + W·|cos θ|) / sin θ` (see
+ * `overpassDeckHalfLength`), which diverges as the two alignments approach
+ * parallel. For this scene's rural-over-rural case — B = 5 + 8 = 13m of
+ * corridor to keep clear, W ≈ 28m of swept fan at the ~6m of fill an overpass
+ * approach carries — the deck comes out:
+ *
+ *   90°: 46m   60°: 83m   45°: 114m   30°: 171m   20°: 252m   10°: 439m
+ *
+ * (each including this margin at both ends). The demo scene's own roads are
+ * 300m for the gravel branch and 750m for each arm. At 20° the deck is already
+ * five sixths of the branch; at 10° it is longer than the branch is, and there
+ * is no road left to approach it on. Twenty degrees is also a 70° skew, well
+ * past anything built — highway skews beyond about 45° are already
+ * exceptional.
+ *
+ * So the derivation is clamped here rather than allowed to run away, and every
+ * crossing shallower than this goes into `SceneContent.shallowCrossings`. The
+ * report is not decoration: a clamped deck IS too short, and the fill it fails
+ * to keep off the road below is exactly the "things rendering on top of the
+ * road" defect this branch exists to fix, reproduced against the lower road.
+ */
+const MIN_DECKABLE_CROSSING_ANGLE = (20 * Math.PI) / 180
+import { classifyCrossing, type InfeasibleCrossing, type ShallowCrossing } from '../network/crossingKind'
 import { buildNetworkMesh, type NetworkMesh } from '../mesh/networkMesh'
+import { networkStructureSpans, type StructureSpan } from '../mesh/structures/spans'
+import { DECK_DEPTH } from '../mesh/structures/bridgeMesh'
 import { DrawTool, SNAP_RADIUS } from '../tool/drawTool'
 import { resolveSnap, type SnapTarget } from '../tool/snap'
 import { SelectTool, type SplitOutcome } from '../tool/selectTool'
@@ -31,6 +98,8 @@ import {
   describeSplitOutcome,
   describeUpgradeObstacles,
   describeInfeasibleRoads,
+  describeInfeasibleCrossings,
+  describeShallowCrossings,
 } from '../tool/messages'
 
 const MAX_GRADE = 0.07
@@ -71,7 +140,7 @@ const CORRIDOR_FILL_SLOPE = 3
  * branch and a quarter of the shallow west arm. Without it `retainingWall()`
  * returns null at every station and no wall is ever built.
  */
-const CORRIDOR_MAX_BATTER_WIDTH = 8
+export const CORRIDOR_MAX_BATTER_WIDTH = 8
 
 /**
  * Batters and wall limit, shared by every road in the scene.
@@ -97,7 +166,19 @@ const corridorTemplateFor = (className: RoadClassName): CorridorTemplate => ({
 })
 
 /** How far apart, along the alignment, the excavation walk takes stations. */
-const EXCAVATION_STATION_SPACING = 5
+export const EXCAVATION_STATION_SPACING = 5
+
+/**
+ * Station spacing for the mesh build and for the structure spans fed to it.
+ *
+ * One constant for both deliberately. `buildNetworkMesh` samples ground at
+ * its `spacing` when it has to derive spans itself, so a scene that computed
+ * its spans at one spacing and meshed at another would be handing the mesh
+ * layer a span list it would never have produced — the same class of
+ * disagreement, one level down, as the one this scene's earthworks and
+ * structures used to have with each other.
+ */
+const STRUCTURE_STATION_SPACING = 4
 /** Extra width beyond the computed batter run-out, so the daylight line is
  * never clipped by an undersized excavation footprint. */
 const EXCAVATION_MARGIN = 5
@@ -116,6 +197,39 @@ const EXCAVATION_MARGIN = 5
 const EXCAVATION_ZFIGHT_MARGIN = 0.05
 
 /**
+ * How far back the camera starts, metres.
+ *
+ * Close enough that the junction — three formation widths meeting at one
+ * point — fills a useful part of the screen, rather than the old ~1565m that
+ * read every road as a hairline across a map (Step 6).
+ *
+ * Module scope, and exported, because it is not only a camera number: it is
+ * the width of ground the player can actually see to draw a road in, and
+ * `DEFAULT_DRAW_CLASS` is chosen against it. A test that pinned the default
+ * class without being able to see this would be pinning a preference rather
+ * than the reason for it.
+ */
+export const RIG_INITIAL_DISTANCE = 300
+
+/**
+ * The road class the draw tool starts in.
+ *
+ * Gravel, because its ~43m minimum corner radius is the only one that fits
+ * inside the `RIG_INITIAL_DISTANCE` metres of ground the camera frames. A
+ * corner needs its radius' worth of straight on each side of it, so the
+ * shortest road with a bend in it is twice the corner radius: 87m for gravel,
+ * but 504m for rural, 671m for arterial and 1121m for highway. Defaulting to
+ * any of those three means the player's very first road — drawn, reasonably,
+ * inside the part of the world they can see — is REFUSED, with a message
+ * about curve overlap, before they have any idea that road class is a thing
+ * they can change.
+ *
+ * Faster classes are drawn zoomed out, which is honest: a 252m-radius rural
+ * road genuinely is a larger object than a farm track.
+ */
+export const DEFAULT_DRAW_CLASS: RoadClassName = 'gravel'
+
+/**
  * Where the demo network's three arms meet — a T junction on the valley
  * floor, main road running east-west with a narrower gravel branch heading
  * north. Module scope (not local to `buildSceneContent`) because
@@ -125,54 +239,43 @@ const EXCAVATION_ZFIGHT_MARGIN = 0.05
 const JUNCTION = vec2(900, 1280)
 
 /**
- * Cut and fill the terrain down to the design surface along the corridor.
+ * Sweep one road's corridor into a shared excavation.
  *
  * This is the piece that was missing: without it, the solved design line
  * (correctly placed below natural ground through cuts) sits inside an
  * un-dug hill and only pokes through where it happens to break the surface.
  *
- * Approach, approximate by design — this feeds a debug view, not the real
- * earthworks pipeline:
+ * The walk itself — station stepping, transverse sampling, grid snapping —
+ * lives in `terrain/excavation.ts`'s `sweepCorridor`, which is pure and
+ * tested; this function just supplies this scene's per-road parameters
+ * (pavement depth, batter template, spacing) and hands the result to a
+ * `CorridorExcavation` the caller shares across every road, so an overlap
+ * at a junction is arbitrated by nearest centreline rather than by whichever
+ * road happened to sweep that node last.
  *
- * 1. Walk the alignment every `EXCAVATION_STATION_SPACING` metres.
- * 2. At each station, take the design elevation from the solved profile and
- *    step transversely across the corridor, no further per step than the
- *    terrain's own cell size, out to a half-width generous enough to cover
- *    the batters (formation half-width, plus the steeper of the two slopes
- *    times the local cut/fill depth, plus a margin).
- * 3. At each transverse sample, snap to the nearest terrain grid node, read
- *    its existing (unedited) elevation, compute the corridor template's
- *    target elevation there, and record the difference as that node's delta
- *    in the edit layer.
+ * `spans` is required rather than defaulted: an empty list is a truthful
+ * answer for a road with no bridges and a silent catastrophe for a road with
+ * one (earthwork fills the valley the deck was meant to cross), and the two
+ * must not be spelled the same way at the call site. The caller passes the
+ * same list it gives `buildNetworkMesh`, so the abutment stands exactly where
+ * the earthwork stops.
  *
- * Grid nodes get written from multiple nearby stations/offsets; last write
- * wins, which is fine here since neighbouring stations along a gently curving
- * alignment agree closely on the design surface at a shared node.
- *
- * This excavation routine is a visual stand-in for the real earthworks
- * pipeline and must not be promoted into `src/terrain/`. Nearest-node
- * snapping with last-write-wins is fine for a debug view where "looks
- * continuous from an orbiting camera" is the bar, but it is not fine for
- * computing quantities — that needs the exact transverse integration in
- * `src/terrain/volumes.ts`, not this grid-snapped approximation.
- *
- * Writes into a caller-supplied `layer` rather than returning a fresh one, so
- * that calling this once per road in a network accumulates every corridor's
- * deltas onto the same terrain instead of each excavation clobbering the last.
+ * Returns the stations it embanked higher than `MAX_FILL_HEIGHT` with nothing
+ * carrying them — see `UnsupportedFill`. Empty for a road whose high runs all
+ * became spans, which is most of them.
  */
 const excavateCorridor = (
-  layer: TerrainEditLayer,
+  into: CorridorExcavation,
+  terrain: Heightmap,
   alignment: Alignment,
   profile: readonly ProfilePoint[],
   className: RoadClassName,
-): void => {
-  if (alignment.isEmpty || profile.length === 0) return
+  spans: readonly StructureSpan[],
+): UnsupportedFill[] => {
+  if (alignment.isEmpty || profile.length === 0) return []
 
-  const terrain = layer.base
   const template = corridorTemplateFor(className)
-  const transverseStep = terrain.cellSize
   const maxSlope = Math.max(template.cutSlope, template.fillSlope)
-  const steps = Math.max(1, Math.ceil(alignment.length / EXCAVATION_STATION_SPACING))
 
   // The design profile is the top of the finished road (top of the wearing
   // course), not the terrain elevation the road should rest on. The terrain
@@ -180,44 +283,123 @@ const excavateCorridor = (
   // the full pavement stack — plus a small margin against z-fighting. Using
   // an arbitrary clearance instead of this would either bury the pavement in
   // cut sections or leave it floating above the embankment in fill sections.
-  const pavementDepth = totalPavementThickness(ROAD_CLASSES[className])
+  const pavementDepth = totalPavementThickness(ROAD_CLASSES[className]) + EXCAVATION_ZFIGHT_MARGIN
 
+  return sweepCorridor(
+    {
+      alignment,
+      profile,
+      terrain,
+      template,
+      pavementDepth,
+      maxSlope,
+      margin: EXCAVATION_MARGIN,
+      stationSpacing: EXCAVATION_STATION_SPACING,
+      transverseSpacing: terrain.cellSize,
+      structureRanges: spans,
+      maxFillHeight: MAX_FILL_HEIGHT,
+    },
+    into,
+  )
+}
+
+/**
+ * The widest this road's corridor sweep will ever fan, metres each side.
+ *
+ * Not an estimate. `sweepCorridor` computes exactly
+ * `formationHalfWidth + maxSlope · depth + margin` at stations
+ * `EXCAVATION_STATION_SPACING` apart, and this evaluates the same expression
+ * at the same stations off the same profile, so its answer is a true upper
+ * bound on how far sideways any sample of this road can land.
+ *
+ * The deck derivation needs that bound and not the formation width, because a
+ * station outside the deck does not reach the road below through its
+ * centreline — it reaches it through the transverse fan, and the fan is large:
+ * at the ~6m of fill an overpass approach carries, a rural road's is nearly
+ * 30m, six times its own formation half-width.
+ *
+ * Measured over the WHOLE road, not just near the crossing, because the
+ * closed-form half-length below assumes a single fan width valid at every
+ * station outside the deck. A bound taken over part of the road would not be
+ * one.
+ */
+const maxSweptHalfWidth = (
+  alignment: Alignment,
+  design: readonly ProfilePoint[],
+  terrain: Heightmap,
+  className: RoadClassName,
+): number => {
+  const template = corridorTemplateFor(className)
+  const maxSlope = Math.max(template.cutSlope, template.fillSlope)
+  const pavementDepth = totalPavementThickness(ROAD_CLASSES[className]) + EXCAVATION_ZFIGHT_MARGIN
+
+  const steps = Math.max(1, Math.ceil(alignment.length / EXCAVATION_STATION_SPACING))
+  let widest = 0
   for (let i = 0; i <= steps; i++) {
     const s = Math.min(i * EXCAVATION_STATION_SPACING, alignment.length)
     const pose = alignment.poseAt(s)
-    const roadZ = designElevationAtStation(profile, s)
-    const designZ = roadZ - pavementDepth - EXCAVATION_ZFIGHT_MARGIN
-
-    const centreGroundZ = terrain.sample(pose.position.x, pose.position.y)
-
-    // Where a structure carries the road there is no earthwork to build, so
-    // leave the ground alone — otherwise the embankment this loop would raise
-    // swallows the bridge whole. Same test `classifySupport` applies, but
-    // station by station: it does not know about `MIN_SPAN_LENGTH`, so an
-    // isolated high station would leave a short unfilled notch with no bridge
-    // over it. None occur in this valley, and this is a debug view.
-    if (roadZ - centreGroundZ > MAX_FILL_HEIGHT) continue
-
-    const depth = Math.abs(centreGroundZ - designZ)
-    const half = template.formationHalfWidth + maxSlope * depth + EXCAVATION_MARGIN
-
-    const normal = fromAngle(pose.heading + Math.PI / 2)
-    const transverseSteps = Math.max(1, Math.ceil(half / transverseStep))
-
-    for (let j = -transverseSteps; j <= transverseSteps; j++) {
-      const offset = (half * j) / transverseSteps
-      const worldX = pose.position.x + normal.x * offset
-      const worldY = pose.position.y + normal.y * offset
-
-      const col = Math.round((worldX - terrain.originX) / terrain.cellSize)
-      const row = Math.round((worldY - terrain.originY) / terrain.cellSize)
-      if (col < 0 || col >= terrain.cols || row < 0 || row >= terrain.rows) continue
-
-      const groundZ = terrain.elevationAtIndex(col, row)
-      const targetZ = designSurfaceAtOffset(offset, designZ, groundZ, template)
-      layer.setDelta(col, row, targetZ - groundZ)
-    }
+    const groundZ = terrain.sample(pose.position.x, pose.position.y)
+    const designZ = designElevationAtStation(design, s) - pavementDepth
+    const half = template.formationHalfWidth + maxSlope * Math.abs(groundZ - designZ) + EXCAVATION_MARGIN
+    if (half > widest) widest = half
   }
+  return widest
+}
+
+/**
+ * How much of the lifted road must be on a deck, measured each way from the
+ * crossing, metres.
+ *
+ * The thing the deck has to achieve is not stated on the lifted road at all.
+ * It is stated on the road BELOW: a band of half-width `clearHalfWidth`,
+ * measured PERPENDICULAR TO THAT ROAD, into which no earthwork may fall. Those
+ * two are the same interval only when the roads cross at 90°, which is why
+ * taking the half-length straight from the lower road's width — as this used
+ * to — is right at 90°, wrong at 45°, and catastrophically wrong below 20°.
+ *
+ * Put the lower road on the x-axis with the crossing at the origin, and let
+ * the lifted road run at angle θ through it. A station `t` along the lifted
+ * road sits at `(t·cos θ, t·sin θ)`; its transverse fan runs along
+ * `(−sin θ, cos θ)` and reaches `sweptHalfWidth` each way. A sample at
+ * transverse offset `u` therefore lands at
+ *
+ *     y = t·sin θ + u·cos θ
+ *
+ * and misses the band entirely when `|t|·sin θ − W·|cos θ| > B` for every
+ * `|u| ≤ W`, i.e. when
+ *
+ *     |t| > (B + W·|cos θ|) / sin θ
+ *
+ * which is the half-length returned. At 90° the `cos θ` term vanishes and the
+ * answer collapses to `B` — the old behaviour, and the reason the old code
+ * looked correct in every test that had one. As `sin θ → 0` it diverges: two
+ * nearly-parallel roads need a deck as long as the stretch over which they run
+ * within a corridor width of each other, which is unbounded.
+ *
+ * Divergence is handled by clamping `sin θ` at `MIN_DECKABLE_CROSSING_ANGLE`
+ * and saying so in the result. `|cos θ|` is left at the TRUE angle: clamping
+ * it too would shrink the numerator at the same time as the denominator and
+ * quietly cancel part of the error the clamp is meant to be honest about.
+ */
+const overpassDeckHalfLength = (
+  clearHalfWidth: number,
+  sweptHalfWidth: number,
+  upperHeading: number,
+  lowerHeading: number,
+): { halfLength: number; requiredHalfLength: number; angle: number; clamped: boolean } => {
+  const delta = upperHeading - lowerHeading
+  // Undirected: a road crossing at 170° crosses at 10°, and which way each
+  // alignment happens to have been drawn says nothing about the geometry.
+  const angle = Math.atan2(Math.abs(Math.sin(delta)), Math.abs(Math.cos(delta)))
+  const reach = clearHalfWidth + sweptHalfWidth * Math.abs(Math.cos(angle))
+
+  const requiredHalfLength = reach / Math.sin(angle) + OVERPASS_DECK_MARGIN
+  const clamped = angle < MIN_DECKABLE_CROSSING_ANGLE
+  const halfLength = clamped
+    ? reach / Math.sin(MIN_DECKABLE_CROSSING_ANGLE) + OVERPASS_DECK_MARGIN
+    : requiredHalfLength
+
+  return { halfLength, requiredHalfLength, angle, clamped }
 }
 
 /** Everything the scene draws, with no three.js anywhere in sight. */
@@ -246,19 +428,129 @@ export type SceneContent = {
    * accompanies it.
    */
   readonly infeasibleRoads: ReadonlyMap<RoadId, number>
+  /**
+   * Crossings that had to become overpasses and could not be raised clear of
+   * the road below within the grade limit.
+   *
+   * A separate channel from `infeasibleRoads` because it is a separate
+   * failure: these roads grade perfectly well on their own terrain and only
+   * run out of room once they have to climb over something. They get no
+   * design profile either — building the crossing at grade instead would put
+   * one road through another, which is the defect being fixed, so it is
+   * reported rather than approximated.
+   */
+  readonly infeasibleCrossings: readonly InfeasibleCrossing[]
+  /**
+   * Overpasses whose crossing angle was too shallow to derive a deck for, and
+   * which were therefore built on a deck clamped to
+   * `MIN_DECKABLE_CROSSING_ANGLE`'s length.
+   *
+   * A third channel rather than a flavour of `infeasibleCrossings`, because
+   * the outcome differs: these roads DO get a design profile and DO get built.
+   * What they do not get is a deck long enough to keep their own earthwork off
+   * the road below, so the crossing is knowingly wrong and the player has to
+   * be told rather than left to spot the embankment lying across their road.
+   */
+  readonly shallowCrossings: readonly ShallowCrossing[]
+  /**
+   * Per road, the stations embanked higher than the fill allowance with no
+   * structure carrying them.
+   *
+   * Console-only, like `built.tightCrossings` and `built.infeasibleJunctions`:
+   * it is a defect in what was built rather than a refusal the player can act
+   * on by drawing differently, and the message line is for the latter. What
+   * matters is that it is not silent — see `UnsupportedFill` for why neither
+   * building it nor the old skip is the right answer, and why the honest move
+   * is to build the continuous thing and say so.
+   */
+  readonly unsupportedFill: ReadonlyMap<RoadId, readonly UnsupportedFill[]>
 }
+
+/** How far apart, along the alignment, the grade solve takes stations. */
+const GRADE_STATION_SPACING = 10
+
+/**
+ * How much structure hangs below a road's design line where it is carried
+ * over something, metres.
+ *
+ * The design line is the top of the wearing course; underneath it sits the
+ * whole pavement stack, and underneath that the deck slab. Both numbers come
+ * from the code that actually builds the deck (`buildBridgeMesh`'s
+ * `deckClearance` default and `DECK_DEPTH`) rather than being restated here:
+ * a second, independently-chosen deck thickness that drifted from the first
+ * would put the modelled soffit somewhere other than where the clearance was
+ * measured to, which is precisely the class of duplication this branch has
+ * already had to remove once.
+ */
+const overpassStructureDepth = (className: RoadClassName): number =>
+  totalPavementThickness(ROAD_CLASSES[className]) + DECK_DEPTH
 
 /** Grade a single alignment against natural ground: the full solver result,
  * feasible or not, so a caller that needs to know why can see the station
- * where the solve ran out of room. */
-const solveFor = (alignment: Alignment, terrain: Heightmap): GradeSolution => {
-  const ground = sampleGroundProfile(alignment, terrain, 10)
-  return solveGradeProfile(ground, {
+ * where the solve ran out of room. `clearanceFloors` carries any grade
+ * separation the alignment owes to roads it crosses (see `solveNetwork`). */
+const solveGround = (
+  ground: readonly ProfilePoint[],
+  clearanceFloors: readonly ClearanceFloor[] = [],
+): GradeSolution =>
+  solveGradeProfile(ground, {
     maxGrade: MAX_GRADE,
     maxCutDepth: MAX_CUT_DEPTH,
     maxFillHeight: MAX_FILL_HEIGHT,
     maxStructureHeight: MAX_STRUCTURE_HEIGHT,
+    clearanceFloors,
   })
+
+const solveFor = (alignment: Alignment, terrain: Heightmap): GradeSolution =>
+  solveGround(sampleGroundProfile(alignment, terrain, GRADE_STATION_SPACING))
+
+/**
+ * Clearance floors that force a profile at least `minimumElevation` high at
+ * an arbitrary station — not just at the sampled stations either side of it.
+ *
+ * `solveGradeProfile` constrains stations, and a crossing lands wherever the
+ * two alignments happen to meet, which is almost never on one. Flooring the
+ * NEAREST station would leave the crossing itself up to half a station away
+ * from where the clearance was enforced — on a 7% grade over this scene's 10m
+ * spacing, up to 0.35m of clearance quietly missing from the one place it was
+ * being measured. Flooring BOTH bracketing stations instead is exact: the
+ * profile is piecewise linear between stations, so if both ends of the
+ * interval clear the floor, every point inside it does too, the crossing
+ * included.
+ *
+ * It does ask for slightly more than the minimum — the road holds that height
+ * across the whole 10m interval rather than at one point in it. That is the
+ * direction to err in: the alternative rounds a hard clearance requirement
+ * down, and the excess is well under a metre of extra climb against a 5m
+ * clearance.
+ */
+const clearanceFloorsAt = (
+  ground: readonly ProfilePoint[],
+  station: number,
+  minimumElevation: number,
+): ClearanceFloor[] => {
+  if (ground.length === 0) return []
+
+  const floorAt = (i: number): ClearanceFloor => ({ station: ground[i]!.s, minimumElevation })
+
+  const first = ground[0]!
+  const last = ground[ground.length - 1]!
+  if (station <= first.s + STATION_TOLERANCE) return [floorAt(0)]
+  if (station >= last.s - STATION_TOLERANCE) return [floorAt(ground.length - 1)]
+
+  for (let i = 1; i < ground.length; i++) {
+    const previous = ground[i - 1]!
+    const current = ground[i]!
+    if (station > current.s) continue
+    // Exactly on a station: one floor, not two. Flooring its neighbour as
+    // well would hold the road up for a further station in one direction for
+    // no reason at all.
+    if (Math.abs(station - current.s) <= STATION_TOLERANCE) return [floorAt(i)]
+    if (Math.abs(station - previous.s) <= STATION_TOLERANCE) return [floorAt(i - 1)]
+    return [floorAt(i - 1), floorAt(i)]
+  }
+
+  return [floorAt(ground.length - 1)]
 }
 
 /**
@@ -273,6 +565,61 @@ const solveFor = (alignment: Alignment, terrain: Heightmap): GradeSolution => {
  * Known limitation: this redoes work for roads the edit did not touch.
  * Correct, and slow once the network is large — measure before making it
  * incremental.
+ *
+ * ## Grade separation
+ *
+ * Two roads that cross in plan without sharing a node are not a junction —
+ * the player never clicked where they meet — so they must not be built
+ * through each other. The road drawn LATER is raised over the earlier one,
+ * always, and the earlier one's profile is never touched. That direction is
+ * not a preference:
+ *
+ * - Mutating an existing road's vertical profile would invalidate its
+ *   structures, its mesh and every road tied to its endpoints — a far larger
+ *   blast radius, and one whose result would depend on the order roads
+ *   happened to be drawn in.
+ * - Lifting only the new road keeps the dependency a strict order: a road is
+ *   solved against the FINAL profiles of every road older than it and against
+ *   nothing else, so there is no cycle to iterate and no fixed point to
+ *   converge on. Roads are re-solved in ascending id here for exactly that
+ *   reason.
+ * - It is predictable for the player: the road you are drawing is the road
+ *   that goes over.
+ *
+ * The lift is a constraint on the grade solve, not a lift applied to its
+ * answer — see the phase 1 comment in `gradeSolver.ts`. An overpass that
+ * cannot be climbed to within the grade limit therefore comes back as an
+ * infeasible solve and lands in `infeasibleCrossings`, rather than as a
+ * profile that reaches the clearance by way of a grade the class forbids.
+ *
+ * Known limitation, and it is not rare. "Age" here is the road id, and
+ * `splitRoad` allocates BOTH halves of a split road ids above every road that
+ * already exists. Splitting a road therefore makes both of its halves the
+ * newest roads in the network — younger than anything that was ever built
+ * over it — and any crossing on either half reverses. Nothing about the split
+ * has to be anywhere near the crossing for this to happen.
+ *
+ * Three clicks reach it, and the third is an ordinary thing to do:
+ *
+ *   1. Draw road A, east-west.
+ *   2. Draw road C across it. C is newer, so C is lifted over A: measured on
+ *      flat ground at 100m, C sits at 106.70 at the crossing and A stays at
+ *      100.00.
+ *   3. Draw road D ending ON A, anywhere — `DrawTool.commit` splits A there to
+ *      make the junction. Two hundred metres from the crossing is enough.
+ *
+ * On the next solve the half of A carrying the crossing is the newer road, so
+ * it is the one lifted: measured, A's half comes back at 106.70 and C drops to
+ * 100.00. An already-built overpass visibly inverts because the player made a
+ * junction somewhere else on the road underneath it.
+ *
+ * Everything above this paragraph is still true — the solve is still a strict
+ * order with no cycle to iterate, and it is still deterministic. What is not
+ * true is that the road which moves is the road most recently drawn. Fixing
+ * that wants creation provenance on `Road`, separate from the id, which is a
+ * graph change rather than a scene one; until then this is documented rather
+ * than papered over, and pinned by a test in `roadScene.test.ts` so the
+ * description cannot quietly stop matching the behaviour.
  */
 export const solveNetwork = (
   terrain: Heightmap,
@@ -281,44 +628,295 @@ export const solveNetwork = (
   designs: Map<RoadId, ProfilePoint[]>
   editLayer: TerrainEditLayer
   built: NetworkMesh
+  /**
+   * Where each road is carried on a structure rather than on earth.
+   *
+   * Returned rather than kept private because it is the one output that says
+   * whether the overpass mechanism actually fired: a lifted road whose deck
+   * was never forced looks identical in `designs` (the lift is there) and
+   * differs only here and in the earthworks that follow from here.
+   */
+  spans: Map<RoadId, readonly StructureSpan[]>
   infeasibleRoads: Map<RoadId, number>
+  infeasibleCrossings: InfeasibleCrossing[]
+  shallowCrossings: ShallowCrossing[]
+  unsupportedFill: Map<RoadId, readonly UnsupportedFill[]>
 } => {
-  const designs = new Map<RoadId, ProfilePoint[]>()
+  // --- Pass 1: grade every road on its own, ignoring the others ------------
+  //
+  // Provisional, because a road that crosses an older one is about to be
+  // re-solved with a clearance floor on it. Needed first all the same:
+  // `findCrossings` will not report a pair unless both roads have a design
+  // profile to measure a gap between.
+  const provisional = new Map<RoadId, ProfilePoint[]>()
   const infeasibleRoads = new Map<RoadId, number>()
   for (const road of network.roads) {
     const solution = solveFor(road.alignment, terrain)
     if (solution.feasible) {
-      designs.set(road.id, solution.profile)
+      provisional.set(road.id, solution.profile)
     } else {
       infeasibleRoads.set(road.id, solution.failedAtStation)
     }
   }
 
-  // Excavate the terrain down to every road's design line before anything is
-  // rendered, so each road sits in a real cutting/embankment rather than
-  // buried inside (or floating above) untouched ground. All roads accumulate
-  // onto the same edit layer so overlapping corridor footprints (junctions)
-  // are carved consistently.
-  const editLayer = new TerrainEditLayer(terrain)
-  for (const road of network.roads) {
-    const design = designs.get(road.id)
-    if (!design || design.length === 0) continue
-    excavateCorridor(editLayer, road.alignment, design, road.className)
+  // --- Pass 2: which crossings are junctions and which are overpasses ------
+  //
+  // The placed points a crossing is classified against are the network's own
+  // node positions. After `DrawTool.commit` that is exactly what a placed
+  // point has become: a point clicked on an existing road splits it and
+  // becomes a node shared by both, and a point clicked anywhere else becomes
+  // a node of the new road alone. Nothing else survives a commit, and nothing
+  // else needs to — the scene does not have to be handed the tool's gesture
+  // state to know where the player clicked, because the graph already
+  // records it.
+  //
+  // `NODE_SNAP_DISTANCE` is the tolerance for the same reason `findCrossings`
+  // already uses it for its own shared-node exclusion: a crossing position is
+  // found by intersecting 5m-sampled polylines, so it carries that sampling's
+  // error and cannot be compared to a click position at millimetre precision.
+  //
+  // Crossings that classify as intersections are left entirely alone. Those
+  // are either junctions that already work — `findCrossings` drops crossings
+  // at a SHARED node before this ever sees them — or a road terminating on
+  // another one that `commit` did not split, which wants a junction and
+  // certainly does not want to be raised five metres into the air. The latter
+  // stays visible: it is a genuine at-grade collision, and it is what
+  // `built.tightCrossings` now exists to report.
+  const nodePositions = network.nodes.map((node) => node.position)
+
+  /** Per road, what it must clear: always roads older than itself. */
+  const overpasses = new Map<
+    RoadId,
+    { under: RoadId; station: number; underStation: number }[]
+  >()
+
+  for (const crossing of findCrossings(network, provisional)) {
+    if (classifyCrossing(crossing, nodePositions, NODE_SNAP_DISTANCE) === 'intersection') continue
+
+    // Newer road over older, by id — NOT by `findCrossings`' own upper/lower,
+    // which only says which design line happens to sit higher at grade and
+    // would hand the lift to whichever road the terrain favoured.
+    const newer = Math.max(crossing.upper, crossing.lower)
+    const older = Math.min(crossing.upper, crossing.lower)
+    const newerStation = newer === crossing.upper ? crossing.upperStation : crossing.lowerStation
+    const olderStation = older === crossing.upper ? crossing.upperStation : crossing.lowerStation
+
+    const list = overpasses.get(newer) ?? []
+    list.push({ under: older, station: newerStation, underStation: olderStation })
+    overpasses.set(newer, list)
   }
 
-  // Structures are measured against NATURAL ground, not the edit layer. The
-  // edit layer has already been cut and filled to the design surface, so
-  // under the road it sits at the design line by construction: every station
-  // would read as level, no station could exceed the fill allowance, and
-  // neither the bridge nor the wall trigger could fire at all.
+  // --- Pass 3: re-solve, oldest first, with the clearances owed ------------
+  //
+  // Ascending id, so by the time a road is solved every road it has to clear
+  // already holds its final profile. Nothing here is iterated to a fixed
+  // point because nothing needs to be: lifting a road never moves anything
+  // older than it.
+  const designs = new Map<RoadId, ProfilePoint[]>()
+  const infeasibleCrossings: InfeasibleCrossing[] = []
+  const shallowCrossings: ShallowCrossing[] = []
+  /** Station ranges each road must be decked over to clear another road. */
+  const liftedRanges = new Map<RoadId, { fromStation: number; toStation: number }[]>()
+
+  for (const road of [...network.roads].sort((a, b) => a.id - b.id)) {
+    const unlifted = provisional.get(road.id)
+    if (!unlifted) continue // already in `infeasibleRoads`
+
+    const required = overpasses.get(road.id) ?? []
+    if (required.length === 0) {
+      designs.set(road.id, unlifted)
+      continue
+    }
+
+    const ground = sampleGroundProfile(road.alignment, terrain, GRADE_STATION_SPACING)
+    const structureDepth = overpassStructureDepth(road.className)
+    const floors: ClearanceFloor[] = []
+    const wanted: {
+      under: RoadId
+      station: number
+      underStation: number
+      requiredElevation: number
+    }[] = []
+
+    for (const crossing of required) {
+      const under = designs.get(crossing.under)
+      // The road below never graded, so it has no design line to clear. It is
+      // already reported in `infeasibleRoads`; inventing a clearance against
+      // `designElevationAtStation`'s zero-for-empty answer would fabricate a
+      // requirement out of missing information.
+      if (!under) continue
+
+      // Top of the wearing course of the road above = the road below, plus
+      // the clearance a lorry needs, plus everything hanging under this
+      // road's own design line to hold it up.
+      const requiredElevation =
+        designElevationAtStation(under, crossing.underStation) +
+        MIN_OVERPASS_CLEARANCE +
+        structureDepth
+
+      floors.push(...clearanceFloorsAt(ground, crossing.station, requiredElevation))
+      wanted.push({
+        under: crossing.under,
+        station: crossing.station,
+        underStation: crossing.underStation,
+        requiredElevation,
+      })
+    }
+
+    const solution = solveGround(ground, floors)
+    if (solution.feasible) {
+      designs.set(road.id, solution.profile)
+
+      // --- How much of this road has to be on a deck ------------------------
+      //
+      // Derived from the SOLVED profile, not from the provisional one: how far
+      // sideways this road's corridor fans is a function of how high the lift
+      // left it standing over its own ground, and that is not known until the
+      // lift has been solved.
+      //
+      // A deck only as long as the clearance floors would be five or ten
+      // metres — narrower than the corridor it is bridging, and below
+      // `MIN_SPAN_LENGTH`, so it would be discarded and the embankment built
+      // anyway. But a deck as long as the road below is WIDE is not enough
+      // either: that is a station interval measured on this road, and what has
+      // to be kept clear is a band measured perpendicular to the other one.
+      // The two coincide only at 90°. See `overpassDeckHalfLength`.
+      const sweptHalfWidth = maxSweptHalfWidth(
+        road.alignment, solution.profile, terrain, road.className,
+      )
+      const deckRanges: { fromStation: number; toStation: number }[] = []
+
+      for (const w of wanted) {
+        const underRoad = network.road(w.under)
+        // The band to keep clear is the road BELOW's own corridor: its
+        // formation, plus the batter run that stands beside it before a
+        // retaining wall takes over. Its own class, not this road's.
+        const clearHalfWidth =
+          formationHalfWidth(ROAD_CLASSES[underRoad.className]) + CORRIDOR_MAX_BATTER_WIDTH
+
+        const deck = overpassDeckHalfLength(
+          clearHalfWidth,
+          sweptHalfWidth,
+          road.alignment.poseAt(w.station).heading,
+          underRoad.alignment.poseAt(w.underStation).heading,
+        )
+
+        if (deck.clamped) {
+          shallowCrossings.push({
+            road: road.id,
+            crosses: w.under,
+            station: w.station,
+            angle: deck.angle,
+            deckHalfLength: deck.halfLength,
+            requiredHalfLength: deck.requiredHalfLength,
+          })
+        }
+
+        deckRanges.push({
+          fromStation: w.station - deck.halfLength,
+          toStation: w.station + deck.halfLength,
+        })
+      }
+
+      // The stretches this road must be decked over, remembered so the span
+      // derivation can force them onto a structure. Without this the lift
+      // succeeds, the design lines separate correctly, and the corridor sweep
+      // then fills an embankment across the road underneath — because a lift
+      // of five metres' clearance plus the deck is still under
+      // `MAX_FILL_HEIGHT`, so height alone reads it as earthwork. See
+      // `RoadSpanInputs.requiredStructureRanges`.
+      liftedRanges.set(road.id, deckRanges)
+      continue
+    }
+
+    // No design profile, deliberately. Falling back to the unlifted solve
+    // would build this road straight through the one underneath it, which is
+    // the whole defect; every crossing the solve was carrying is reported
+    // instead, because a single failed solve does not say which of them was
+    // the impossible one.
+    for (const w of wanted) {
+      infeasibleCrossings.push({
+        road: road.id,
+        crosses: w.under,
+        station: w.station,
+        requiredElevation: w.requiredElevation,
+        failedAtStation: solution.failedAtStation,
+      })
+    }
+  }
+
+  // Where each road is carried on a structure rather than on earth — derived
+  // BEFORE any excavation, because the earthworks need it. Structures are
+  // measured against NATURAL ground, which is why this can run first at all:
+  // spans are a function of the alignment, the solved design line and the
+  // untouched terrain, and never of the excavation's own output. (Measuring
+  // them against the edit layer would not merely be circular, it would find
+  // nothing: cut and filled to the design surface, every station reads as
+  // level and neither the bridge nor the wall trigger could fire.)
+  //
+  // The list built here is handed to BOTH consumers — the sweep below and
+  // `buildNetworkMesh` — rather than derived twice. Two independent
+  // derivations is exactly the defect being fixed: the earthworks stopped
+  // where a per-station fill test tripped (stations 280-420) while the span,
+  // abutments included, ran 273-423, leaving a bare terrain cliff and an
+  // unsupported notch in the seven stations at each end where the two
+  // disagreed.
+  const spans = networkStructureSpans(network.roads, {
+    designs,
+    terrain,
+    maxFillHeight: MAX_FILL_HEIGHT,
+    spacing: STRUCTURE_STATION_SPACING,
+    requiredStructureRanges: liftedRanges,
+  })
+
+  // Excavate the terrain down to every road's design line before anything is
+  // rendered, so each road sits in a real cutting/embankment rather than
+  // buried inside (or floating above) untouched ground. Every road sweeps
+  // into the SAME `CorridorExcavation`, and it is applied to the edit layer
+  // only once every road has been swept — a node inside two overlapping
+  // corridors is arbitrated by nearest centreline regardless of which road
+  // was swept first. Building one excavation per road instead would
+  // reproduce the last-write-wins bug this replaced: whichever road's
+  // `applyTo` ran last would erase any earlier road's cut wherever their
+  // footprints overlapped.
+  const editLayer = new TerrainEditLayer(terrain)
+  const excavation = new CorridorExcavation(terrain.cols, terrain.rows)
+  const unsupportedFill = new Map<RoadId, readonly UnsupportedFill[]>()
+  for (const road of network.roads) {
+    const design = designs.get(road.id)
+    // No design profile means the grade solve failed; that road is already
+    // recorded in `infeasibleRoads` above. Nothing is swept for it and no
+    // spans are claimed on its behalf — there is no design line to measure
+    // either against ground.
+    if (!design || design.length === 0) continue
+
+    // The very list `buildNetworkMesh` is handed below — read out of the same
+    // map, not derived a second time. That is the whole point of `spans`
+    // existing above rather than being computed at each of the two places it
+    // is needed.
+    const unsupported = excavateCorridor(
+      excavation, terrain, road.alignment, design, road.className, spans.get(road.id) ?? [],
+    )
+    if (unsupported.length > 0) unsupportedFill.set(road.id, unsupported)
+  }
+  excavation.applyTo(editLayer)
+
+  // Structures are measured against NATURAL ground, not the edit layer — see
+  // the spans comment above. `spans` is passed rather than left to be
+  // recomputed here so the deck and its abutments land on precisely the
+  // ground the sweep above left unexcavated for them.
   const built = buildNetworkMesh(network, designs, {
-    spacing: 4,
+    spacing: STRUCTURE_STATION_SPACING,
     terrain,
     maxFillHeight: MAX_FILL_HEIGHT,
     corridorBatters: CORRIDOR_BATTERS,
+    structureSpans: spans,
   })
 
-  return { designs, editLayer, built, infeasibleRoads }
+  return {
+    designs, editLayer, built, spans,
+    infeasibleRoads, infeasibleCrossings, shallowCrossings, unsupportedFill,
+  }
 }
 
 /**
@@ -371,8 +969,14 @@ export const buildSceneContent = (): SceneContent => {
     network.addRoad(alignment, className)
   }
 
-  const { designs, editLayer, built, infeasibleRoads } = solveNetwork(terrain, network)
-  return { terrain, network, designs, editLayer, built, infeasibleRoads }
+  const {
+    designs, editLayer, built,
+    infeasibleRoads, infeasibleCrossings, shallowCrossings, unsupportedFill,
+  } = solveNetwork(terrain, network)
+  return {
+    terrain, network, designs, editLayer, built,
+    infeasibleRoads, infeasibleCrossings, shallowCrossings, unsupportedFill,
+  }
 }
 
 /** A sphere in the project's own convention (`(x, y)` ground, `z` up) that
@@ -464,12 +1068,44 @@ const terrainVertexColours = (terrain: Heightmap, editLayer: TerrainEditLayer): 
  * junctions, elevation mismatches and tight crossings — plus, now, roads
  * with no feasible vertical alignment at all (see `SceneContent.infeasibleRoads`).
  */
+/**
+ * Depth-test rank for the pavement stack, top layer first.
+ *
+ * The three layers are separately-built meshes stacked over an identical
+ * footprint, and the gap between them is the layer thickness itself — five
+ * centimetres between wearing course and base on the thinner classes.
+ * Nothing else in the scene separates coplanar surfaces, and depth-buffer
+ * resolution is not a constant: with `near = 1` and `far = 6000` it is about
+ * five millimetres at the default framing, but roughly sixty at a kilometre
+ * out. So the stack holds together close in and the base begins punching
+ * through the seal as the player zooms away — a defect that only appears at
+ * the range where it is least likely to be tested.
+ *
+ * `polygonOffset` fixes it in depth rather than in geometry: each lower layer
+ * is pushed further from the camera by its rank, so a lower layer can never
+ * win the depth test against the one sealing it, at any distance. Raising the
+ * layers apart in world space would have worked too and been wrong — the
+ * thicknesses are real pavement dimensions that the cut-and-fill volumes and
+ * the excavation depth are both computed from.
+ *
+ * Keyed by `LayerName` rather than `string` so that adding a fourth layer is
+ * a type error here instead of a silently-zero rank at runtime.
+ */
+const PAVEMENT_DEPTH_RANK: Record<LayerName, number> = {
+  wearing: 0,
+  base: 1,
+  subgrade: 2,
+}
+
 const addNetworkMeshes = (
   scene: THREE.Scene,
   terrain: Heightmap,
   editLayer: TerrainEditLayer,
   built: NetworkMesh,
   infeasibleRoads: ReadonlyMap<RoadId, number>,
+  infeasibleCrossings: readonly InfeasibleCrossing[],
+  shallowCrossings: readonly ShallowCrossing[],
+  unsupportedFill: ReadonlyMap<RoadId, readonly UnsupportedFill[]>,
 ): THREE.Mesh[] => {
   const meshes: THREE.Mesh[] = []
 
@@ -484,6 +1120,44 @@ const addNetworkMeshes = (
     console.warn(
       'roads with no feasible vertical alignment (committed to the graph, mesh flattened to z=0):',
       [...infeasibleRoads.entries()],
+    )
+  }
+
+  if (infeasibleCrossings.length > 0) {
+    // Distinct from the warning above: these roads grade fine on their own
+    // and only fail once they have to climb over something. They have no
+    // design profile either — see `SceneContent.infeasibleCrossings` for why
+    // building them at grade instead is not an option.
+    console.warn(
+      'crossings that could not be raised clear of the road below (no design profile built):',
+      infeasibleCrossings,
+    )
+  }
+
+  if (shallowCrossings.length > 0) {
+    // Distinct again from both warnings above: these roads graded, got their
+    // lift, and got a deck — just not a long enough one, because the angle
+    // they cross at asks for a deck that grows without bound (see
+    // `MIN_DECKABLE_CROSSING_ANGLE`). An error rather than a warning: the
+    // earthwork the short deck fails to hold back lands on the road below,
+    // which is the defect this whole path exists to prevent.
+    console.error(
+      'crossings too shallow to deck honestly — the deck was clamped, so the lifted ' +
+        "road's earthwork is no longer held clear of the road below's corridor:",
+      shallowCrossings,
+    )
+  }
+
+  if (unsupportedFill.size > 0) {
+    // A high run too short to become a span leaves nothing to suppress the
+    // embankment, so the sweep builds one past the declared fill allowance —
+    // 16.40m of it against a 10m allowance on a 20m notch. The old code
+    // skipped those stations instead and left an unsupported hole in the
+    // road; neither is right, so the continuous one is built and reported
+    // rather than one of the two being chosen quietly. See `UnsupportedFill`.
+    console.error(
+      'earthwork embanked above the fill allowance with no structure under it:',
+      [...unsupportedFill.entries()],
     )
   }
 
@@ -502,6 +1176,9 @@ const addNetworkMeshes = (
           roughness: surface.roughness,
           metalness: surface.metalness,
           side: THREE.DoubleSide,
+          polygonOffset: true,
+          polygonOffsetFactor: PAVEMENT_DEPTH_RANK[layer.name],
+          polygonOffsetUnits: PAVEMENT_DEPTH_RANK[layer.name],
         }),
       )
       mesh.castShadow = true
@@ -560,7 +1237,20 @@ const addNetworkMeshes = (
   }
 
   if (built.tightCrossings.size > 0) {
-    console.warn('crossings below minimum clearance', [...built.tightCrossings.entries()])
+    // This used to be routine noise: crossings were detected, logged, and
+    // built through each other anyway. Now `solveNetwork` raises every
+    // crossing it classifies as an overpass, and refuses to build a road
+    // whose lift it cannot solve, so anything still arriving here is one of
+    // exactly two things — a road terminating on another that `commit` did
+    // not split into a junction (classified `'intersection'`, so deliberately
+    // not lifted, and genuinely colliding), or a crossing the lift was
+    // applied to and failed to separate. Both are defects rather than
+    // observations, which is why this is an error and not a warning.
+    console.error(
+      'crossings still below minimum clearance after grade separation — ' +
+        'either a road terminates on another without a junction, or a lift did not take:',
+      [...built.tightCrossings.entries()],
+    )
   }
 
   // Vertex-coloured rather than a flat tint: the excavated corridor (see
@@ -710,6 +1400,9 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   let editLayer = content.editLayer
   let built = content.built
   let infeasibleRoads = content.infeasibleRoads
+  let infeasibleCrossings = content.infeasibleCrossings
+  let shallowCrossings = content.shallowCrossings
+  let unsupportedFill = content.unsupportedFill
   let terrainSampler: TerrainSampler = editLayer
 
   // --- Sun and fill light ---------------------------------------------------
@@ -845,6 +1538,25 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   // fixed fraction of a range that itself scales with the frustum already
   // scales with it too, unlike `normalBias`, which offsets in world units
   // directly rather than as a fraction of the depth range.
+  //
+  // The magnitude is EMPIRICAL and must stay that way. It was once cut to
+  // -1e-5 on the following argument: `bias` is a fraction of a depth range
+  // of `halfSize * 6 - 1` (~1799m at the default framing), so -0.0002 offsets
+  // ~0.36m in world space, while depth-buffer quantisation over that range is
+  // ~1e-4m on a 24-bit texture — apparently three orders of magnitude of
+  // slack, and 0.36m is enough to detach a shadow from anything shorter.
+  //
+  // The arithmetic is right and the conclusion was wrong: at -1e-5 acne
+  // returns across the whole terrain, in fine contour-following moire, dark
+  // enough to visibly desaturate the scene. Quantisation is not the only
+  // error being covered — PCF taps, the interpolated depth across a texel
+  // that spans ~0.15m of ground, and the shallow angle between a low sun and
+  // a gently sloping surface all contribute, and none of them appear in that
+  // calculation. -0.0002 is the value an earlier fix wave arrived at BY
+  // LOOKING AT THE SCENE, and re-derivation is not evidence against it.
+  //
+  // If this is ever changed again, change it in the browser with the terrain
+  // in view, not on paper.
   sun.shadow.bias = -0.0002
   // The fraction of one shadow-map texel `normalBias` offsets by, set once
   // here (`updateSunShadow` computes the bias itself, every frame). Derived,
@@ -862,17 +1574,40 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
 
   scene.add(sun)
 
-  // The tool draws in whatever class the player picked; there is no class
-  // picker yet, so it draws rural roads until the selection UI exists.
-  const tool = new DrawTool(network, 'rural')
+  // See `DEFAULT_DRAW_CLASS` for why this class and not another.
+  let drawClassIndex = ROAD_CLASS_ORDER.indexOf(DEFAULT_DRAW_CLASS)
+  let tool = new DrawTool(network, ROAD_CLASS_ORDER[drawClassIndex]!)
   const selectTool = new SelectTool(network)
+
+  /**
+   * Switch the draw tool's class, discarding whatever gesture was in
+   * progress. `DrawTool` computes `cornerRadius` in its constructor, so
+   * changing class means constructing a new tool — a half-drawn gravel
+   * road is not a valid half-drawn highway, so nothing carries over.
+   */
+  const setDrawClass = (index: number): void => {
+    const wrapped = (index + ROAD_CLASS_ORDER.length) % ROAD_CLASS_ORDER.length
+    if (wrapped === drawClassIndex) return
+    // A gesture in progress belongs to the class it was started in; the
+    // corner radius that validated its points no longer applies.
+    tool.cancel()
+    drawClassIndex = wrapped
+    tool = new DrawTool(network, ROAD_CLASS_ORDER[wrapped]!)
+    // `setMessage` already prefixes every message with the current mode
+    // label (see its docstring) — prefixing "Draw — " here too would
+    // duplicate it, so this names only the class and radius.
+    setMessage(`${ROAD_CLASS_ORDER[wrapped]!} (radius ${tool.cornerRadius.toFixed(0)}m)`, 'info')
+  }
 
   /** Which of the two modes the player is currently in. Defaults to draw so
    * the scene opens exactly as it always has. */
   let toolMode: ToolMode = 'draw'
   setMessage('')
 
-  let networkMeshes = addNetworkMeshes(scene, terrain, editLayer, built, infeasibleRoads)
+  let networkMeshes = addNetworkMeshes(
+    scene, terrain, editLayer, built,
+    infeasibleRoads, infeasibleCrossings, shallowCrossings, unsupportedFill,
+  )
 
   /**
    * Regrade, re-excavate and rebuild every mesh from the network's current
@@ -887,13 +1622,19 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     editLayer = result.editLayer
     built = result.built
     infeasibleRoads = result.infeasibleRoads
+    infeasibleCrossings = result.infeasibleCrossings
+    shallowCrossings = result.shallowCrossings
+    unsupportedFill = result.unsupportedFill
     terrainSampler = editLayer
 
     for (const mesh of networkMeshes) {
       scene.remove(mesh)
       disposeMesh(mesh)
     }
-    networkMeshes = addNetworkMeshes(scene, terrain, editLayer, built, infeasibleRoads)
+    networkMeshes = addNetworkMeshes(
+      scene, terrain, editLayer, built,
+      infeasibleRoads, infeasibleCrossings, shallowCrossings, unsupportedFill,
+    )
 
     // A road with no feasible vertical alignment used to reach only the
     // console (see `SceneContent.infeasibleRoads`) — surfaced here so it is
@@ -901,7 +1642,17 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     // priority over whatever message the caller already set: an infeasible
     // road is a standing problem with the network, not a transient result of
     // the action that happened to trigger this rebuild.
-    const infeasibleMessage = describeInfeasibleRoads(infeasibleRoads)
+    // Three standing problems, reported in the order a player can act on
+    // them: a road that cannot be graded at all wants a different alignment,
+    // and only once it has one is there any point telling them a crossing on
+    // it could not be raised — or, failing both of those, that a crossing that
+    // WAS raised is too shallow for its deck to hold the earthwork back. All
+    // take priority over whatever message the caller already set, for the
+    // reason above.
+    const infeasibleMessage =
+      describeInfeasibleRoads(infeasibleRoads) ||
+      describeInfeasibleCrossings(infeasibleCrossings) ||
+      describeShallowCrossings(shallowCrossings)
     if (infeasibleMessage) setMessage(infeasibleMessage, 'refusal')
   }
 
@@ -930,10 +1681,6 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     z: terrain.sample(JUNCTION.x, JUNCTION.y),
   }
 
-  // Close enough that the junction — three formation widths meeting at one
-  // point — fills a useful part of the screen, rather than the old ~1565m
-  // that read every road as a hairline across a map (Step 6).
-  const RIG_INITIAL_DISTANCE = 300
   const rig = new CameraRig(RIG_TARGET, RIG_INITIAL_DISTANCE)
   // Lower than `CameraRig`'s own default elevation (`Math.PI / 5`, 36°): a
   // diorama is looked across at a raised, comfortable angle, not down at from
@@ -1467,6 +2214,14 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
           event.preventDefault()
           cancelPendingClick()
           tool.undoLastPoint()
+          break
+        case '1':
+        case '2':
+        case '3':
+        case '4':
+          event.preventDefault()
+          cancelPendingClick()
+          setDrawClass(Number(event.key) - 1)
           break
         default:
           break
