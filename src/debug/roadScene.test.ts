@@ -668,6 +668,50 @@ describe('an overpass deck', () => {
   }
 
   /**
+   * The widest sweep in `ROAD_CLASSES` over the narrowest corridor.
+   *
+   * The cases above are all rural over rural. This is the other end of the
+   * range — a highway lifted over a gravel track — and it is here because
+   * nothing else exercises a lifted road whose own earthwork fan is far wider
+   * than the corridor it is clearing.
+   *
+   * Stated plainly, because it would be easy to assume otherwise: this test
+   * does NOT pin the `sweptHalfWidth · |cos θ|` term. Deleting that term leaves
+   * this green, as it leaves every case above green — dividing by `sin θ`
+   * alone already yields a deck long enough at every angle and class pairing
+   * that could be constructed. The term errs long rather than short, so its
+   * absence costs deck length and never lets fill onto the road below, which
+   * is why no fill-based assertion can see it. It is kept because the
+   * derivation it comes from is the honest one; if it is ever removed, the
+   * reason must be that argument, not a green suite.
+   *
+   * What IS pinned here, and by the 30-degree case above, is the defect that
+   * actually shipped: a deck derived from the lower road's width with no angle
+   * term at all.
+   */
+  it('keeps earthwork off a narrow road under the widest class that can cross it', () => {
+    const terrain = flat()
+    const { network, lower, upper } = crossingAt(45, 'gravel', 'highway')
+    const { designs, editLayer, shallowCrossings } = solveNetwork(terrain, network)
+
+    // The lift has to have happened, or an empty `fills` proves nothing.
+    expect(designs.has(lower)).toBe(true)
+    expect(designs.has(upper)).toBe(true)
+    expect(designElevationAtStation(designs.get(lower)!, 200)).toBeCloseTo(100, 6)
+    expect(designElevationAtStation(designs.get(upper)!, 200)).toBeGreaterThan(
+      100 + MIN_OVERPASS_CLEARANCE,
+    )
+    // 45 degrees is nowhere near the clamp.
+    expect(shallowCrossings).toEqual([])
+
+    const { probed, fills } = fillInsideLowerCorridor(
+      terrain, editLayer, clearHalfWidth('gravel'),
+    )
+    expect(probed).toBeGreaterThan(100)
+    expect(fills).toEqual([])
+  })
+
+  /**
    * `solveNetwork` reports the crossings it could not deck honestly.
    *
    * Below `MIN_DECKABLE_CROSSING_ANGLE` the required half-length runs away —
