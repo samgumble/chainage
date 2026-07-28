@@ -23,7 +23,11 @@ const metresPerPixel = (view: CameraView): number =>
 const still = { pan: { dx: 0, dy: 0 }, pinch: 1, twist: 0 }
 
 /** No pan at all. Through `Math.abs`, because negating a zero pixel delta
- * gives `-0`, which `toEqual` distinguishes from `0` and a player cannot. */
+ * gives `-0`, which `toEqual` and `toBe` distinguish from `0` and a player
+ * cannot — the same reason the "did not disturb the twist" assertions below
+ * go through `Math.abs`. A test that only fails because a sign was flipped ON
+ * A ZERO has not detected anything a player could feel, and would be a false
+ * kill in a mutation run. */
 const expectNoPan = (pan: { dRight: number; dForward: number }): void => {
   expect(Math.abs(pan.dRight)).toBe(0)
   expect(Math.abs(pan.dForward)).toBe(0)
@@ -125,7 +129,7 @@ describe('cameraMoveForTwoFinger', () => {
     it('does not disturb the pan or the twist', () => {
       const move = cameraMoveForTwoFinger({ ...still, pinch: 3 }, VIEW)
       expectNoPan(move.pan)
-      expect(move.dAzimuth).toBe(0)
+      expect(Math.abs(move.dAzimuth)).toBe(0)
     })
   })
 
@@ -182,7 +186,7 @@ describe('cameraMoveForTwoFinger', () => {
     it('does not disturb the zoom or the twist', () => {
       const move = cameraMoveForTwoFinger({ ...still, pan: { dx: 40, dy: -70 } }, VIEW)
       expect(move.zoomFactor).toBe(1)
-      expect(move.dAzimuth).toBe(0)
+      expect(Math.abs(move.dAzimuth)).toBe(0)
     })
   })
 
