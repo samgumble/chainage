@@ -94,9 +94,24 @@ import { classifyCrossing, type InfeasibleCrossing, type ShallowCrossing } from 
 import { buildNetworkMesh, type NetworkMesh } from '../mesh/networkMesh'
 import { networkStructureSpans, type StructureSpan } from '../mesh/structures/spans'
 import { DECK_DEPTH } from '../mesh/structures/bridgeMesh'
-import { DrawTool, SNAP_RADIUS } from '../tool/drawTool'
+import { DrawTool } from '../tool/drawTool'
+import {
+  COARSE_POINTER_SNAP_RADIUS_PX,
+  FINE_POINTER_SNAP_RADIUS_PX,
+  clampedSnapRadiusInWorld,
+} from '../tool/snapRadius'
+import { GestureRecogniser, type Gesture } from '../tool/gestures'
+import { cameraMoveForTwoFinger } from '../render/cameraGesture'
 import { resolveSnap, type SnapTarget } from '../tool/snap'
 import { SelectTool, type SplitOutcome } from '../tool/selectTool'
+import {
+  actionForKey,
+  modeLabel,
+  type SceneAction,
+  type ToolMode,
+} from '../tool/sceneActions'
+import { createControlBar } from '../render/controlBar'
+import { OVERLAY_EDGE_INSET_PX, renderPixelRatio, viewportMetrics } from '../render/viewport'
 import {
   describePolylineRejection,
   describeSplitOutcome,
@@ -1284,10 +1299,6 @@ const disposeMesh = (mesh: THREE.Mesh): void => {
   }
 }
 
-/** The two things a player can be doing. Tab switches between them; see
- * `switchToolMode`. */
-type ToolMode = 'draw' | 'select'
-
 export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   // --- Message line --------------------------------------------------------
   //
@@ -1299,16 +1310,38 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   const messageHost = canvas.parentElement ?? document.body
   const messageEl = document.createElement('div')
   messageEl.style.position = 'absolute'
-  messageEl.style.left = '12px'
-  messageEl.style.top = '12px'
+  // Inset from the top-left corner by `OVERLAY_EDGE_INSET_PX`, plus whatever
+  // the device says is unusable there. A phone in landscape puts its notch
+  // down one side and reports it as `safe-area-inset-left`; in portrait the
+  // status bar and any camera cutout come back as `safe-area-inset-top`. The
+  // fallback of 0 makes this reduce to the plain inset everywhere else, so
+  // there is one rule rather than a desktop case and a phone case.
+  messageEl.style.left = `calc(${OVERLAY_EDGE_INSET_PX}px + env(safe-area-inset-left, 0px))`
+  messageEl.style.top = `calc(${OVERLAY_EDGE_INSET_PX}px + env(safe-area-inset-top, 0px))`
+  // The message is generated text of no fixed length — a mode line plus a
+  // key-hint line, or a refusal naming several roads — and at `pre` it was a
+  // single unbreakable run that ran straight off the side of a phone and cut
+  // off mid-word. `pre-line` keeps the explicit newline the two-line hints are
+  // written with (which `normal` would collapse into one paragraph) while
+  // letting each of those lines wrap when it has to.
+  //
+  // Wrapping alone is not enough: an absolutely-positioned box with no width
+  // constraint shrink-wraps its widest unbroken line, so it would still be
+  // 650px wide in a 375px viewport with nothing to wrap against. The
+  // `max-width` is what gives it something to wrap AT — the host's width less
+  // the inset on this side, the mirror-image inset on the other, and either
+  // safe area. `border-box` so the pill's own horizontal padding is inside
+  // that budget rather than added to it.
+  messageEl.style.boxSizing = 'border-box'
+  messageEl.style.maxWidth =
+    `calc(100% - ${2 * OVERLAY_EDGE_INSET_PX}px` +
+    ` - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px))`
   messageEl.style.padding = '4px 10px'
   messageEl.style.borderRadius = '4px'
   messageEl.style.font = '13px/1.4 ui-sans-serif, system-ui, sans-serif'
   messageEl.style.pointerEvents = 'none'
-  messageEl.style.whiteSpace = 'pre'
+  messageEl.style.whiteSpace = 'pre-line'
   messageHost.appendChild(messageEl)
-
-  const modeLabel = (toolMode: ToolMode): string => (toolMode === 'draw' ? 'Draw' : 'Select')
 
   /**
    * Set the message line's text, always prefixed with the current mode so the
@@ -1328,7 +1361,12 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   }
 
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true })
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+  // Was `Math.min(window.devicePixelRatio, 2)` inline. Same number for every
+  // real display, but the cap is a measured decision about frame rate versus
+  // sharpness rather than a magic 2 — so it lives, with the measurement that
+  // chose it and with the guard for a `devicePixelRatio` that is not a
+  // number, in `render/viewport.ts` where it can be tested.
+  renderer.setPixelRatio(renderPixelRatio(window.devicePixelRatio))
   renderer.setClearColor(0x14181d)
 
   // ACES Filmic is what turns a bright sun into a scene instead of a clipped
@@ -1582,11 +1620,43 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     // label (see its docstring) — prefixing "Draw — " here too would
     // duplicate it, so this names only the class and radius.
     setMessage(`${ROAD_CLASS_ORDER[wrapped]!} (radius ${tool.cornerRadius.toFixed(0)}m)`, 'info')
+    // The message line says which class was just armed and is then replaced
+    // by the next thing that happens; the bar keeps showing it. That is the
+    // whole difference between a state a player can read and one they had to
+    // have been watching for.
+    syncControlBar()
   }
 
   /** Which of the two modes the player is currently in. Defaults to draw so
    * the scene opens exactly as it always has. */
   let toolMode: ToolMode = 'draw'
+
+  // --- On-screen controls ---------------------------------------------------
+  //
+  // A phone has no keyboard, so everything that was keyboard-only — the four
+  // road classes, the mode switch, build, undo and cancel — needs a button
+  // too. The bar is built from the same `SCENE_BINDINGS` table `onKeyDown`
+  // looks keys up in, and hands back the same `SceneAction` names, which
+  // `runAction` below turns into the same calls. There is no second
+  // implementation of anything on it; see `tool/sceneActions.ts`.
+  //
+  // `runAction` is defined further down (it needs `attemptCommit` and the
+  // select-mode handlers), so the callback defers to it rather than being it.
+  // That is safe because a click cannot arrive until this function has
+  // finished setting up.
+  const controlBar = createControlBar(
+    messageHost,
+    { mode: toolMode, drawClassIndex },
+    (action) => runAction(action),
+  )
+
+  /** Push the scene's current mode and armed class onto the bar. Called
+   * wherever either changes — the bar keeps no state of its own, precisely so
+   * it cannot disagree with these two variables. */
+  const syncControlBar = (): void => {
+    controlBar.setState({ mode: toolMode, drawClassIndex })
+  }
+
   // Not the bare mode label the scene used to open with: there are no roads on
   // screen now, so the opening frame has to say how to make one. See
   // `describeStartingHint` — it is replaced by the first thing that happens.
@@ -1701,6 +1771,49 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     camera.position.copy(toThreePosition(rig.position))
     camera.lookAt(toThreePosition(rig.target))
   }
+
+  /**
+   * How far from the pointer the draw tool should look for something to snap
+   * to right now, world metres.
+   *
+   * Derived fresh on every call from `rig.distance` and the canvas's current
+   * CSS height, rather than read out of a constant, precisely because both of
+   * those change: zooming the camera or resizing the window both change how
+   * many world metres one screen pixel covers (see `tool/snapRadius.ts`).
+   *
+   * `FINE_POINTER_SNAP_RADIUS_PX` by default, because every mouse-and-pen
+   * call site below wants it and passing it explicitly at each of them is how
+   * one of them quietly ends up with the other. The touch handlers pass
+   * `COARSE_POINTER_SNAP_RADIUS_PX` instead.
+   *
+   * Which one is decided PER EVENT, from `PointerEvent.pointerType`, not once
+   * from a `pointer: coarse` media query. The media query describes the
+   * device's *primary* pointer, and a laptop with a touchscreen has both: it
+   * matches `fine`, so a one-time query would hand a finger the mouse's
+   * tolerance on exactly the hardware where the two are used interchangeably.
+   * The event knows which of them is in the player's hand right now, and that
+   * is the only thing that decides how big a target has to be.
+   *
+   * Worth stating plainly: today the two constants are numerically EQUAL.
+   * `COARSE_POINTER_SNAP_RADIUS_PX` floors itself at the fine radius (a
+   * fingertip is never held to a tighter tolerance than a cursor), and the
+   * fine radius currently works out larger. So the branch below changes
+   * nothing measurable yet. It is still the right branch: it is where the
+   * difference appears the moment `SNAP_RADIUS` is tightened, which
+   * `FINE_POINTER_SNAP_RADIUS_PX`'s own docstring argues it may want to be.
+   *
+   * `clampedSnapRadiusInWorld`, not `snapRadiusInWorld` directly: screen-space
+   * scaling is right for how snapping feels, but unbounded it is wrong for
+   * what it means topologically at either end of the camera's zoom range —
+   * see `tool/snapRadius.ts`'s `MIN_SNAP_RADIUS_M`/`MAX_SNAP_RADIUS_M`.
+   */
+  const currentSnapRadius = (screenRadiusPx: number = FINE_POINTER_SNAP_RADIUS_PX): number =>
+    clampedSnapRadiusInWorld(
+      screenRadiusPx,
+      rig.distance,
+      CAMERA_VERTICAL_FOV,
+      Math.max(1, canvas.clientHeight),
+    )
 
   // --- Pointer -> world ray ------------------------------------------------
   const raycaster = new THREE.Raycaster()
@@ -1939,13 +2052,263 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
       return
     }
     const suppressSnap = suppressSnapModifier(event)
-    tool.hover(worldPosition, suppressSnap)
+    const snapRadius = currentSnapRadius()
+    tool.hover(worldPosition, suppressSnap, snapRadius)
     hoverSnap = suppressSnap
       ? { kind: 'free', position: worldPosition }
-      : resolveSnap(network, worldPosition, SNAP_RADIUS)
+      : resolveSnap(network, worldPosition, snapRadius)
+  }
+
+  /**
+   * Select mode's pick, and the message that goes with it.
+   *
+   * Extracted from `onPointerUp` so the touch path can reach the same two
+   * sentences rather than spelling them out a second time. Nothing about it
+   * changed in the move — this is the same call and the same strings the mouse
+   * click has always made, in the same order.
+   */
+  const pickRoadAt = (worldPosition: Vec2): void => {
+    const pickedRoadId = selectTool.select(worldPosition)
+    setMessage(pickedRoadId === undefined ? 'Nothing there to select.' : 'Selected a road.')
+  }
+
+  // --- Touch input: gestures ------------------------------------------------
+  //
+  // ## Why this is a second path rather than the same one
+  //
+  // The mouse handlers below are untouched. Every touch event is diverted into
+  // this block at the top of each of them and never reaches the code beneath,
+  // so "did the mouse change?" is answered by reading the diff rather than by
+  // reasoning about a unified state machine: no line the mouse executes was
+  // edited. That matters more than the duplication it costs, because this
+  // branch has already had to undo one unrequested change to how desktop
+  // feels, and a shared recogniser would have put every mouse click through
+  // new tap/drag arbitration to save perhaps thirty lines.
+  //
+  // A pen goes down the MOUSE path deliberately. A pen hovers — it reports
+  // position before it touches the glass — so the preview machinery below
+  // works for it exactly as it does for a cursor, which is the one thing a
+  // finger cannot do.
+  //
+  // ## There is no hover on touch, so: what does the player see, and when?
+  //
+  // Under a mouse the preview line, the snap marker and the rejection banner
+  // are all products of `hover()` running on every move, which is what lets a
+  // player see where a point will land BEFORE committing to it. A finger has
+  // no such state. Two moments therefore have to be decided rather than left
+  // to fall out of the code:
+  //
+  // 1. BEFORE THE FIRST TAP there is no pointer position at all, so: nothing.
+  //    No marker, no preview, no snap colour — only the terrain and the
+  //    starting hint, which already says what to tap. The alternative would be
+  //    to invent a position (the centre of the screen is the usual choice) and
+  //    put a marker on it; that marker would be a claim about where a tap
+  //    would land that the player never made, and the first tap would move it
+  //    somewhere else. Desktop behaves identically before the first mouse
+  //    move, so this is not a touch-only compromise.
+  //
+  // 2. BETWEEN TAPS, with a road part-drawn and no finger on the glass, the
+  //    marker STAYS where the last finger left it, in the colour of whatever
+  //    that point snapped to, and the preview line shows the road so far
+  //    through the placed points. What is deliberately NOT shown is a
+  //    provisional segment reaching out to a finger that is not there:
+  //    `place()` clears the tool's own hovered point, so the line stops at the
+  //    last point actually placed. The marker is the difference between a tool
+  //    that answered and one that looks asleep — after a first tap there are
+  //    fewer than two points and so no preview line at all, and without the
+  //    marker the screen would show nothing whatsoever in reply to the tap.
+  //    Again this is what desktop already does between a click and the next
+  //    mouse move; touch simply stays in that state for longer.
+  //
+  // The live preview the mouse gets before committing is not lost, it is moved
+  // to the drag: press, drag, and the provisional point follows the finger
+  // with its snap marker and any rejection message showing, and only the LIFT
+  // places it. A tap is the fast path for a player who already knows where the
+  // point goes; a drag is the aimed one.
+  const gestures = new GestureRecogniser()
+
+  /** Whether this event is a finger. Read per event rather than once from a
+   * `pointer: coarse` media query — see `currentSnapRadius` for why a hybrid
+   * device makes the query the wrong question. */
+  const isTouch = (event: PointerEvent): boolean => event.pointerType === 'touch'
+
+  /**
+   * The touch snap radius.
+   *
+   * No `suppressSnap` counterpart anywhere in this block, and that is a
+   * decision rather than an omission: suppressing snap is a held-modifier
+   * gesture (Alt, see `suppressSnapModifier`) and a phone has no modifier to
+   * hold. A finger therefore always snaps. If that ever needs an escape hatch
+   * it wants a control on the bar, not a second meaning for some touch.
+   */
+  const touchSnapRadius = (): number => currentSnapRadius(COARSE_POINTER_SNAP_RADIUS_PX)
+
+  /**
+   * Move the provisional point to where the finger is, and light the marker.
+   *
+   * The touch equivalent of `updateHover`, and it does the same three things
+   * for the same reasons: the tool gets the provisional point (so the preview
+   * line and any rejection follow the finger live), `hoverSnap` gets the same
+   * answer recomputed from the same pure function (so the marker can show its
+   * kind), and `lastPointerWorldPosition` gets the raw position — which on a
+   * phone is the ONLY way select mode's Split button ever gets a position to
+   * split at, there being no mouse move to have recorded one.
+   */
+  const updateTouchHover = (clientX: number, clientY: number): void => {
+    const worldPosition = worldPositionAt(clientX, clientY)
+    lastPointerWorldPosition = worldPosition
+    if (!worldPosition) {
+      tool.clearHover()
+      hoverSnap = undefined
+      return
+    }
+    const snapRadius = touchSnapRadius()
+    tool.hover(worldPosition, false, snapRadius)
+    hoverSnap = resolveSnap(network, worldPosition, snapRadius)
+  }
+
+  /** Withdraw the provisional point without touching the placed ones, and put
+   * the marker out. What a `dragCancel` means: the drag is off, the road is
+   * not. */
+  const discardPendingPoint = (): void => {
+    tool.clearHover()
+    hoverSnap = undefined
+  }
+
+  /**
+   * What a tap, or the lift at the end of a drag, does at a screen position:
+   * place a point in draw mode, pick a road in select mode.
+   *
+   * The mode split is the same one `onPointerUp` makes for a mouse click, and
+   * for the same reason — a click and a tap are the same intent. What it does
+   * NOT reproduce is the double-click timer: `GestureRecogniser` has already
+   * resolved tap from double tap by the time this is called, so there is
+   * nothing to defer and no 300ms of latency to add to every road point.
+   */
+  const placeOrPickAtTouch = (clientX: number, clientY: number): void => {
+    const worldPosition = worldPositionAt(clientX, clientY)
+    lastPointerWorldPosition = worldPosition
+    // A finger on the sky. Nothing to place, and the pending point goes with
+    // it rather than being left pointing at wherever the finger was last over
+    // ground.
+    if (!worldPosition) {
+      discardPendingPoint()
+      return
+    }
+
+    if (toolMode === 'select') {
+      discardPendingPoint()
+      pickRoadAt(worldPosition)
+      return
+    }
+
+    const snapRadius = touchSnapRadius()
+    tool.place(worldPosition, false, snapRadius)
+    // `place` clears the tool's own provisional point, so the preview line now
+    // ends here. The marker stays, on the point just placed and in the colour
+    // of what it snapped to — see decision 2 above.
+    hoverSnap = resolveSnap(network, worldPosition, snapRadius)
+  }
+
+  /** Hand one two-finger sample to the rig. No arithmetic here on purpose:
+   * every sign and unit conversion is in `render/cameraGesture.ts`, where it
+   * is tested. */
+  const applyTwoFinger = (sample: Extract<Gesture, { kind: 'twoFinger' }>): void => {
+    const move = cameraMoveForTwoFinger(sample, {
+      distance: rig.distance,
+      verticalFovDegrees: CAMERA_VERTICAL_FOV,
+      viewportHeightPx: Math.max(1, canvas.clientHeight),
+    })
+    rig.pan(move.pan.dRight, move.pan.dForward)
+    rig.zoom(move.zoomFactor)
+    rig.orbit(move.dAzimuth, 0)
+  }
+
+  const handleGesture = (gesture: Gesture): void => {
+    switch (gesture.kind) {
+      case 'tap':
+        placeOrPickAtTouch(gesture.x, gesture.y)
+        return
+
+      case 'doubleTap':
+        // Draw mode: build it. Through `runAction`, so the double tap, the
+        // Build button and Enter are one implementation and not three. The
+        // point under the second tap is NOT placed — the recogniser already
+        // reported the first tap of the pair, which placed it (see
+        // `DOUBLE_TAP_WINDOW`, which explains why reporting it immediately is
+        // worth more than the 300ms it would cost to withhold it).
+        if (toolMode === 'draw') {
+          runAction({ kind: 'commit' })
+          return
+        }
+        // Select mode has nothing to commit, and a second click there has
+        // always been an ordinary second pick. Same here.
+        placeOrPickAtTouch(gesture.x, gesture.y)
+        return
+
+      case 'dragStart':
+      case 'dragMove':
+        // The live preview, and the whole reason a drag exists as well as a
+        // tap: the marker, the snap colour and any rejection message are all
+        // on screen while the finger is still down and can still be moved.
+        updateTouchHover(gesture.x, gesture.y)
+        return
+
+      case 'dragEnd':
+        placeOrPickAtTouch(gesture.x, gesture.y)
+        return
+
+      case 'dragCancel':
+        // The drag was taken away — a second finger arriving for the camera,
+        // or the browser claiming the pointer. Never a placement.
+        discardPendingPoint()
+        return
+
+      case 'twoFingerStart':
+        // Belt and braces. A drag interrupted by a second finger already
+        // produced a `dragCancel` immediately before this, so there is
+        // normally nothing left to discard; doing it here as well makes "a
+        // camera gesture never leaves a point half-placed" a property of this
+        // handler rather than of an ordering in another module.
+        discardPendingPoint()
+        return
+
+      case 'twoFinger':
+        applyTwoFinger(gesture)
+        return
+
+      case 'twoFingerEnd':
+        return
+    }
+  }
+
+  const handleGestures = (produced: readonly Gesture[]): void => {
+    for (const gesture of produced) handleGesture(gesture)
+  }
+
+  /**
+   * Release the capture taken in `onPointerDown`.
+   *
+   * Browsers release implicit capture on `pointerup`/`pointercancel` by
+   * themselves, but this one was taken explicitly and is released explicitly —
+   * the same shape `endDrag` already uses for the mouse, and the same reason:
+   * a capture left held is invisible until the next gesture behaves oddly.
+   */
+  const releaseTouchCapture = (pointerId: number): void => {
+    if (canvas.hasPointerCapture(pointerId)) canvas.releasePointerCapture(pointerId)
   }
 
   const onPointerDown = (event: PointerEvent): void => {
+    if (isTouch(event)) {
+      // Captured immediately. Without it a finger that slides off the edge of
+      // the canvas mid-drag stops delivering events entirely, so the drag
+      // never ends: no `dragEnd`, no `dragCancel`, and a provisional point
+      // frozen on screen until the player taps something else.
+      canvas.setPointerCapture(event.pointerId)
+      handleGestures(gestures.down(event.pointerId, event.clientX, event.clientY, event.timeStamp))
+      return
+    }
+
     if (drag) return
 
     let mode: DragMode
@@ -1968,6 +2331,11 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   }
 
   const onPointerMove = (event: PointerEvent): void => {
+    if (isTouch(event)) {
+      handleGestures(gestures.move(event.pointerId, event.clientX, event.clientY, event.timeStamp))
+      return
+    }
+
     if (drag && drag.pointerId === event.pointerId) {
       const dx = event.clientX - drag.lastX
       const dy = event.clientY - drag.lastY
@@ -2025,6 +2393,12 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   }
 
   const onPointerUp = (event: PointerEvent): void => {
+    if (isTouch(event)) {
+      releaseTouchCapture(event.pointerId)
+      handleGestures(gestures.up(event.pointerId, event.timeStamp))
+      return
+    }
+
     // A mouse reuses one pointerId across every button, so a right-button-up
     // while the left button still holds this drag must not be mistaken for
     // ending it — only the button that started the drag can end it. Leave
@@ -2042,8 +2416,7 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     // gesture (drag-vs-click already resolved above) and pointer-to-ground
     // machinery draw mode's placement uses.
     if (toolMode === 'select') {
-      const pickedRoadId = selectTool.select(worldPosition)
-      setMessage(pickedRoadId === undefined ? 'Nothing there to select.' : 'Selected a road.')
+      pickRoadAt(worldPosition)
       return
     }
 
@@ -2055,17 +2428,36 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
       // include where the player just clicked, not silently end one point
       // short — then commits rather than placing a third point.
       cancelPendingClick()
-      tool.place(worldPosition, suppressSnap)
+      tool.place(worldPosition, suppressSnap, currentSnapRadius())
       attemptCommit()
     } else {
       pendingClickTimer = window.setTimeout(() => {
         pendingClickTimer = undefined
-        tool.place(worldPosition, suppressSnap)
+        // Evaluated at the moment the deferred placement actually fires, not
+        // captured at click time: the radius depends on the camera's CURRENT
+        // distance and the canvas's current size, and 300ms is long enough
+        // for either to have moved.
+        tool.place(worldPosition, suppressSnap, currentSnapRadius())
       }, DOUBLE_CLICK_MS)
     }
   }
 
+  /**
+   * The browser took the pointer away.
+   *
+   * Routine on mobile rather than exceptional — a system edge gesture, a
+   * notification shade, a call arriving — which is why the touch branch does
+   * real work here instead of treating it as an error path. `cancel`, not
+   * `up`: whatever was in progress is abandoned, so a stolen pointer can
+   * never be mistaken for a player finishing a road point.
+   */
   const onPointerCancel = (event: PointerEvent): void => {
+    if (isTouch(event)) {
+      releaseTouchCapture(event.pointerId)
+      handleGestures(gestures.cancel(event.pointerId, event.timeStamp))
+      return
+    }
+
     endDrag(event)
   }
 
@@ -2135,6 +2527,11 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     }
     toolMode = next
     setMessage('')
+    // The bar swaps to the new mode's own controls, and its mode button
+    // relabels. Both matter on a phone, where the message line's mode prefix
+    // is the only other place the mode appears and is gone as soon as
+    // anything else is said.
+    syncControlBar()
   }
 
   const handleDeleteSelected = (): void => {
@@ -2195,77 +2592,86 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
     }
   }
 
-  const onKeyDown = (event: KeyboardEvent): void => {
-    if (event.key === 'Tab') {
-      // The browser's own default would move focus off the canvas.
-      event.preventDefault()
-      switchToolMode(toolMode === 'draw' ? 'select' : 'draw')
-      return
-    }
-
-    // Every other key is mode-specific. Draw mode already used Backspace for
-    // "undo the last point"; select mode uses the same key for "delete the
-    // selected road". Branching on mode up front, rather than trying to fold
-    // both into one switch, is what keeps a key from firing in the mode it
-    // does not belong to.
-    if (toolMode === 'draw') {
-      switch (event.key) {
-        case 'Enter':
-          event.preventDefault()
-          cancelPendingClick()
-          attemptCommit()
-          break
-        case 'Escape':
-          event.preventDefault()
-          cancelPendingClick()
-          tool.cancel()
-          break
-        case 'Backspace':
-          event.preventDefault()
-          cancelPendingClick()
-          tool.undoLastPoint()
-          break
-        case '1':
-        case '2':
-        case '3':
-        case '4':
-          event.preventDefault()
-          cancelPendingClick()
-          setDrawClass(Number(event.key) - 1)
-          break
-        default:
-          break
-      }
-      return
-    }
-
-    switch (event.key) {
-      case 'Escape':
-        event.preventDefault()
+  /**
+   * Do one named action. THE dispatcher — the only place any of these are
+   * spelled out.
+   *
+   * Both input paths end here: `onKeyDown` looks a key up in
+   * `tool/sceneActions.ts` and calls this with what it finds, and every button
+   * on the control bar calls it with the action that button names. That is
+   * what makes "the button does exactly what the key does" a structural fact
+   * rather than a thing two implementations happen to agree on today.
+   *
+   * The body is a transcription of the `switch` statements that used to live
+   * in `onKeyDown`, `cancelPendingClick()` calls included and in the same
+   * places. Those calls are not incidental: draw mode's Enter/Escape/
+   * Backspace/class keys each cancelled the pending single-click timer so a
+   * click the player has already moved on from cannot land 300ms later as a
+   * phantom point (see `cancelPendingClick`), and select mode's actions never
+   * did, because select mode has no pending click to cancel. `toggleMode`
+   * does not call it either, because `switchToolMode` already does when it is
+   * draw mode being left.
+   *
+   * Never called with an action the current mode does not offer: `onKeyDown`
+   * asks `actionForKey` for this mode, and the bar shows only
+   * `controlsForMode(toolMode)`. Both read the same table.
+   */
+  const runAction = (action: SceneAction): void => {
+    switch (action.kind) {
+      case 'toggleMode':
+        switchToolMode(toolMode === 'draw' ? 'select' : 'draw')
+        return
+      case 'commit':
+        cancelPendingClick()
+        attemptCommit()
+        return
+      case 'cancelDrawing':
+        cancelPendingClick()
+        tool.cancel()
+        return
+      case 'undoLastPoint':
+        cancelPendingClick()
+        tool.undoLastPoint()
+        return
+      case 'setDrawClass':
+        cancelPendingClick()
+        setDrawClass(action.index)
+        return
+      case 'clearSelection':
         selectTool.clear()
         setMessage('')
-        break
-      case 'Delete':
-      case 'Backspace':
-        event.preventDefault()
+        return
+      case 'deleteSelected':
         handleDeleteSelected()
-        break
-      case 's':
-      case 'S':
-        event.preventDefault()
+        return
+      case 'splitSelected':
         handleSplitSelected()
-        break
-      case ']':
-        event.preventDefault()
-        handleReclassifySelected(1)
-        break
-      case '[':
-        event.preventDefault()
-        handleReclassifySelected(-1)
-        break
-      default:
-        break
+        return
+      case 'reclassifySelected':
+        handleReclassifySelected(action.direction)
+        return
     }
+  }
+
+  /**
+   * Turn a keypress into an action and run it.
+   *
+   * The mode branching and the per-mode key lists this used to hold now live
+   * in `tool/sceneActions.ts`, where they can be tested — this file has no
+   * unit tests, and the key map is exactly the part of it a regression would
+   * hide in. `sceneActions.test.ts` asserts every key this handler used to
+   * accept, in both modes, against the behaviour it had before the move.
+   *
+   * `preventDefault()` if and only if an action was found, which reproduces
+   * the old handler exactly: it called `preventDefault()` inside every `case`
+   * and did nothing in its `default`. So `[` while drawing, or Enter while
+   * selecting, still reach the browser untouched.
+   */
+  const onKeyDown = (event: KeyboardEvent): void => {
+    const action = actionForKey(event.key, toolMode)
+    if (action === undefined) return
+    event.preventDefault()
+    runAction(action)
   }
 
   canvas.addEventListener('pointerdown', onPointerDown)
@@ -2281,13 +2687,31 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   // A shallow depth of field, sharp only around what the camera is orbiting
   // and blurring both nearer and farther, is what reads as a miniature rather
   // than a smeared screenshot — see `tiltShift.ts`.
-  const initialWidth = Math.max(1, canvas.clientWidth)
-  const initialHeight = Math.max(1, canvas.clientHeight)
   // Captured once: this renderer's own pixel ratio never changes after
   // construction, and `EffectComposer` itself captures it the same way at
   // construction time, so recomputing it later would only ever repeat this
   // value.
   const composerPixelRatio = renderer.getPixelRatio()
+
+  // The canvas's size at construction, and everything derived from it, from
+  // the one module that owns that derivation (`render/viewport.ts`). The
+  // `null` branch is the zero-sized-canvas case that function documents;
+  // unreachable here in practice, because `renderPixelRatio` above guarantees
+  // a positive finite ratio and a canvas in the document has a positive box
+  // by the time this runs — but reported rather than papered over with a
+  // made-up size, because a scene silently built at the wrong resolution is
+  // precisely the defect this task exists to remove.
+  const initialMetrics = viewportMetrics(
+    canvas.clientWidth,
+    canvas.clientHeight,
+    composerPixelRatio,
+  )
+  if (!initialMetrics) {
+    throw new Error(
+      `cannot build the scene: canvas is ${canvas.clientWidth}x${canvas.clientHeight} CSS px ` +
+        `at pixel ratio ${composerPixelRatio}`,
+    )
+  }
 
   // The pass reads depth (see `TILT_SHIFT_FRAGMENT_SHADER`), so the render
   // target it draws into needs a real depth *texture* — a composer's default
@@ -2305,10 +2729,13 @@ export const drawRoadScene = (canvas: HTMLCanvasElement): (() => void) => {
   // target is supplied explicitly (for the depth texture, above) and so has
   // to restate it rather than inherit it.
   const composerRenderTarget = new THREE.WebGLRenderTarget(
-    initialWidth * composerPixelRatio,
-    initialHeight * composerPixelRatio,
+    initialMetrics.bufferWidth,
+    initialMetrics.bufferHeight,
     {
-      depthTexture: new THREE.DepthTexture(initialWidth * composerPixelRatio, initialHeight * composerPixelRatio),
+      depthTexture: new THREE.DepthTexture(
+        initialMetrics.bufferWidth,
+        initialMetrics.bufferHeight,
+      ),
       type: THREE.HalfFloatType,
     },
   )
@@ -2367,8 +2794,8 @@ void main() {
       focusFalloff: FOCUS_FALLOFF_METRES,
       near: camera.near,
       far: camera.far,
-      texelWidth: 1 / (initialWidth * composerPixelRatio),
-      texelHeight: 1 / (initialHeight * composerPixelRatio),
+      texelWidth: initialMetrics.texelWidth,
+      texelHeight: initialMetrics.texelHeight,
     }),
     vertexShader: TILT_SHIFT_VERTEX_SHADER,
     fragmentShader: TILT_SHIFT_FRAGMENT_SHADER,
@@ -2414,12 +2841,18 @@ void main() {
   let lastWidth = -1
   let lastHeight = -1
   const resize = (width: number, height: number) => {
-    if (width <= 0 || height <= 0) return
-    if (width === lastWidth && height === lastHeight) return
-    lastWidth = width
-    lastHeight = height
-    renderer.setSize(width, height, false)
-    camera.aspect = width / height
+    // Every number below comes from `render/viewport.ts`, which also decides
+    // what counts as a box worth rendering into at all (a zero-sized canvas
+    // is a normal transient, not an error) — see `viewportMetrics`. Nothing
+    // arithmetic is computed in this file; what is left here is the three.js
+    // calls that apply it, and the memo that stops them running every frame.
+    const metrics = viewportMetrics(width, height, composerPixelRatio)
+    if (!metrics) return
+    if (metrics.width === lastWidth && metrics.height === lastHeight) return
+    lastWidth = metrics.width
+    lastHeight = metrics.height
+    renderer.setSize(metrics.width, metrics.height, false)
+    camera.aspect = metrics.aspect
     camera.updateProjectionMatrix()
 
     // The composer owns render targets sized to the canvas — resizing the
@@ -2427,13 +2860,13 @@ void main() {
     // `EffectComposer.setSize` resizes both of its internal buffers (and,
     // with them, the depth texture attached to each), so no separate
     // render-target recreation is needed here.
-    composer.setSize(width, height)
+    composer.setSize(metrics.width, metrics.height)
     // Not a `THREE.Vector2` (see `TiltShiftUniforms`, above, and
     // `createTiltShiftUniforms` in `tiltShift.ts`) — a plain `{x, y}` pair, so
     // set the two fields directly rather than calling a `.set()` that does
     // not exist on this shape.
-    tiltShiftUniforms.uTexelSize.value.x = 1 / (width * composerPixelRatio)
-    tiltShiftUniforms.uTexelSize.value.y = 1 / (height * composerPixelRatio)
+    tiltShiftUniforms.uTexelSize.value.x = metrics.texelWidth
+    tiltShiftUniforms.uTexelSize.value.y = metrics.texelHeight
   }
 
   const resizeObserver = new ResizeObserver((entries) => {
@@ -2555,5 +2988,8 @@ void main() {
 
     renderer.dispose()
     messageEl.remove()
+    // Same reason as the line above: both overlays were appended to a host
+    // this function does not own, so both have to be taken back off it.
+    controlBar.dispose()
   }
 }

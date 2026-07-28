@@ -70,6 +70,80 @@ describe('DrawTool', () => {
     expect(end.position.y).toBeCloseTo(0, 6)
   })
 
+  describe('withdrawing the provisional point', () => {
+    it('drops the hovered position without dropping the placed ones', () => {
+      const tool = new DrawTool(new RoadNetwork(), 'rural')
+      tool.place({ x: 0, y: 0 })
+      tool.place({ x: 200, y: 0 })
+      // Somewhere a third point would visibly bend the preview to, for the
+      // same reason the "drops the hovered position once it is placed" test
+      // hovers off the line: a hover on the existing alignment could not tell
+      // a cleared hover apart from a surviving one.
+      tool.hover({ x: 400, y: 300 })
+      tool.clearHover()
+
+      expect(tool.points).toEqual([
+        { x: 0, y: 0 },
+        { x: 200, y: 0 },
+      ])
+      expect(tool.preview?.ok).toBe(true)
+      if (!tool.preview?.ok) return
+      // Straight, 200m, ending where the second point was placed — none of
+      // which is true if the withdrawn point is still pending.
+      expect(tool.preview.alignment.length).toBeCloseTo(200, 6)
+      const end = tool.preview.alignment.poseAt(tool.preview.alignment.length)
+      expect(end.position.x).toBeCloseTo(200, 6)
+      expect(end.position.y).toBeCloseTo(0, 6)
+    })
+
+    it('leaves a single placed point with nothing to preview, as before it was hovered', () => {
+      const tool = new DrawTool(new RoadNetwork(), 'rural')
+      tool.place({ x: 0, y: 0 })
+      tool.hover({ x: 200, y: 0 })
+      expect(tool.preview?.ok).toBe(true)
+
+      tool.clearHover()
+      expect(tool.preview).toBeUndefined()
+      expect(tool.points).toHaveLength(1)
+    })
+
+    it('is not `cancel`: the road being drawn survives', () => {
+      const tool = new DrawTool(new RoadNetwork(), 'rural')
+      tool.place({ x: 0, y: 0 })
+      tool.place({ x: 200, y: 0 })
+      tool.hover({ x: 400, y: 300 })
+      tool.clearHover()
+
+      expect(tool.points).toHaveLength(2)
+    })
+
+    it('does nothing at all when nothing is hovered', () => {
+      const tool = new DrawTool(new RoadNetwork(), 'rural')
+      tool.place({ x: 0, y: 0 })
+      tool.place({ x: 200, y: 0 })
+
+      expect(() => tool.clearHover()).not.toThrow()
+      tool.clearHover()
+      expect(tool.points).toHaveLength(2)
+      expect(tool.preview?.ok).toBe(true)
+    })
+
+    it('a withdrawn point is not placed by a later commit', () => {
+      const net = new RoadNetwork()
+      const tool = new DrawTool(net, 'rural')
+      tool.place({ x: 0, y: 0 })
+      tool.place({ x: 400, y: 0 })
+      tool.hover({ x: 400, y: 400 })
+      tool.clearHover()
+
+      const result = tool.commit()
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+      // 400m of straight road, not a right-angled 800m one.
+      expect(net.road(result.roadId).alignment.length).toBeCloseTo(400, 6)
+    })
+  })
+
   it('snaps a placed point to a nearby node', () => {
     const net = new RoadNetwork()
     const existing = net.addRoad(straight(0, 0, 0, 100), 'rural')
