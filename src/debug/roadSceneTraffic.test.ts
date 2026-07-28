@@ -2,12 +2,13 @@ import { describe, it, expect } from 'vitest'
 import { buildSceneContent, drivableRoads, solveNetwork, type SceneContent } from './roadScene'
 import { MAX_JUNCTION_ELEVATION_SPREAD } from '../mesh/networkMesh'
 import type { RoadWithEntry } from '../mesh/junctionClearance'
-import { formationHalfWidth, ROAD_CLASSES } from '../network/roadClass'
+import { formationHalfWidth, ROAD_CLASSES, totalPavementThickness } from '../network/roadClass'
+import { designElevationAtStation } from '../terrain/groundProfile'
 import type { NetworkNode, RoadId } from '../network/graph'
 import { distance, type Vec2 } from '../geometry/vec2'
 import { FIXED_STEP, Fleet } from '../traffic/fleet'
 import { VEHICLE_LENGTH } from '../traffic/lane'
-import { placeVehicle, type VehiclePose } from '../render/vehiclePlacement'
+import { laneCentreOffset, placeVehicle, type VehiclePose } from '../render/vehiclePlacement'
 import { VEHICLE_WIDTH } from '../render/trafficView'
 
 /**
@@ -40,6 +41,15 @@ const content: SceneContent = buildSceneContent()
 const drivable: readonly RoadWithEntry[] = drivableRoads(content.network).filter(
   (road) => (content.designs.get(road.id)?.length ?? 0) > 0,
 )
+
+/**
+ * Where each road is carried on a structure.
+ *
+ * `buildSceneContent` does not return the spans — `SceneContent` deliberately
+ * carries only what the renderer needs — so they are re-solved once here and
+ * shared, rather than re-solved in each test that wants them.
+ */
+const spans = solveNetwork(content.terrain, content.network).spans
 
 /** The T junction: the one node where more than two road ends meet. */
 const junctionNode = (): NetworkNode => {
@@ -290,8 +300,6 @@ describe('the junction the demo is built around', () => {
     // The structures pipeline is the demo's only end-to-end evidence, and
     // renumbering the stations moves every span. Measured from the junction
     // outward, the east arm crosses the ravine between 273 and 423.
-    const { spans } = solveNetwork(content.terrain, content.network)
-
     const east = drivable.find(
       (road) => road.className === 'rural' && poseOf(road, road.alignment.length).x > JUNCTION.x,
     )!
@@ -307,5 +315,87 @@ describe('the junction the demo is built around', () => {
     // ground and needs no structure.
     const gravel = drivable.find((road) => road.className === 'gravel')!
     expect(spans.get(gravel.id) ?? []).toHaveLength(0)
+  })
+})
+
+/**
+ * The other kind of deck: a bridge the TERRAIN asked for, not a crossing.
+ *
+ * `overpassTraffic.test.ts` measures a car on a deck that exists because
+ * `requiredStructureRanges` forced one under a lifted road. This is the
+ * ordinary case that got there first and had never been checked with traffic on
+ * it: the east arm's design line runs 17.6m over a ravine, `classifySupport`
+ * calls those stations 'structure' on height alone, and the span between 273
+ * and 423 is the result.
+ *
+ * Worth its own test rather than folded into the overpass one because the two
+ * spans are produced by different code paths — height versus a required range —
+ * and only the elevation they end up at is shared.
+ */
+describe('traffic on the demo scene’s valley bridge', () => {
+  const east = drivable.find(
+    (road) => road.className === 'rural' && poseOf(road, road.alignment.length).x > JUNCTION.x,
+  )!
+  const span = (spans.get(east.id) ?? [])[0]!
+  const design = content.designs.get(east.id)!
+  const rc = ROAD_CLASSES[east.className]
+
+  /** Top of the deck slab: the design line less the pavement stack resting on
+   * it — `buildBridgeMesh`'s own `deckClearance` default, restated so the
+   * vehicle can be measured against it. */
+  const deckTopAt = (station: number): number =>
+    designElevationAtStation(design, station) - totalPavementThickness(rc)
+
+  const onBridge = (() => {
+    const fleet = new Fleet()
+    fleet.sync(drivable)
+    const samples: { station: number; aboveDeck: number; aboveGround: number }[] = []
+
+    for (let frame = 0; frame < Math.round(600 / FIXED_STEP); frame++) {
+      fleet.advance(FIXED_STEP)
+      fleet.forEachVehicle((roadId, station) => {
+        if (roadId !== east.id) return
+        if (station < span.fromStation || station > span.toStation) return
+        const pose = poseOf(east, station)
+        samples.push({
+          station,
+          aboveDeck: pose.z - deckTopAt(station),
+          aboveGround: pose.z - content.terrain.sample(pose.x, pose.y),
+        })
+      })
+    }
+    return samples
+  })()
+
+  it('drives cars the whole way across the span', () => {
+    expect(span.fromStation).toBeCloseTo(273, 6)
+    expect(span.toStation).toBeCloseTo(423, 6)
+    expect(onBridge.length).toBeGreaterThan(1000)
+
+    const stations = onBridge.map((s) => s.station)
+    expect(Math.min(...stations)).toBeLessThan(span.fromStation + 5)
+    expect(Math.max(...stations)).toBeGreaterThan(span.toStation - 5)
+  })
+
+  it('rides the deck rather than the ravine floor under it', () => {
+    // Same constant as the overpass: the pavement stack less the crossfall drop
+    // out to the middle of the nearside lane. It is a property of the road
+    // class, so a car on a valley bridge and a car on an overpass sit at the
+    // identical height above their respective decks.
+    const rideHeight =
+      totalPavementThickness(rc) - Math.abs(laneCentreOffset(rc)) * rc.crossfall
+    expect(rideHeight).toBeCloseTo(0.45625, 9)
+
+    for (const sample of onBridge) {
+      expect(sample.aboveDeck).toBeCloseTo(rideHeight, 9)
+      expect(sample.aboveDeck).toBeGreaterThan(0)
+    }
+
+    // And the drop underneath, which is the whole reason there is a bridge
+    // here: a car that read natural ground instead of the design line would be
+    // seventeen metres lower at the deepest point.
+    const aboveGround = onBridge.map((s) => s.aboveGround)
+    expect(Math.min(...aboveGround)).toBeGreaterThan(9)
+    expect(Math.max(...aboveGround)).toBeCloseTo(17.554, 3)
   })
 })
